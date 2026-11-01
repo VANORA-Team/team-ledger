@@ -116,6 +116,57 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(self.post('/logout').status_code,200)
         self.assertEqual(self.client.get('/api/entries').status_code,401)
 
+    def test_setup_and_login_accept_short_and_long_passwords(self):
+        for index, password in enumerate(('a', '密' * 256)):
+            with self.subTest(length=len(password)), patch.object(config, 'DB_PATH', config.DATA / f'setup-{index}.sqlite3'):
+                with TestClient(app) as client:
+                    invalid = client.post('/api/bootstrap', json={'username':'owner','name':'Owner','password':''})
+                    self.assertEqual(invalid.status_code, 400, invalid.text)
+                    response = client.post('/api/bootstrap', json={'username':'owner','name':'Owner','password':password})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    wrong = client.post('/api/login', json={'username':'owner','password':password + 'x'})
+                    self.assertEqual(wrong.status_code, 401, wrong.text)
+                    login = client.post('/api/login', json={'username':'owner','password':password})
+                    self.assertEqual(login.status_code, 200, login.text)
+
+    def test_member_password_creation_reset_and_change_accept_any_length(self):
+        for index, (initial, replacement) in enumerate((('a', '密' * 256), ('密' * 256, 'b'))):
+            with self.subTest(initial_length=len(initial), replacement_length=len(replacement)):
+                username = f'member{index}'
+                created = self.post('/members', {'name':'Member','username':username,'password':initial})
+                self.assertEqual(created.status_code, 200, created.text)
+                member_id = created.json()['id']
+                with TestClient(app) as client:
+                    login = client.post('/api/login', json={'username':username,'password':initial})
+                    self.assertEqual(login.status_code, 200, login.text)
+                    reset = self.client.patch(f'/api/members/{member_id}', json={'password':replacement}, headers=self.headers)
+                    self.assertEqual(reset.status_code, 200, reset.text)
+                    self.assertEqual(client.get('/api/session').status_code, 401)
+                    self.assertEqual(client.post('/api/login', json={'username':username,'password':initial}).status_code, 401)
+                    login = client.post('/api/login', json={'username':username,'password':replacement})
+                    self.assertEqual(login.status_code, 200, login.text)
+                    changed = client.post('/api/password', json={'old_password':replacement,'password':initial},
+                                          headers={'X-CSRF-Token':login.json()['csrf']})
+                    self.assertEqual(changed.status_code, 200, changed.text)
+                    self.assertEqual(client.get('/api/session').json()['csrf'], changed.json()['csrf'])
+                    self.assertEqual(client.post('/api/login', json={'username':username,'password':replacement}).status_code, 401)
+                    login = client.post('/api/login', json={'username':username,'password':initial})
+                    self.assertEqual(login.status_code, 200, login.text)
+
+    def test_empty_and_non_string_passwords_remain_invalid(self):
+        member = self.new_member()
+        for password in ('', None, 123, False, [], {}):
+            with self.subTest(password=password):
+                created = self.post('/members', {'name':'Member','username':'invalid','password':password})
+                self.assertEqual(created.status_code, 400, created.text)
+                reset = self.client.patch(f'/api/members/{member["id"]}', json={'password':password}, headers=self.headers)
+                self.assertEqual(reset.status_code, 400, reset.text)
+                changed = self.post('/password', {'old_password':'test-password-123','password':password})
+                self.assertEqual(changed.status_code, 400, changed.text)
+                login = self.client.post('/api/login', json={'username':'alice','password':password})
+                self.assertEqual(login.status_code, 401, login.text)
+        self.assertEqual(self.client.get('/api/session').status_code, 200)
+
     def test_last_member_cannot_be_disabled(self):
         response=self.client.patch('/api/members/1',json={'active':False},headers=self.headers)
         self.assertEqual(response.status_code,400)

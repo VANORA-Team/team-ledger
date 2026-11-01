@@ -657,7 +657,7 @@ document.addEventListener('click',async event=>{
     try{await api('/members/'+m.id,'PATCH',{active:m.active?0:1});await refresh();toast('已更新成员状态');}catch(e){toast(e.message,true);}return;
   }
   if(b.hasAttribute('data-reset-password')){
-    const m=state.members.find(m=>m.id===Number(b.dataset.resetPassword));const value=prompt(`为 ${m.name} 设置新密码（10–128 位）。原登录会话将失效：`);if(value===null)return;
+    const m=state.members.find(m=>m.id===Number(b.dataset.resetPassword));const value=prompt(`为 ${m.name} 设置新密码。原登录会话将失效：`);if(value===null)return;
     try{await api('/members/'+m.id,'PATCH',{password:value});toast('密码已重置，请把新密码私下交给成员');}catch(e){toast(e.message,true);}return;
   }
 });
