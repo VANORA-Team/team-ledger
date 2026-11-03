@@ -2,7 +2,7 @@
 
 [![Docker build](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml)
 
-供扁平化小团队使用的 Web + Telegram 记账系统。每位成员都有独立账号，拥有相同的管理权限。记账后直接待报销，付款后标记已报销，无需审核，没有分类功能。
+供扁平化小团队使用的 Web + Telegram / 飞书记账系统。每位成员都有独立账号，拥有相同的管理权限。记账后直接待报销，付款后标记已报销，无需审核，没有分类功能。
 
 ## 已实现
 
@@ -184,6 +184,20 @@ AI_MAX_ACTIONS=20          # 单次最多生成的操作数
 
 接口实现参考 [OpenAI Chat API](https://developers.openai.com/api/reference/resources/chat)。不同兼容服务的模型和 JSON 模式支持可能不同，需使用该服务实际提供的配置。
 
+## 接入飞书
+
+飞书使用**企业自建应用机器人**和长连接，仅支持成员私聊。每位成员须单独绑定 Web 账号；群消息不会被处理。可用文字直接记账和查询，配置 AI 后也可使用自然语言。飞书当前支持新增账目和查询；修改、作废、删除、报销和分红请在 Web 或 Telegram 操作。
+
+1. 在飞书开放平台创建企业自建应用，启用机器人，申请「获取用户发给机器人的单聊消息」（`im:message.p2p_msg:readonly`）及「以应用的身份发消息」（`im:message:send_as_bot`）权限。
+2. 在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，运行 `python -m app.feishu`；Docker 环境运行 `docker compose --profile feishu up -d --build`。每个数据库只运行一个飞书 worker，也不要让其他服务使用同一个飞书应用接收事件。
+3. 在应用「事件与回调」选择「使用长连接接收事件」，添加「接收消息」（`im.message.receive_v1`）。保存长连接订阅方式前，worker 必须已经在线。发布应用新版本并完成管理员审批，确保成员在应用可用范围内。
+4. 成员登录 Web「机器人与 AI」，生成飞书绑定码，在飞书机器人**私聊**发送 `绑定 绑定码`。绑定码有效 10 分钟，一次使用后失效。Telegram 与飞书绑定彼此独立。
+5. 私聊发送 `支出 35 CNY 打车` 或 `收入 100 CNY 收款`，核对清单后按提示发送 `确认 确认码` 才会入账；发送 `取消 确认码` 可取消。也可发送 `最近账目`、`余额`、`待报销` 或 `帮助`。配置 AI 后可说「昨天打车 35 元，再记一笔午餐 20 元」或自然语言查询，写入仍须确认；一次确认会执行预览中的全部有效新增账目。
+
+长连接不需要公网回调地址。收到的消息和待发送回复先持久化；重复消息和确认不会重复入账，发送失败会重试。飞书发送接口的去重有平台有效期，长时间断线后回复可能重复。输入和已发送回复在处理成功后清空，消息 ID 用于防重。飞书应用密钥只存放在服务端环境变量中。
+
+飞书配置步骤与权限参考：[使用长连接接收事件](https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-)、[机器人概述](https://open.feishu.cn/document/client-docs/bot-v3/bot-overview)。
+
 ## 接入 Telegram
 
 1. 在 Telegram 的 BotFather 创建机器人，取得 Token。
@@ -302,6 +316,7 @@ app/main.py       Web API、登录、成员、凭证、导出
 app/domain.py     记账与报销规则
 app/fx.py         汇率与资金计算
 app/ai.py         AI 提取与预览
+app/feishu.py     飞书长连接私聊、记账确认与持久收发队列
 app/bot.py        Telegram 长轮询与持久回复队列
 app/bot_ui.py     Telegram 菜单、分页查询、可编辑草稿和操作确认
 app/db.py         SQLite 表与默认设置

@@ -25,5 +25,18 @@ services:
       disable: true
     volumes:
       - ledger-data:/app/data
+  feishu:
+    image: ${LEDGER_IMAGE:-ghcr.io/meowapi/team-ledger:latest}
+    build: .
+    restart: unless-stopped
+    profiles: [feishu]
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+    command: ["python", "-m", "app.feishu"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ledger-data:/app/data
 volumes:
   ledger-data:

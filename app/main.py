@@ -497,10 +497,33 @@ def integrations(request: Request):
     with db() as conn:
         conf = settings(conn)
         linked = conn.execute('SELECT telegram_id FROM tg_links WHERE user_id=?', (user['id'],)).fetchone()
+        feishu_linked = conn.execute('SELECT open_id FROM feishu_links WHERE user_id=?', (user['id'],)).fetchone()
     heartbeat = conf.get('bot_heartbeat', 0)
     return {'ai_configured': ai.configured(), 'bot_configured': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
             'bot_online': time.time() - heartbeat < 90, 'bot_username': conf.get('bot_username'),
-            'telegram_linked': bool(linked)}
+            'telegram_linked': bool(linked), 'feishu_linked': bool(feishu_linked),
+            'feishu_configured': bool(os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET'))}
+
+
+@app.post('/api/feishu/link-code')
+def feishu_link_code(request: Request):
+    user = current(request)
+    limited(request, 'link', 10)
+    code = secrets.token_urlsafe(12)
+    with db(write=True) as conn:
+        conn.execute('DELETE FROM feishu_link_codes WHERE user_id=? OR expires<?', (user['id'], int(time.time())))
+        conn.execute('INSERT INTO feishu_link_codes VALUES (?,?,?)', (digest(code), user['id'], int(time.time()) + 600))
+    return {'code': code, 'expires_in': 600}
+
+
+@app.post('/api/feishu/unlink')
+def feishu_unlink(request: Request):
+    user = current(request)
+    with db(write=True) as conn:
+        conn.execute('DELETE FROM feishu_pending WHERE user_id=?', (user['id'],))
+        conn.execute('DELETE FROM feishu_links WHERE user_id=?', (user['id'],))
+        conn.execute('DELETE FROM feishu_link_codes WHERE user_id=?', (user['id'],))
+    return {'ok': True}
 
 
 @app.post('/api/telegram/link-code')

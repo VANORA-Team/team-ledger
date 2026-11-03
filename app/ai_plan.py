@@ -946,7 +946,9 @@ def execute(conn, user, plan_id, selected):
     for card in chosen:
         resolved, kind = card['resolved'], card['type']
         if kind == 'create_entry':
-            entry = add_entry(conn, user, _create_body(resolved), 'ai', f'ai:{user["id"]}:{plan_id}:{card["index"]}')
+            entry = add_entry(conn, user, _create_body(resolved),
+                              'feishu' if row['source'] == 'feishu' else 'ai',
+                              f'ai:{user["id"]}:{plan_id}:{card["index"]}')
             results.append({'index': card['index'], 'type': kind, 'ok': True, 'entry_id': entry['id'],
                             'description': entry['description'], 'amount': entry['amount'], 'currency': entry['currency']})
         elif kind == 'edit_entry':
