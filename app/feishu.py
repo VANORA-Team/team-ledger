@@ -49,12 +49,17 @@ def accept_event(data):
         if not bot_mentions:
             return
         for mention in bot_mentions:
-            text = text.replace(mention.key, '')
+            key = getattr(mention, 'key', None)
+            if isinstance(key, str) and key:
+                text = text.replace(key, '')
         text = text.strip()
         if not text:
             text = '/start'
         text = feishu_ui.PREFIX + json.dumps({'group': True, 'text': text,
                               'parent': getattr(msg, 'parent_id', None)}, ensure_ascii=False)
+    elif text.startswith(feishu_ui.PREFIX):
+        # Internal envelopes must only be constructed by the event adapter.
+        text = feishu_ui.PREFIX + json.dumps({'group': False, 'text': text}, ensure_ascii=False)
     with db(write=True) as conn:
         conn.execute('INSERT OR IGNORE INTO feishu_inbox(message_id,open_id,chat_id,text,created_at) VALUES (?,?,?,?,?)',
                      (message_id, open_id, chat_id, text, config.now()))

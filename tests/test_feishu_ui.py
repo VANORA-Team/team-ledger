@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 from unittest.mock import AsyncMock
-from app import feishu, feishu_ui
+from app import feishu, feishu_ui, config
 from app.db import db, set_setting
 from tests import test_ledger as base
 from tests import test_feishu as fixtures
@@ -33,7 +33,9 @@ class FeishuUiTest(unittest.TestCase):
 
     def click(self, event_id, token, sender='ou_alice', chat='oc_alice', group=False):
         text = feishu_ui.PREFIX + json.dumps({'action_token':token, 'group':group})
-        self.message(event_id, text, sender=sender, chat=chat)
+        with db(write=True) as conn:
+            conn.execute('INSERT INTO feishu_inbox(message_id,open_id,chat_id,text,created_at) VALUES (?,?,?,?,?)',
+                         (f'om_{event_id}', sender, chat, text, config.now()))
         self.assertTrue(feishu.process_one())
 
     def test_button_menu_creates_expense_and_replay_is_safe(self):
@@ -61,6 +63,16 @@ class FeishuUiTest(unittest.TestCase):
         self.click(3, token, chat='oc_other')
         with db() as conn:
             self.assertEqual(conn.execute('SELECT count(*) FROM fsui_drafts').fetchone()[0], 0)
+
+    def test_internal_envelope_prefix_in_user_text_cannot_block_the_queue(self):
+        self.bind()
+        self.message(1, feishu_ui.PREFIX + '{invalid')
+        self.assertTrue(feishu.process_one())
+        self.message(2, '/start')
+        self.assertTrue(feishu.process_one())
+        with db() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM feishu_inbox WHERE done=0').fetchone()[0], 0)
+            self.assertGreater(conn.execute('SELECT count(*) FROM fsui_outbox').fetchone()[0], 0)
 
     def test_buttons_reimburse_once_after_confirmation(self):
         self.bind()
