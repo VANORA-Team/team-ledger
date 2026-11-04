@@ -325,8 +325,13 @@ def save_settings(conn, user, body):
     chats = body.get('telegram_allowed_chats', conf['telegram_allowed_chats'])
     if not isinstance(chats, list) or len(chats) > 30 or any(not re.fullmatch(r'-?\d{1,20}', str(c)) for c in chats):
         fail('Telegram 群组 ID 格式不正确')
+    feishu_chats = body.get('feishu_allowed_chats', conf['feishu_allowed_chats'])
+    if not isinstance(feishu_chats, list) or len(feishu_chats) > 30 or any(
+            not isinstance(c, str) or not re.fullmatch(r'oc_[A-Za-z0-9_-]{1,100}', c) for c in feishu_chats):
+        fail('飞书群组 ID 格式不正确')
     values = dict(team_name=name, currencies=clean, default_currency=default, reference_currency=reference,
-                  telegram_allowed_chats=list(dict.fromkeys(str(c) for c in chats)))
+                  telegram_allowed_chats=list(dict.fromkeys(str(c) for c in chats)),
+                  feishu_allowed_chats=list(dict.fromkeys(feishu_chats)))
     for key, value in values.items():
         set_setting(conn, key, value)
     return settings(conn)

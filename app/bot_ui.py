@@ -14,6 +14,7 @@ from .domain import (add_entry, currency, delete_entry, edit_entry, entry_view, 
                      normalized_entry, text_value, transition, make_payment_quote, payment_preview)
 
 DELIVERY = ContextVar('telegram_delivery', default={})
+PLATFORM = ContextVar('bot_platform', default='telegram')
 PAGE_SIZE = 5
 STATUS = {'pending': '待报销', 'reimbursed': '已报销', 'draft': '草稿', 'posted': '已入账', 'voided': '已作废'}
 COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'), ('income', '记录团队收入'),
@@ -23,6 +24,12 @@ COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'
 
 
 def queue(conn, method, payload):
+    if PLATFORM.get() == 'feishu':
+        payload = dict(payload)
+        delivery = DELIVERY.get()
+        payload['_fs_actor'] = delivery.get('actor')
+        payload['_fs_group'] = delivery.get('group', False)
+        payload['_fs_chat'] = delivery.get('chat_id')
     conn.execute('INSERT INTO tg_outbox(method,payload) VALUES (?,?)', (method, json.dumps(payload, ensure_ascii=False)))
 
 
@@ -405,7 +412,9 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
                 fail('账目已更新，请重新打开详情后修改。')
             entry = edit_entry(conn, user, payload['_edit_id'], payload)
         else:
-            entry = add_entry(conn, user, payload, 'telegram', f'tg:draft:{token}')
+            source = PLATFORM.get()
+            entry = add_entry(conn, user, payload, source,
+                              f'{"tg" if source == "telegram" else source}:draft:{token}')
         conn.execute('DELETE FROM tg_drafts WHERE token=?', (token,))
         say(conn, chat_id, f'✅ 已{"保存修改" if payload.get("_edit_id") else "入账"} #{entry["id"]}\n{entry_description(entry)}\n{original(entry,conf)}\n' +
             ('已加入待报销，付款后可直接标记已报销。' if entry['status'] == 'pending' else STATUS[entry['status']]),
@@ -474,7 +483,7 @@ def handle(conn, update, ai_result=None, ai_error=None, rates=None, ai_context=N
         return
     if cb:
         queue(conn, 'answerCallbackQuery', {'callback_query_id': cb['id']})
-    if not private and chat_id not in conf['telegram_allowed_chats']:
+    if not private and chat_id not in conf['feishu_allowed_chats' if PLATFORM.get() == 'feishu' else 'telegram_allowed_chats']:
         return
     text = str(msg.get('text', '')).strip()[:2500] if not cb else ''
     command, argument = command_text(text, conf)
@@ -810,7 +819,7 @@ def ai_plan_deliver(conn, user, telegram_id, chat_id, plan, request_text='', his
 
 def ai_plan_handle_result(conn, user, telegram_id, chat_id, conf, result, context, rates, request_text='', history=None):
     plan = ai_plan.resolve(conn, user, conf, result, context or {'entries': []}, rates)
-    plan = ai_plan.store(conn, user, plan, 'telegram')
+    plan = ai_plan.store(conn, user, plan, PLATFORM.get())
     ai_plan_deliver(conn, user, telegram_id, chat_id, plan, request_text, history)
 
 

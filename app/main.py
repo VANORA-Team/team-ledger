@@ -498,11 +498,50 @@ def integrations(request: Request):
         conf = settings(conn)
         linked = conn.execute('SELECT telegram_id FROM tg_links WHERE user_id=?', (user['id'],)).fetchone()
         feishu_linked = conn.execute('SELECT open_id FROM feishu_links WHERE user_id=?', (user['id'],)).fetchone()
+        feishu_config = conn.execute('SELECT app_id FROM feishu_config WHERE id=1').fetchone()
     heartbeat = conf.get('bot_heartbeat', 0)
     return {'ai_configured': ai.configured(), 'bot_configured': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
             'bot_online': time.time() - heartbeat < 90, 'bot_username': conf.get('bot_username'),
             'telegram_linked': bool(linked), 'feishu_linked': bool(feishu_linked),
-            'feishu_configured': bool(os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET'))}
+            'feishu_configured': bool(feishu_config or (os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET'))),
+            'feishu_app_id': feishu_config['app_id'] if feishu_config else os.getenv('FEISHU_APP_ID', '')}
+
+
+@app.post('/api/feishu/config')
+def feishu_configure(body: dict, request: Request):
+    user = current(request)
+    owner(user)
+    limited(request, 'feishu-config', 10)
+    app_id = text_value(body.get('app_id'), 'App ID', 128)
+    secret = text_value(body.get('app_secret'), 'App Secret', 512, False)
+    with db(write=True) as conn:
+        existing = conn.execute('SELECT * FROM feishu_config WHERE id=1').fetchone()
+        old_id = existing['app_id'] if existing else os.getenv('FEISHU_APP_ID', '')
+        if app_id != old_id and conn.execute('SELECT 1 FROM feishu_links LIMIT 1').fetchone():
+            fail('更换飞书应用前，请先解除所有成员的飞书绑定。', 409)
+        if not secret:
+            if existing and existing['app_id'] == app_id:
+                secret = existing['app_secret']
+            elif not existing and old_id == app_id and os.getenv('FEISHU_APP_SECRET'):
+                secret = os.environ['FEISHU_APP_SECRET']
+            else:
+                fail('请填写 App Secret。')
+        if app_id != old_id:
+            conn.execute('DELETE FROM fsui_actions')
+            conn.execute('DELETE FROM fsui_prompts')
+            conn.execute('DELETE FROM fsui_drafts')
+            conn.execute('DELETE FROM fsui_links')
+            conn.execute('DELETE FROM fsui_updates')
+            conn.execute('DELETE FROM fsui_outbox')
+            conn.execute('DELETE FROM fsui_messages')
+            conn.execute('DELETE FROM fsui_identities')
+            conn.execute('DELETE FROM feishu_pending')
+            conn.execute('DELETE FROM feishu_inbox')
+            conn.execute('DELETE FROM feishu_outbox')
+            conn.execute('DELETE FROM feishu_link_codes')
+        version = (existing['version'] if existing else 0) + 1
+        conn.execute('INSERT OR REPLACE INTO feishu_config VALUES (1,?,?,?)', (app_id, secret, version))
+    return {'ok': True}
 
 
 @app.post('/api/feishu/link-code')
@@ -520,6 +559,12 @@ def feishu_link_code(request: Request):
 def feishu_unlink(request: Request):
     user = current(request)
     with db(write=True) as conn:
+        ids = [row['telegram_id'] for row in conn.execute('SELECT telegram_id FROM fsui_links WHERE user_id=?', (user['id'],))]
+        for virtual_id in ids:
+            conn.execute('DELETE FROM fsui_actions WHERE telegram_id=?', (virtual_id,))
+            conn.execute('DELETE FROM fsui_prompts WHERE telegram_id=?', (virtual_id,))
+            conn.execute('DELETE FROM fsui_drafts WHERE telegram_id=?', (virtual_id,))
+        conn.execute('DELETE FROM fsui_links WHERE user_id=?', (user['id'],))
         conn.execute('DELETE FROM feishu_pending WHERE user_id=?', (user['id'],))
         conn.execute('DELETE FROM feishu_links WHERE user_id=?', (user['id'],))
         conn.execute('DELETE FROM feishu_link_codes WHERE user_id=?', (user['id'],))

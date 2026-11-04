@@ -15,6 +15,7 @@ DEFAULTS = {
         {'code': 'JPY', 'name': '日元', 'symbol': 'JP¥', 'decimals': 0},
     ],
     'telegram_allowed_chats': [],
+    'feishu_allowed_chats': [],
 }
 
 SCHEMA = '''
@@ -68,6 +69,9 @@ CREATE TABLE IF NOT EXISTS link_codes (
  code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_links (
  open_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS feishu_config (
+ id INTEGER PRIMARY KEY CHECK(id=1), app_id TEXT NOT NULL, app_secret TEXT NOT NULL,
+ version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_link_codes (
  code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_inbox (
@@ -80,6 +84,26 @@ CREATE TABLE IF NOT EXISTS feishu_outbox (
 CREATE TABLE IF NOT EXISTS feishu_pending (
  open_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
  plan_id TEXT NOT NULL, confirmation TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fsui_identities (
+ id INTEGER PRIMARY KEY, open_id TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS fsui_links (
+ telegram_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS fsui_updates (update_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fsui_drafts (
+ token TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+ user_id INTEGER NOT NULL REFERENCES users(id), step TEXT NOT NULL,
+ payload TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fsui_outbox (
+ id INTEGER PRIMARY KEY, method TEXT NOT NULL, payload TEXT NOT NULL,
+ attempts INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS fsui_prompts (
+ chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, telegram_id TEXT NOT NULL,
+ token TEXT NOT NULL, step TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(chat_id,message_id));
+CREATE TABLE IF NOT EXISTS fsui_messages (
+ id INTEGER PRIMARY KEY, feishu_id TEXT NOT NULL UNIQUE, chat_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fsui_actions (
+ token TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+ action TEXT NOT NULL, expires INTEGER NOT NULL, group_mode INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tg_updates (update_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tg_drafts (
  token TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, chat_id TEXT NOT NULL,

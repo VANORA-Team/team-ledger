@@ -8,11 +8,19 @@ import urllib.request
 from fastapi import HTTPException
 from . import ai, ai_context, ai_plan, config, dividends, fx
 from .db import db, init_db, settings, set_setting
-from .bot_ui import (COMMANDS, DELIVERY, accepts_text, command_text, draft_for, handle,
+from .bot_ui import (COMMANDS, DELIVERY, PLATFORM, accepts_text, command_text, draft_for, handle,
                      queue, say, nav)
 
 
-def process_update(update):
+def process_update(update, db_provider=None, platform='telegram'):
+    token = PLATFORM.set(platform)
+    try:
+        return _process_update(update, db_provider or db, platform)
+    finally:
+        PLATFORM.reset(token)
+
+
+def _process_update(update, db_provider, platform):
     update_id = update.get('update_id')
     if type(update_id) is not int:
         return
@@ -21,12 +29,12 @@ def process_update(update):
     sender = callback.get('from', {}) if callback else msg.get('from', {})
     telegram_id, chat_id = str(sender.get('id', '')), str(msg.get('chat', {}).get('id', ''))
     text = str(msg.get('text', '')).strip()[:4000] if not callback else ''
-    with db() as conn:
+    with db_provider() as conn:
         if conn.execute('SELECT 1 FROM tg_updates WHERE update_id=?', (update_id,)).fetchone():
             return
         conf = settings(conn)
         command, argument = command_text(text, conf)
-        authorized_chat = msg.get('chat', {}).get('type') == 'private' or chat_id in conf['telegram_allowed_chats']
+        authorized_chat = msg.get('chat', {}).get('type') == 'private' or chat_id in conf['feishu_allowed_chats' if platform == 'feishu' else 'telegram_allowed_chats']
         linked = conn.execute('SELECT u.* FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=? AND u.active=1', (telegram_id,)).fetchone()
         draft = draft_for(conn, telegram_id, chat_id)
         accepted = accepts_text(conn, msg, telegram_id, chat_id, draft)
@@ -58,10 +66,11 @@ def process_update(update):
     progress_stop = progress_message = ledger_context = None
     if authorized and wants_ai:
         # Immediate feedback first: context assembly may also touch the FX cache.
-        progress_stop, progress_message = progress_start(chat_id, msg.get('message_thread_id'))
+        if platform == 'telegram':
+            progress_stop, progress_message = progress_start(chat_id, msg.get('message_thread_id'))
         try:
             try:
-                with db() as conn:
+                with db_provider() as conn:
                     ledger_context = ai_context.build(conn, conf, dict(linked))
             except Exception:
                 ledger_context = None
@@ -82,7 +91,7 @@ def process_update(update):
         if funds_flow:
             # Only posted income, outstanding expenses and actual payments affect
             # this calculator. Draft/voided currencies must not block the plan.
-            with db() as conn:
+            with db_provider() as conn:
                 codes = {r['currency'] for r in conn.execute("SELECT currency FROM entries WHERE status IN ('posted','pending','reimbursed') UNION SELECT currency FROM payments UNION SELECT currency FROM dividends")}
             fund_action = callback_data.split(':')[2] if callback_data.startswith('f:') and len(callback_data.split(':')) > 2 else ''
             if payload.get('scenario') and fund_action not in ('refresh', 'cancel', 'batch', 'mode') and command != '/funds' and callback_data != 'funds':
@@ -90,7 +99,7 @@ def process_update(update):
             if payload.get('scenario_currency') and draft and draft['step'] == 'funds_amount' and not callback:
                 codes.add(payload['scenario_currency'])
         if dividend_open:
-            with db() as conn:
+            with db_provider() as conn:
                 codes = dividends.needed_codes(conn)
             codes.add(payload.get('currency', conf['reference_currency']) if command != '/dividends' and callback_data != 'dividends' else conf['reference_currency'])
             if callback_data.startswith('v:') and callback_data.split(':')[2] == 'cur':
@@ -114,7 +123,7 @@ def process_update(update):
         if result and isinstance(result, dict) and isinstance(result.get('actions'), list):
             # AI plans may need dividend/batch/query rates beyond the chat's usual currencies.
             try:
-                with db() as conn:
+                with db_provider() as conn:
                     plan_rates = ai_plan.needed_rates(conn, conf, result)
                 if plan_rates:
                     rates = plan_rates
@@ -122,9 +131,11 @@ def process_update(update):
                 pass
     context = DELIVERY.set({'callback': bool(callback), 'message_id': msg.get('message_id'),
                             'user_message_id': msg.get('message_id') if not callback else None,
-                            'thread_id': msg.get('message_thread_id')})
+                            'thread_id': msg.get('message_thread_id'),
+                            'actor': telegram_id, 'chat_id': chat_id,
+                            'group': msg.get('chat', {}).get('type') != 'private'})
     try:
-        with db(write=True) as conn:
+        with db_provider(write=True) as conn:
             if conn.execute('SELECT 1 FROM tg_updates WHERE update_id=?', (update_id,)).fetchone():
                 return
             conn.execute('SAVEPOINT handling')
@@ -138,8 +149,9 @@ def process_update(update):
                     say(conn, chat_id, str(exc.detail), [nav()])
             conn.execute('RELEASE handling')
             conn.execute('INSERT INTO tg_updates VALUES (?,?)', (update_id, config.now()))
-            set_setting(conn, 'bot_offset', update_id + 1)
-            set_setting(conn, 'bot_heartbeat', int(time.time()))
+            if platform == 'telegram':
+                set_setting(conn, 'bot_offset', update_id + 1)
+                set_setting(conn, 'bot_heartbeat', int(time.time()))
             if progress_message:
                 # Remove the transient "thinking" bubble after the real reply is queued.
                 queue(conn, 'deleteMessage', {'chat_id': chat_id, 'message_id': progress_message})
