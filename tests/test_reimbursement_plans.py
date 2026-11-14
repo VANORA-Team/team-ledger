@@ -36,7 +36,6 @@ class ReimbursementPlanTest(unittest.TestCase):
         self.assertEqual(projects[second['id']]['suggested'], '20.00')
         self.assertFalse(projects[second['id']]['fully_covered'])
         self.assertEqual(self.client.get('/api/entries').json(), before)
-        self.assertEqual(self.client.get('/api/dividends').json(), [])
 
     def test_budget_zero_and_caps_at_actual_cash_or_due(self):
         self.entry(kind='income', amount='50')
@@ -74,14 +73,12 @@ class ReimbursementPlanTest(unittest.TestCase):
         project = self.projects(report)[expense['id']]
         self.assertEqual((project['amount'], project['reimbursed_amount']), ('15.00', '5.00'))
 
-    def test_simulated_income_funds_planning_but_not_real_dividends(self):
+    def test_simulated_income_changes_planning_but_not_real_cash(self):
         self.entry(kind='income', amount='10')
         self.entry(amount='100')
         report = self.calculate({'mode': 'budget', 'budget': '50'}, amount='10', currency='USD')
-        self.assertEqual((report['cash'], report['actual_cash'], report['reserve'], report['remaining'], report['dividend_available']),
-                         ('80.00', '10.00', '50.00', '30.00', '10.00'))
-        quote = self.post('/dividends/quote', {'currency': 'CNY'}).json()
-        self.assertEqual(quote['maximum_amount'], '10.00')
+        self.assertEqual((report['cash'], report['actual_cash'], report['reserve'], report['remaining']),
+                         ('80.00', '10.00', '50.00', '30.00'))
         self.assertEqual(self.client.get('/api/report').json()['cash'], '10.00')
 
     def test_invalid_choices_rejected_without_fetching_rates(self):

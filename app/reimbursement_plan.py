@@ -20,7 +20,7 @@ def normalize(entries, conf, base, choice=None):
         ids = choice.get('entry_ids')
         if not isinstance(ids, list) or any(type(i) is not int or i <= 0 for i in ids):
             fail('请选择有效的待报销项目')
-        pending = {e['id'] for e in entries if e['kind'] == 'expense' and e['status'] == 'pending'}
+        pending = {e['id'] for e in entries if e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance' and e['status'] == 'pending'}
         if set(ids) - pending:
             fail('所选项目已变化或不再待报销，请刷新后重新选择', 409)
         ids = sorted(set(ids))

@@ -14,13 +14,13 @@ import uuid
 from fastapi import HTTPException
 from . import ai, ai_context, ai_plan, config, feishu_ui
 from .bot_ui import ai_query_line, amount_text
-from .db import db, init_db, settings
+from .db import db, init_db, settings, remove_receipt_file
 
 LOG = logging.getLogger(__name__)
 BOT_OPEN_ID = None
 HELP = ('发送「绑定 绑定码」绑定账号。绑定后可发送「支出 35 CNY 打车」或「收入 100 CNY 收款」；'
         '也可以发送「最近账目」「余额」「待报销」。配置 AI 后可用自然语言记账和查询。'
-        '新增、修改、作废、报销和分红等操作需要回复预览中的确认码。仅支持私聊。')
+        '新增、修改、作废和报销等操作需要回复预览中的确认码。仅支持私聊。')
 
 
 def accept_event(data):
@@ -98,10 +98,11 @@ def enqueue(conn, chat_id, open_id, text):
 
 
 def _raw_input(text, conf):
-    match = re.fullmatch(r'(支出|收入)\s+(\d+(?:\.\d+)?)\s+([A-Za-z]{3})(?:\s+(.{1,200}))?', text)
+    match = re.fullmatch(r'(公账支出|成员垫付|支出|收入)\s+(\d+(?:\.\d+)?)\s+([A-Za-z]{3})(?:\s+(.{1,200}))?', text)
     if match:
         return {'reply': '', 'questions': [], 'actions': [{'type': 'create_entry',
-                'kind': 'expense' if match[1] == '支出' else 'income', 'amount': match[2],
+                'kind': 'income' if match[1] == '收入' else 'expense',
+                'expense_type': '' if match[1] == '收入' else 'public' if match[1] == '公账支出' else 'advance', 'amount': match[2],
                 'currency': match[3].upper(), 'description': match[4] or '', 'date': config.today()}]}
     queries = {'最近账目': 'list_entries', '余额': 'balance', '待报销': 'due'}
     if text in queries:
@@ -228,11 +229,10 @@ def process_one():
                     receipts = result.pop('receipts', [])
                     labels = {'create_entry': '新增', 'edit_entry': '修改', 'void_entry': '作废',
                               'submit_entry': '入账', 'delete_entry': '永久删除', 'pay_entry': '报销',
-                              'dividend': '分红', 'batch_pay': '批量报销'}
+                              'batch_pay': '批量报销'}
                     lines = []
                     for item in result['results']:
                         target = (f'#{item["entry_id"]}' if 'entry_id' in item else
-                                  f'D{item["dividend_id"]}' if 'dividend_id' in item else
                                   '、'.join(f'#{n}' for n in item.get('entry_ids', [])))
                         details = (f' · {item["amount"]} {item["currency"]}'
                                    if item.get('amount') and item.get('currency') else '')
@@ -274,7 +274,7 @@ def process_one():
         # The input text can contain one-time binding codes and financial data.
         conn.execute("UPDATE feishu_inbox SET done=1,text='' WHERE message_id=?", (msg['message_id'],))
     for name in receipts:
-        (config.DATA / 'receipts' / os.path.basename(name)).unlink(missing_ok=True)
+        remove_receipt_file(name)
     return True
 
 

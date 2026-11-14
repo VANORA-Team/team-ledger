@@ -93,17 +93,21 @@ class FeishuUiTest(unittest.TestCase):
         self.assertEqual(item['status'], 'reimbursed')
         self.assertEqual(len(item['payments']), 1)
 
-    def test_buttons_record_dividend_once(self):
+    def test_buttons_record_public_expense_once(self):
         self.bind(); self.entry(kind='income', amount='100')
         self.message(1, '/start'); self.assertTrue(feishu.process_one())
-        self.click(2, self.prepare('dividends'))
+        self.click(2, self.prepare('newpublic'))
         with db() as conn:
             token = conn.execute('SELECT token FROM fsui_drafts').fetchone()['token']
-        self.click(3, self.prepare(f'v:{token}:all'))
-        self.assertEqual(self.client.get('/api/dividends').json(), [])
-        action = self.prepare(f'v:{token}:commit')
-        self.click(4, action); self.click(5, action)
-        self.assertEqual(len(self.client.get('/api/dividends').json()), 1)
+        self.click(3, self.prepare(f'd:{token}:cur:CNY'))
+        self.message(4, '25'); self.assertTrue(feishu.process_one())
+        self.assertEqual(self.client.get('/api/report').json()['cash'], '100.00')
+        action = self.prepare(f'd:{token}:save')
+        self.click(5, action); self.click(6, action)
+        public = [e for e in self.client.get('/api/entries').json() if e['kind'] == 'expense']
+        self.assertEqual(len(public), 1)
+        self.assertEqual((public[0]['expense_type'], public[0]['status']), ('public', 'posted'))
+        self.assertEqual(self.client.get('/api/report').json()['cash'], '75.00')
 
     def test_group_requires_mention_and_allowlist(self):
         self.bind()

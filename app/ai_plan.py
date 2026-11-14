@@ -6,7 +6,7 @@ import time
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from fastapi import HTTPException
-from . import config, dividends as dividend_service, fx
+from . import config, fx
 from .db import settings
 from .domain import (add_entry, currency, delete_entry, edit_entry, entry_view, fail, make_payment_quote,
                      minor_amount, normalized_entry, payment_preview, text_value, transition)
@@ -232,33 +232,35 @@ def _resolve_create(conn, user, conf, action):
             card['errors'].append('日期格式不正确，请使用 YYYY-MM-DD。')
             entry_date = config.today()
     payer_id, payer_name = _member(conn, action.get('payer'), user)
+    expense_type = action.get('expense_type', 'advance') if kind == 'expense' else ''
+    if kind == 'expense' and expense_type not in ('public', 'advance'):
+        card['errors'].append('支出请选择公账支出或成员垫付')
     requested_status = action.get('status')
     if kind == 'income':
         status = 'posted'
-        if requested_status == 'distributed' or action.get('income_distributed') is True:
-            card['warnings'].append('收入统一记为团队在账；分红请单独登记盈余分红。')
     else:
-        if requested_status not in (None, '', 'draft', 'pending'):
-            card['errors'].append('支出状态只能是草稿或待报销')
-        status = 'draft' if requested_status == 'draft' else 'pending'
+        allowed = (None, '', 'draft', 'posted', 'pending') if expense_type == 'public' else (None, '', 'draft', 'pending')
+        if requested_status not in allowed:
+            card['errors'].append('支出状态与支出方式不一致')
+        status = 'draft' if requested_status == 'draft' else 'posted' if expense_type == 'public' else 'pending'
     try:
         note = _text(action.get('note'), 1000)
     except PlanQuestion as exc:
         card['errors'].append(str(exc))
         note = ''
-    body = {'kind': kind, 'amount': amount or '', 'currency': code, 'description': description,
+    body = {'kind': kind, 'expense_type': expense_type, 'amount': amount or '', 'currency': code, 'description': description,
             'date': entry_date, 'payer_id': payer_id, 'status': status, 'note': note}
     if not card['errors']:
         try:
             normalized_entry(conn, user, body)
         except HTTPException as exc:
             _error(card, exc)
-    label = '新增收入' if kind == 'income' else ('新增草稿' if status == 'draft' else '新增支出')
+    label = '新增收入' if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
     card['label'] = label
-    card['resolved'] = {'kind': kind, 'amount': amount or '', 'currency': code, 'description': description,
+    card['resolved'] = {'kind': kind, 'expense_type': expense_type, 'amount': amount or '', 'currency': code, 'description': description,
                         'date': entry_date, 'payer_id': payer_id, 'payer_name': payer_name,
                         'status': status, 'note': note}
-    state = '草稿' if status == 'draft' else '团队在账' if kind == 'income' else '待报销'
+    state = '草稿' if status == 'draft' else '团队在账' if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
     card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)} · {entry_date} · {payer_name} · {state}'
     return card
 
@@ -268,16 +270,20 @@ def _resolve_edit(conn, user, conf, action, context_ids):
     entry, warning = _target(conn, action.get('id'), context_ids)
     if warning:
         card['warnings'].append(warning)
-    if entry['kind'] != 'expense' or entry['status'] not in ('draft', 'pending') or entry['reimbursed_minor']:
-        card['errors'].append('仅没有报销记录的草稿或待报销支出可以修改')
+    if entry['kind'] != 'expense' or entry['status'] not in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')) or entry['reimbursed_minor']:
+        card['errors'].append('仅没有报销记录的支出可以修改')
         card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · 当前状态不允许修改'
         card['resolved'] = {'id': entry['id'], 'version': entry['version']}
         return card
     if action.get('kind') and action.get('kind') != entry['kind']:
         card['errors'].append('不支持更改账目类型')
     body = {'kind': entry['kind'], 'amount': entry['amount'], 'currency': entry['currency'],
-            'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
+            'expense_type': entry['expense_type'], 'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
             'note': entry['note'], 'status': entry['status']}
+    if 'expense_type' in action:
+        body['expense_type'] = action['expense_type']
+        if body['status'] != 'draft':
+            body['status'] = 'posted' if action['expense_type'] == 'public' else 'pending'
     if 'amount' in action:
         amount = _amount_value(action.get('amount'))
         if amount == 'FULL' or amount is None:
@@ -319,7 +325,7 @@ def _resolve_edit(conn, user, conf, action, context_ids):
 
 def _resolve_transition(conn, user, conf, action, context_ids):
     kind = action['type']
-    labels = {'void_entry': '作废账目', 'submit_entry': '草稿入账', 'distribute_income': '收入分红'}
+    labels = {'void_entry': '作废账目', 'submit_entry': '草稿入账'}
     card = _card(kind, labels[kind])
     entry_id = action.get('id')
     entry, warning = _target(conn, entry_id, context_ids)
@@ -335,11 +341,6 @@ def _resolve_transition(conn, user, conf, action, context_ids):
             card['errors'].append('只有草稿支出可以记入账本')
         note = str(action.get('note') or '').strip()[:500]
         action_name = 'submit'
-    else:
-        if entry['kind'] != 'income' or entry['status'] != 'posted':
-            card['errors'].append('只有团队在账收入可以标记已分红')
-        note = str(action.get('note') or '').strip()[:500] or '通过 AI 助手标记已分红到个人账户'
-        action_name = 'distribute'
     card['resolved'] = {'id': entry['id'], 'version': entry['version'], 'action': action_name, 'note': note}
     card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · {_money(entry["amount"], entry["currency"], conf)} · {labels[kind]}'
     if note:
@@ -479,48 +480,9 @@ def _resolve_batch(conn, user, conf, action, rates, context_ids):
     return card
 
 
-def _resolve_dividend(conn, user, conf, action, rates):
-    card = _card('dividend', '盈余分红')
-    code = str(action.get('currency') or conf['reference_currency']).upper()
-    try:
-        code = currency(conf, code)['code']
-    except HTTPException as exc:
-        _error(card, exc)
-        code = conf['reference_currency']
-    raw_amount = action.get('amount')
-    raw_text = str(raw_amount).strip().lower() if raw_amount is not None else ''
-    amount = 'all' if raw_text in ('', 'all') else _amount_value(raw_amount)
-    if raw_text not in ('', 'all') and amount is None:
-        card['errors'].append('分红金额格式不正确')
-    try:
-        note = _text(action.get('note'), 500) or '通过 AI 助手登记盈余分红'
-    except PlanQuestion as exc:
-        card['errors'].append(str(exc))
-        note = '通过 AI 助手登记盈余分红'
-    quote = preview = None
-    if not card['errors']:
-        try:
-            quote = dividend_service.quote(conn, user, code, rates)
-            preview = dividend_service.preview(conn, user, quote['id'], amount)
-        except HTTPException as exc:
-            _error(card, exc)
-    if quote and preview:
-        card['resolved'] = {'quote_id': quote['id'], 'amount': amount, 'currency': code,
-                            'note': note, 'display_amount': preview['amount'],
-                            'reference_currency': quote['reference_currency'],
-                            'surplus': quote['surplus'], 'remaining_surplus': preview['remaining_surplus']}
-        card['summary'] = (f'盈余分红 · 本次 {_money(preview["amount"], code, conf)}'
-                           f' · 可分红上限 {_money(quote["maximum_amount"], code, conf)}')
-        card['warnings'].append('待报销款不强制预留，分红会减少后续可报销资金；系统只登记已完成的转账，不会发起付款。')
-    else:
-        card['resolved'] = {'amount': 'all' if amount == 'all' else (amount or ''),
-                            'currency': code, 'note': note}
-    return card
-
-
 # --- read-only queries ------------------------------------------------------
 
-def _query_clauses(conn, user, conf, action, default_status=True, exclude_distributed=False):
+def _query_clauses(conn, user, conf, action, default_status=True):
     clauses, params = [], []
     scope = action.get('scope')
     if scope == 'mine':
@@ -530,16 +492,18 @@ def _query_clauses(conn, user, conf, action, default_status=True, exclude_distri
     if kind in ('expense', 'income'):
         clauses.append('e.kind=?')
         params.append(kind)
+    expense_type = action.get('filter_expense_type')
+    if expense_type in ('public', 'advance'):
+        clauses.append("e.kind='expense' AND e.expense_type=?")
+        params.append(expense_type)
     status = action.get('filter_status')
     if status == 'partial':
         clauses.append("e.status='pending' AND e.reimbursed_minor>0")
-    elif status in ('draft', 'pending', 'reimbursed', 'posted', 'distributed', 'voided'):
+    elif status in ('draft', 'pending', 'reimbursed', 'posted', 'voided'):
         clauses.append('e.status=?')
         params.append(status)
     elif default_status:
         clauses.append("e.status NOT IN ('draft','voided')")
-        if exclude_distributed:
-            clauses.append("NOT (e.kind='income' AND e.status='distributed')")
     code = action.get('filter_currency')
     if code:
         try:
@@ -566,8 +530,8 @@ def _query_clauses(conn, user, conf, action, default_status=True, exclude_distri
     return clauses, params
 
 
-def _filtered_rows(conn, user, conf, action, default_status=True, exclude_distributed=False):
-    clauses, params = _query_clauses(conn, user, conf, action, default_status, exclude_distributed)
+def _filtered_rows(conn, user, conf, action, default_status=True):
+    clauses, params = _query_clauses(conn, user, conf, action, default_status)
     where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     rows = conn.execute('SELECT e.id FROM entries e JOIN users u ON u.id=e.payer_id' + where +
                         ' ORDER BY e.date DESC,e.id DESC', params).fetchall()
@@ -592,7 +556,7 @@ def _list_query(conn, user, conf, action):
 
 
 def _summary_query(conn, user, conf, action):
-    clauses, params = _query_clauses(conn, user, conf, action, exclude_distributed=True)
+    clauses, params = _query_clauses(conn, user, conf, action)
     where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     rows = conn.execute(
         'SELECT e.kind,e.currency,e.decimals,e.amount_minor,e.payer_id,u.name payer_name '
@@ -638,16 +602,14 @@ def _report_with_conn(conn, base=None, scenario=None):
     entries = [dict(row) for row in conn.execute(
         'SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
     payments = [dict(row) for row in conn.execute('SELECT * FROM payments')]
-    dividends = [dict(row) for row in conn.execute('SELECT * FROM dividends')]
     codes = {e['currency'] for e in entries
-             if (e['kind'] == 'income' and e['status'] == 'posted') or e['status'] in ('pending', 'reimbursed')}
+             if e['status'] in ('posted', 'pending', 'reimbursed')}
     codes.update(payment['currency'] for payment in payments)
-    codes.update(dividend['currency'] for dividend in dividends)
     if scenario:
         cur = currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], cur['decimals'])
         codes.add(cur['code'])
-    return fx.calculate(entries, conf, fx.cached_rates(base, codes), scenario, payments, dividends)
+    return fx.calculate(entries, conf, fx.cached_rates(base, codes), scenario, payments)
 
 
 def _funds_card(kind, conf, action, conn):
@@ -664,10 +626,10 @@ def _funds_card(kind, conf, action, conn):
         return {'kind': kind, 'complete': False, 'base': base, 'warning': '汇率或资金数据暂不可用，请稍后重试。'}
     card = {'kind': kind, 'complete': bool(report.get('complete')), 'base': base,
             'cash': report.get('cash'), 'income': report.get('income'), 'paid': report.get('paid'),
-            'dividend_paid': report.get('dividend_paid'), 'dividend_available': report.get('dividend_available'),
+            'public_paid': report.get('public_paid'),
             'due': report.get('due'), 'reserve': report.get('reserve'), 'payable': report.get('payable'),
             'remaining': report.get('remaining'), 'shortage': report.get('shortage'),
-            'balances': report.get('balances', {}), 'dividend_balances': report.get('dividend_balances', {})}
+            'balances': report.get('balances', {})}
     if not report.get('complete'):
         card['warning'] = report.get('fx', {}).get('warning') or '汇率不完整，跨币种金额暂不可用。'
     elif report.get('fx', {}).get('stale'):
@@ -681,23 +643,6 @@ def _funds_card(kind, conf, action, conn):
                       'stale': report.get('fx', {}).get('stale'),
                       'missing': report.get('fx', {}).get('missing', [])}
     return card
-
-
-def _dividend_query(conn, user, conf, action):
-    items = dividend_service.history(conn)
-    date_from = _strict_date(action.get('date_from'), '开始日期')
-    date_to = _strict_date(action.get('date_to'), '结束日期')
-    if date_from:
-        items = [item for item in items if item['created_at'][:10] >= date_from]
-    if date_to:
-        items = [item for item in items if item['created_at'][:10] <= date_to]
-    total = {}
-    for item in items:
-        slot = total.setdefault(item['currency'], {'amount': Decimal(0), 'decimals': item['decimals']})
-        slot['amount'] += Decimal(item['amount'])
-    return {'kind': 'dividends', 'items': items[:50], 'count': len(items),
-            'total': len(items), 'totals': {code: format(slot['amount'], f'.{slot["decimals"]}f')
-                                             for code, slot in total.items()}}
 
 
 def _entry_query(conn, user, conf, action):
@@ -722,8 +667,6 @@ def run_query(conn, user, conf, action):
             return _entry_query(conn, user, conf, action)
         if query == 'summary':
             return _summary_query(conn, user, conf, action)
-        if query == 'dividends':
-            return _dividend_query(conn, user, conf, action)
         if query in ('balance', 'due', 'funds'):
             return _funds_card(query, conf, action, conn)
         if query == 'simulate_income':
@@ -738,8 +681,7 @@ def run_query(conn, user, conf, action):
                     'cash': report.get('cash'), 'due': report.get('due'), 'reserve': report.get('reserve'),
                     'payable': report.get('payable'), 'remaining': report.get('remaining'),
                     'shortage': report.get('shortage'), 'extra': report.get('extra'),
-                    'dividend_paid': report.get('dividend_paid'),
-                    'dividend_available': report.get('dividend_available'),
+                    'public_paid': report.get('public_paid'),
                     'members': report.get('members', []),
                     'warning': report.get('fx', {}).get('warning')
                     if (not report.get('complete') or report.get('fx', {}).get('stale')) else None}
@@ -798,14 +740,6 @@ def resolve(conn, user, conf, raw, context, rates=None):
                         single['id'] = entry_id
                         single.pop('ids', None)
                         _append(actions, _resolve_transition(conn, user, conf, single, context_ids))
-                    seen_write = True
-            elif action_type == 'distribute_income':
-                questions.append('按收入标记分红的规则已移除。请改说「登记盈余分红」，系统会以扣除已报销和历史分红后的真实余额为限，允许待报销未结清时分红。')
-            elif action_type == 'dividend':
-                if seen_write:
-                    questions.append('盈余分红需要基于最新账本。请先确认前面的操作，再单独登记分红。')
-                else:
-                    _append(actions, _resolve_dividend(conn, user, conf, action, rates))
                     seen_write = True
             elif action_type == 'pay_entry':
                 ids = _ids(action)
@@ -886,7 +820,9 @@ def load(conn, user, plan_id):
 
 
 def _create_body(resolved):
-    return {key: resolved.get(key) for key in ('kind', 'amount', 'currency', 'description', 'date', 'payer_id', 'status', 'note')}
+    body = {key: resolved.get(key) for key in ('kind', 'amount', 'currency', 'description', 'date', 'payer_id', 'status', 'note')}
+    body['expense_type'] = resolved.get('expense_type', 'advance') if body['kind'] == 'expense' else ''
+    return body
 
 
 def _check_version(conn, entry_id, version):
@@ -917,12 +853,14 @@ def execute(conn, user, plan_id, selected):
     for card in chosen:
         resolved = card['resolved']
         kind = card['type']
+        if kind not in ('create_entry', 'edit_entry', 'void_entry', 'submit_entry', 'delete_entry', 'pay_entry', 'batch_pay'):
+            fail('此操作已不再支持，请重新生成清单。', 409)
         try:
             if kind == 'create_entry':
                 normalized_entry(conn, user, _create_body(resolved))
             elif kind == 'edit_entry':
                 _check_version(conn, resolved['id'], resolved['version'])
-            elif kind in ('void_entry', 'submit_entry', 'distribute_income'):
+            elif kind in ('void_entry', 'submit_entry'):
                 _check_version(conn, resolved['id'], resolved['version'])
             elif kind == 'delete_entry':
                 current = _check_version(conn, resolved['id'], resolved['version'])
@@ -931,8 +869,6 @@ def execute(conn, user, plan_id, selected):
             elif kind == 'pay_entry':
                 _check_version(conn, resolved['id'], resolved['version'])
                 payment_preview(conn, user, resolved['id'], resolved['amount'], resolved['quote_id'])
-            elif kind == 'dividend':
-                dividend_service.preview(conn, user, resolved['quote_id'], resolved['amount'])
             elif kind == 'batch_pay':
                 if time.time() >= resolved['expires'] or funds_snapshot(conn) != resolved['snapshot']:
                     fail('账本已变化或确认已过期，请重新描述批量报销需求。', 409)
@@ -955,7 +891,7 @@ def execute(conn, user, plan_id, selected):
             entry = edit_entry(conn, user, resolved['id'], _create_body(resolved))
             results.append({'index': card['index'], 'type': kind, 'ok': True, 'entry_id': entry['id'],
                             'description': entry['description'], 'amount': entry['amount'], 'currency': entry['currency']})
-        elif kind in ('void_entry', 'submit_entry', 'distribute_income'):
+        elif kind in ('void_entry', 'submit_entry'):
             action_name = resolved['action']
             entry = transition(conn, user, resolved['id'], action_name, resolved.get('note', ''))
             results.append({'index': card['index'], 'type': kind, 'ok': True, 'entry_id': entry['id'],
@@ -973,11 +909,6 @@ def execute(conn, user, plan_id, selected):
             results.append({'index': card['index'], 'type': kind, 'ok': True, 'entry_id': entry['id'],
                             'status': entry['status'], 'reimbursed_amount': entry['reimbursed_amount'],
                             'remaining_amount': entry['remaining_amount']})
-        elif kind == 'dividend':
-            value = dividend_service.record(conn, user, resolved['quote_id'], resolved['amount'],
-                                            resolved['note'], f'dividend:ai:{user["id"]}:{plan_id}:{card["index"]}')
-            results.append({'index': card['index'], 'type': kind, 'ok': True, 'dividend_id': value['id'],
-                            'amount': value['amount'], 'currency': value['currency'], 'note': value['note']})
         elif kind == 'batch_pay':
             entry_ids = []
             for item in resolved['items']:
@@ -1001,20 +932,12 @@ def execute(conn, user, plan_id, selected):
 def needed_rates(conn, conf, raw):
     """Fetch FX once, outside the write lock, only when the plan needs it."""
     actions = raw.get('actions') if isinstance(raw.get('actions'), list) else []
-    need, query_bases, dividend_codes = False, set(), set()
+    need, query_bases = False, set()
     for action in actions:
         if action.get('type') == 'batch_pay':
             need = True
         elif action.get('type') == 'pay_entry' and action.get('settlement_currency') not in (None, '', 'original'):
             need = True
-        elif action.get('type') == 'dividend':
-            need = True
-            code = str(action.get('currency') or conf['reference_currency']).upper()
-            try:
-                currency(conf, code)
-                dividend_codes.add(code)
-            except HTTPException:
-                pass
         elif action.get('type') == 'query' and action.get('query') in ('balance', 'due', 'funds', 'simulate_income'):
             base = str(action.get('base') or conf['reference_currency']).upper()
             try:
@@ -1026,9 +949,6 @@ def needed_rates(conn, conf, raw):
         return None
     codes = {row['currency'] for row in conn.execute("SELECT DISTINCT currency FROM entries WHERE status IN ('pending','reimbursed','posted')")}
     codes.add(conf['reference_currency'])
-    if dividend_codes:
-        codes |= dividend_service.needed_codes(conn)
-        codes |= dividend_codes
     # Warm query-only bases before the write lock; _report_with_conn then uses cache only.
     for base in query_bases - {conf['reference_currency']}:
         try:

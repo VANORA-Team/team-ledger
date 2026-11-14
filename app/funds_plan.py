@@ -13,29 +13,27 @@ DEFAULT_NOTE = '按资金建议批量登记报销'
 def ledger_rows(conn):
     entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id ORDER BY e.id')]
     payments = [dict(p) for p in conn.execute('SELECT * FROM payments ORDER BY id')]
-    dividends = [dict(d) for d in conn.execute('SELECT * FROM dividends ORDER BY id')]
-    return entries, payments, dividends
+    return entries, payments
 
 
 def snapshot(conn):
     conf = settings(conn)
-    entries, payments, dividends = ledger_rows(conn)
-    return hashlib.sha256(json.dumps([entries, payments, dividends, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
+    entries, payments = ledger_rows(conn)
+    return hashlib.sha256(json.dumps([entries, payments, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
 
 
 def report(conn, rates, scenario=None, reimbursement=None):
     conf = settings(conn)
     if not rates or rates['base'] != conf['reference_currency']:
         return None
-    entries, payments, dividends = ledger_rows(conn)
+    entries, payments = ledger_rows(conn)
     needed = {e['currency'] for e in entries if e['status'] in ('pending', 'reimbursed', 'posted')}
     needed.update(p['currency'] for p in payments)
-    needed.update(d['currency'] for d in dividends)
     if scenario:
         needed.add(scenario['currency'])
     if needed - rates['rates'].keys():
         return None
-    return fx.calculate(entries, conf, rates, scenario, payments, dividends, reimbursement)
+    return fx.calculate(entries, conf, rates, scenario, payments, reimbursement)
 
 
 def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_from=None, date_to=None, note=DEFAULT_NOTE, reimbursement=None):
@@ -52,11 +50,12 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
     if mode not in ('settlement', 'original'):
         fail('请选择有效的付款币种方式')
     scale = 10 ** currency(conf, base)['decimals']
-    entries, payments, dividends = ledger_rows(conn)
+    entries, payments = ledger_rows(conn)
     choice = reimbursement_plan.normalize(entries, conf, base, reimbursement)
     def converted(e):
         return Decimal(e['amount_minor']) / (10 ** e['decimals']) * Decimal(rates['rates'][e['currency']]['rate'])
-    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments + dividends), Decimal(0))
+    public_expenses = [e for e in entries if e['kind'] == 'expense' and e['expense_type'] == 'public' and e['status'] == 'posted']
+    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments + public_expenses), Decimal(0))
     left = max(cash, Decimal(0)).quantize(Decimal(1) / scale, rounding=ROUND_DOWN)
     if choice['mode'] == 'budget':
         left = min(left, Decimal(choice['budget']))
@@ -67,7 +66,7 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
     if want_ids == set() or choice['mode'] == 'budget' and Decimal(choice['budget']) == 0:
         fail('本次未安排任何报销，请先设置报销预算或选择项目。')
     items, totals, cost = [], {}, Decimal(0)
-    pending = sorted((e for e in entries if e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
+    pending = sorted((e for e in entries if e['kind'] == 'expense' and e['expense_type'] == 'advance' and e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
     for e in pending:
         if left <= 0:
             break

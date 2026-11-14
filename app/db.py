@@ -1,7 +1,13 @@
 import json
 import sqlite3
+import time
+from pathlib import Path
 from contextlib import contextmanager
+from contextvars import ContextVar
 from . import config
+from .locks import data_guard
+
+authenticated_session = ContextVar('ledger_authenticated_session', default=None)
 
 DEFAULTS = {
     'team_name': '一起记',
@@ -28,7 +34,8 @@ CREATE TABLE IF NOT EXISTS sessions (
  csrf TEXT NOT NULL, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS entries (
- id INTEGER PRIMARY KEY, kind TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+ id INTEGER PRIMARY KEY, kind TEXT NOT NULL, expense_type TEXT NOT NULL DEFAULT 'advance',
+ amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
  currency TEXT NOT NULL, decimals INTEGER NOT NULL, description TEXT NOT NULL,
  category TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, payer_id INTEGER NOT NULL REFERENCES users(id),
  created_by INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL,
@@ -53,16 +60,6 @@ CREATE TABLE IF NOT EXISTS payment_quotes (
  version INTEGER NOT NULL, currency TEXT NOT NULL, decimals INTEGER NOT NULL,
  rate TEXT NOT NULL, rate_date TEXT, remaining_minor INTEGER NOT NULL, maximum_minor INTEGER NOT NULL,
  expires INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS dividends (
- id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
- amount_minor INTEGER NOT NULL CHECK(amount_minor>0), currency TEXT NOT NULL, decimals INTEGER NOT NULL,
- note TEXT NOT NULL, reference_currency TEXT NOT NULL, fx_rate TEXT NOT NULL, fx_date TEXT,
- quote_id TEXT NOT NULL UNIQUE, source_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS dividend_quotes (
- id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), fingerprint TEXT NOT NULL,
- currency TEXT NOT NULL, decimals INTEGER NOT NULL, rate TEXT NOT NULL, rate_date TEXT,
- reference_currency TEXT NOT NULL, maximum_minor INTEGER NOT NULL, surplus TEXT NOT NULL,
- rates TEXT NOT NULL, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tg_links (
  telegram_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS link_codes (
@@ -126,6 +123,13 @@ CREATE TABLE IF NOT EXISTS ai_plans (
 
 @contextmanager
 def db(write=False):
+    with data_guard():
+        with _connection(write) as conn:
+            yield conn
+
+
+@contextmanager
+def _connection(write=False):
     config.DATA.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
@@ -133,6 +137,13 @@ def db(write=False):
     conn.execute('PRAGMA busy_timeout=15000')
     try:
         conn.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
+        token_hash = authenticated_session.get()
+        if token_hash is not None and not conn.execute(
+                'SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id '
+                'WHERE s.token_hash=? AND s.expires>? AND u.active=1',
+                (token_hash, int(time.time()))).fetchone():
+            from fastapi import HTTPException
+            raise HTTPException(401, '登录已失效，请重新登录')
         yield conn
         conn.commit()
     except Exception:
@@ -143,6 +154,11 @@ def db(write=False):
 
 
 def init_db():
+    with data_guard():
+        _init_db()
+
+
+def _init_db():
     config.DATA.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH, timeout=15)
     try:
@@ -153,6 +169,9 @@ def init_db():
         conn.execute('BEGIN IMMEDIATE')
         if 'reimbursed_minor' not in {r[1] for r in conn.execute('PRAGMA table_info(entries)')}:
             conn.execute('ALTER TABLE entries ADD COLUMN reimbursed_minor INTEGER NOT NULL DEFAULT 0 CHECK(reimbursed_minor>=0 AND reimbursed_minor<=amount_minor)')
+        if 'expense_type' not in {r[1] for r in conn.execute('PRAGMA table_info(entries)')}:
+            conn.execute("ALTER TABLE entries ADD COLUMN expense_type TEXT NOT NULL DEFAULT 'advance'")
+        conn.execute("UPDATE entries SET expense_type='' WHERE kind='income' AND expense_type<>''")
         # Earlier versions only supported full payments. Preserve their dates and notes,
         # and create exactly one payment record without rewriting their audit history.
         conn.execute("""INSERT OR IGNORE INTO payments(entry_id,user_id,amount_minor,currency,decimals,note,entry_amount_minor,fx_rate,fx_date,source_key,created_at)
@@ -160,12 +179,7 @@ def init_db():
                 e.amount_minor,e.currency,e.decimals,e.review_note,e.amount_minor,'1',NULL,'legacy:pay:'||e.id,COALESCE(e.paid_at,e.updated_at)
             FROM entries e WHERE e.kind='expense' AND e.status='reimbursed' AND e.reimbursed_minor=0""")
         conn.execute("UPDATE entries SET reimbursed_minor=amount_minor WHERE kind='expense' AND status='reimbursed' AND reimbursed_minor=0")
-        # Retire income exclusion while preserving the exact prior cash effect.
-        conn.execute("""INSERT OR IGNORE INTO dividends(user_id,amount_minor,currency,decimals,note,reference_currency,fx_rate,fx_date,quote_id,source_key,created_at)
-            SELECT COALESCE((SELECT user_id FROM events WHERE entry_id=e.id AND action='distribute' ORDER BY id DESC LIMIT 1),e.created_by),
-                e.amount_minor,e.currency,e.decimals,COALESCE(NULLIF(e.review_note,''),'旧版分红记录转换'),e.currency,'1',NULL,
-                'legacy:dividend:'||e.id,'legacy:dividend:'||e.id,e.updated_at
-            FROM entries e WHERE e.kind='income' AND e.status='distributed'""")
+        migrate_public_expenses(conn)
         conn.execute("UPDATE entries SET status='posted' WHERE kind='income' AND status='distributed'")
         conn.execute("UPDATE users SET role='owner' WHERE role<>'owner'")
         conn.execute("DELETE FROM settings WHERE key='categories'")
@@ -179,9 +193,52 @@ def init_db():
         conn.close()
 
 
+def migrate_public_expenses(conn):
+    """Retire distributions while preserving their cash effect and audit metadata."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    legacy = []
+    if 'dividends' in tables:
+        columns = [row[1] for row in conn.execute('PRAGMA table_info(dividends)')]
+        legacy = [dict(zip(columns, row)) for row in conn.execute('SELECT * FROM dividends ORDER BY id')]
+    keys = {row['source_key'] for row in legacy}
+    for row in conn.execute("SELECT id,amount_minor,currency,decimals,created_by,review_note,updated_at FROM entries WHERE kind='income' AND status='distributed'").fetchall():
+        entry_id, amount, code, decimals, creator, note, timestamp = row
+        key = f'legacy:dividend:{entry_id}'
+        if key not in keys:
+            actor = conn.execute("SELECT user_id FROM events WHERE entry_id=? AND action='distribute' ORDER BY id DESC LIMIT 1", (entry_id,)).fetchone()
+            legacy.append(dict(user_id=actor[0] if actor else creator, amount_minor=amount,
+                               currency=code, decimals=decimals, note=note, created_at=timestamp, source_key=key))
+    for row in legacy:
+        key = 'migration:public:' + row['source_key']
+        if conn.execute('SELECT 1 FROM entries WHERE source_key=?', (key,)).fetchone():
+            continue
+        stamp, actor = row['created_at'], row['user_id']
+        cursor = conn.execute("""INSERT INTO entries
+            (kind,expense_type,amount_minor,currency,decimals,description,date,payer_id,created_by,status,source,source_key,note,paid_at,created_at,updated_at)
+            VALUES ('expense','public',?,?,?,'历史公账支出',?,?,?,'posted','migration',?,?,?,?,?)""",
+            (row['amount_minor'], row['currency'], row['decimals'], stamp[:10], actor, actor,
+             key, row['note'], stamp, stamp, stamp))
+        conn.execute("INSERT INTO events(entry_id,user_id,action,detail,created_at) VALUES (?,?,'migrated',?,?)",
+                     (cursor.lastrowid, actor, json.dumps(row, ensure_ascii=False), stamp))
+    conn.execute('DROP TABLE IF EXISTS dividend_quotes')
+    conn.execute('DROP TABLE IF EXISTS dividends')
+    for table in ('tg_drafts', 'fsui_drafts', 'tg_prompts', 'fsui_prompts'):
+        conn.execute(f"DELETE FROM {table} WHERE step LIKE 'dividend_%'")
+
+
 def settings(conn):
     return {r['key']: json.loads(r['value']) for r in conn.execute('SELECT * FROM settings')}
 
 
 def set_setting(conn, key, value):
     conn.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (key, json.dumps(value, ensure_ascii=False)))
+
+
+def remove_receipt_file(name):
+    """A restore may have made this receipt live again after the caller committed."""
+    filename = Path(name).name
+    with data_guard():
+        with db() as conn:
+            referenced = conn.execute('SELECT 1 FROM entries WHERE receipt=? LIMIT 1', (filename,)).fetchone()
+        if not referenced:
+            (config.DATA / 'receipts' / filename).unlink(missing_ok=True)

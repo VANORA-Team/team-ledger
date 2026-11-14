@@ -161,41 +161,59 @@ class AiAgentTest(unittest.TestCase):
         self.assertEqual(rows[voided['id']]['status'], 'voided')
         self.assertEqual(rows[voided['id']]['review_note'], '重复记录')
 
-    def test_dividend_action_uses_surplus_and_records_history(self):
-        self.entry(kind='income', amount='500', description='收入')
-        self.entry(amount='100', description='待报销')
-        plan = self.plan([{'type': 'dividend', 'amount': '200', 'currency': 'CNY', 'note': '第一次分红'}])
+    def test_public_expense_action_previews_and_deducts_cash_once(self):
+        self.entry(kind='income', amount='500')
+        self.entry(amount='100')
+        plan = self.plan([{'type': 'create_entry', 'kind': 'expense', 'expense_type': 'public',
+                           'amount': '200', 'currency': 'CNY', 'description': '服务器', 'note': '已支付'}])
         card = plan['actions'][0]
         self.assertFalse(card['errors'], card)
-        self.assertIn('盈余分红', card['summary'])
+        self.assertIn('公账支出', card['summary'])
+        self.assertEqual(self.client.get('/api/report').json()['cash'], '500.00')
         response = self.execute(plan)
         self.assertEqual(response.status_code, 200, response.text)
-        rows = self.client.get('/api/dividends').json()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['amount'], '200.00')
-        self.assertEqual(rows[0]['note'], '第一次分红')
+        self.assertEqual(self.execute(plan).status_code, 200)
+        public = next(e for e in self.entries() if e['expense_type'] == 'public')
+        self.assertEqual((public['status'], public['note']), ('posted', '已支付'))
         report = self.client.get('/api/report').json()
-        self.assertEqual(report['dividend_paid'], '200.00')
-        self.assertEqual(report['cash'], '300.00')
-        plan = self.plan([{'type': 'dividend'}])
-        self.assertEqual(plan['actions'][0]['resolved']['amount'], 'all')
-        response = self.execute(plan)
-        self.assertEqual(response.status_code, 200, response.text)
-        report = self.client.get('/api/report').json()
-        self.assertEqual(report['dividend_paid'], '500.00')
-        self.assertEqual(report['cash'], '0.00')
-        self.assertEqual(report['due'], '100.00')
-        self.assertEqual(report['dividend_available'], '0.00')
+        self.assertEqual((report['public_paid'], report['cash'], report['due']), ('200.00', '300.00', '100.00'))
 
-    def test_dividend_after_prior_write_is_split_into_a_question(self):
-        self.entry(kind='income', amount='500', description='收入')
-        plan = self.plan([
-            {'type': 'create_entry', 'kind': 'income', 'amount': '100', 'currency': 'CNY',
-             'description': '新收入', 'date': config.today()},
-            {'type': 'dividend'},
-        ])
-        self.assertEqual([card['type'] for card in plan['actions']], ['create_entry'])
-        self.assertTrue(any('盈余分红需要基于最新账本' in question for question in plan['questions']))
+    def test_removed_dividend_action_never_creates_an_executable_card(self):
+        plan = self.plan([{'type': 'dividend', 'amount': '10'}])
+        self.assertEqual(plan['actions'], [])
+        self.assertTrue(any('无法识别' in q for q in plan['questions']))
+        self.assertFalse(plan['executable'])
+        self.assertEqual(self.entries(), [])
+
+    def test_stored_removed_action_rejects_the_entire_plan_before_writing(self):
+        plan = self.plan([{'type': 'create_entry', 'amount': '10'}])
+        with db(write=True) as conn:
+            payload = json.loads(conn.execute('SELECT payload FROM ai_plans WHERE id=?', (plan['plan_id'],)).fetchone()[0])
+            payload['actions'].append({'index': 1, 'type': 'dividend', 'errors': [], 'resolved': {}})
+            conn.execute('UPDATE ai_plans SET payload=? WHERE id=?', (json.dumps(payload), plan['plan_id']))
+        response = self.execute(plan, [0, 1])
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.entries(), [])
+
+    def test_stored_old_create_plan_defaults_to_member_advance(self):
+        plan = self.plan([{'type': 'create_entry', 'amount': '10'}])
+        with db(write=True) as conn:
+            payload = json.loads(conn.execute('SELECT payload FROM ai_plans WHERE id=?', (plan['plan_id'],)).fetchone()[0])
+            payload['actions'][0]['resolved'].pop('expense_type')
+            conn.execute('UPDATE ai_plans SET payload=? WHERE id=?', (json.dumps(payload), plan['plan_id']))
+        response = self.execute(plan)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.entries()[0]['expense_type'], 'advance')
+
+    def test_ai_edit_public_expense_preserves_type_and_updates_cash(self):
+        self.entry(kind='income', amount='100')
+        public = self.entry(expense_type='public', amount='20')
+        plan = self.plan([{'type': 'edit_entry', 'id': public['id'], 'amount': '35'}])
+        self.assertFalse(plan['actions'][0]['errors'], plan)
+        self.assertEqual(plan['actions'][0]['resolved']['expense_type'], 'public')
+        self.assertEqual(self.execute(plan).status_code, 200)
+        report = self.client.get('/api/report').json()
+        self.assertEqual((report['cash'], report['due']), ('65.00', '0.00'))
 
     def test_batch_budget_and_project_filter_apply_together(self):
         self.entry(kind='income', amount='100')
@@ -217,16 +235,14 @@ class AiAgentTest(unittest.TestCase):
         self.assertTrue(plan['actions'][0]['errors'])
         self.assertEqual(self.client.get('/api/report').json()['paid'], '0.00')
 
-    def test_dividend_query_returns_history_and_totals(self):
-        self.entry(kind='income', amount='100', description='收入')
-        plan = self.plan([{'type': 'dividend', 'amount': '20', 'note': '查询样本'}])
-        self.assertEqual(self.execute(plan).status_code, 200)
-        plan = self.plan([{'type': 'query', 'query': 'dividends'}])
-        card = plan['results'][0]['card']
-        self.assertEqual(card['kind'], 'dividends')
-        self.assertEqual(card['count'], 1)
-        self.assertEqual(card['items'][0]['note'], '查询样本')
-        self.assertEqual(card['totals'], {'CNY': '20.00'})
+    def test_query_filters_public_expenses_and_advances_separately(self):
+        public = self.entry(expense_type='public', amount='20', note='公账样本')
+        advance = self.entry(amount='30', note='垫付样本')
+        for value, expected in [('public', public), ('advance', advance)]:
+            plan = self.plan([{'type': 'query', 'query': 'list_entries', 'filter_expense_type': value}])
+            card = plan['results'][0]['card']
+            self.assertEqual(card['total'], 1)
+            self.assertEqual(card['entries'][0]['id'], expected['id'])
 
     def test_partial_and_full_reimbursement_in_original_currency(self):
         entry = self.entry(amount='100', description='垫付')
@@ -389,14 +405,14 @@ class AiAgentTest(unittest.TestCase):
         self.assertEqual([card['type'] for card in plan['actions']], ['edit_entry'])
         self.assertTrue(any('多次操作' in question for question in plan['questions']))
 
-    def test_summary_includes_posted_income_and_keeps_dividends_separate(self):
-        self.entry(kind='income', amount='100', description='团队在账')
-        dividend_plan = self.plan([{'type': 'dividend', 'amount': '30'}])
-        self.assertEqual(self.execute(dividend_plan).status_code, 200)
+    def test_summary_includes_income_public_expenses_and_advances(self):
+        self.entry(kind='income', amount='100')
+        self.entry(expense_type='public', amount='30')
+        self.entry(amount='20')
         plan = self.plan([{'type': 'query', 'query': 'summary'}])
         card = plan['results'][0]['card']
-        self.assertEqual(card['totals']['CNY']['income'], '100.00')
-        self.assertEqual(card['count'], 1)
+        self.assertEqual(card['totals']['CNY'], {'income': '100.00', 'expense': '50.00'})
+        self.assertEqual(card['count'], 3)
 
     def test_mixed_currency_query_uses_cached_rates_without_fetching_in_transaction(self):
         self.entry(kind='income', amount='100', currency='USD', description='美元收入')
@@ -620,37 +636,33 @@ class AiTelegramPlanTest(unittest.TestCase):
         self.assertIn('改好了', self.last_message()['text'])
         self.assertEqual(self.entries(), [])
 
-    def test_telegram_ai_dividend_plan_previews_and_confirms(self):
+    def test_telegram_ai_public_expense_previews_and_confirms(self):
         self.link_bot()
-        self.entry(kind='income', amount='500', description='收入')
-        raw = {'reply': '登记一笔已完成的分红。', 'questions': [], 'actions': [
-            {'type': 'dividend', 'amount': '100', 'currency': 'CNY', 'note': '已转账'}]}
+        self.entry(kind='income', amount='500')
+        raw = {'reply': '登记公账支出。', 'questions': [], 'actions': [
+            {'type': 'create_entry', 'kind': 'expense', 'expense_type': 'public',
+             'amount': '100', 'currency': 'CNY', 'description': '公账服务器'}]}
         with patch('app.ai.parse', return_value=raw):
-            bot.process_update(self.message(2, '登记分红100元'))
-        self.assertIn('盈余分红', self.last_message()['text'])
+            bot.process_update(self.message(2, '公账支付服务器100元'))
+        self.assertIn('公账支出', self.last_message()['text'])
+        self.assertEqual(self.client.get('/api/report').json()['cash'], '500.00')
         token = self.draft()['token']
         self.click(3, f'a:{token}:go')
-        self.assertIn('已登记盈余分红', self.last_message()['text'])
-        rows = self.client.get('/api/dividends').json()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['amount'], '100.00')
-        self.assertEqual(self.client.get('/api/report').json()['dividend_paid'], '100.00')
+        public = next(e for e in self.entries() if e['kind'] == 'expense')
+        self.assertEqual((public['expense_type'], public['status']), ('public', 'posted'))
+        self.assertEqual(self.client.get('/api/report').json()['cash'], '400.00')
 
-    def test_telegram_ai_dividend_query_lists_records(self):
+    def test_telegram_ai_public_expense_query_lists_records(self):
         self.link_bot()
-        self.entry(kind='income', amount='500', description='收入')
+        self.entry(expense_type='public', amount='30', description='公账查询样本')
+        self.entry(amount='20', description='垫付查询样本')
         raw = {'reply': '', 'questions': [], 'actions': [
-            {'type': 'dividend', 'amount': '30', 'currency': 'CNY', 'note': '查询样本'}]}
+            {'type': 'query', 'query': 'list_entries', 'filter_expense_type': 'public'}]}
         with patch('app.ai.parse', return_value=raw):
-            bot.process_update(self.message(2, '分红30'))
-            token = self.draft()['token']
-            self.click(3, f'a:{token}:go')
-        raw = {'reply': '', 'questions': [], 'actions': [{'type': 'query', 'query': 'dividends'}]}
-        with patch('app.ai.parse', return_value=raw):
-            bot.process_update(self.message(4, '看看分红记录'))
+            bot.process_update(self.message(2, '看看公账支出'))
         text = self.last_message()['text']
-        self.assertIn('分红记录', text)
-        self.assertIn('查询样本', text)
+        self.assertIn('公账查询样本', text)
+        self.assertNotIn('垫付查询样本', text)
 
     def test_ai_progress_bubble_is_sent_and_removed(self):
         self.link_bot()

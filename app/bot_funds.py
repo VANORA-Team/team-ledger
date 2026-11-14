@@ -47,7 +47,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
     for key, label in [('cash', '当前可用资金' if not payload.get('scenario') else '模拟后可用资金'),
                        ('due', '全部待报销'), ('reserve', '本次安排报销'), ('payable', '当前可安排付款'),
                        ('remaining', '本次安排后结余'), ('unplanned', '本次安排后仍待报销'),
-                       ('dividend_paid', '累计盈余分红'), ('dividend_available', '真实余额可分红'), ('shortage', '还需补充的资金')]:
+                       ('public_paid', '累计公账支出'), ('shortage', '还需补充的资金')]:
         lines.append(label + '：' + fmt(result[key]))
     projects = sorted([(m, e) for m in result['members'] for e in m['entries'] if Decimal(e['suggested']) > 0], key=lambda pair: (pair[1]['date'], pair[1]['id']))
     page, total, selected = pages(projects, page)
@@ -61,7 +61,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
     if not projects:
         lines.append('暂无可安排的付款项目。')
     dates = sorted({r['date'] for r in result['fx']['rates'].values() if r.get('date')})
-    lines.append('\n可用资金 = 团队收入 − 已报销 − 已分红；待报销未结清也可分红，分红会减少后续可报销资金。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
+    lines.append('\n可用资金 = 团队收入 − 公账支出 − 已报销；成员垫付仅在实际报销后扣减公账余额。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
     if result['fx'].get('warning'):
         lines.append(result['fx']['warning'])
     rows += paging(token, 'view', page, total)
@@ -72,7 +72,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
         rows += [[button('＋ 将这笔真实进账记入账本', f'f:{token}:income')]]
     if Decimal(result['due']) > 0:
         rows += [[button('💳 按实际余额一键报销', f'f:{token}:batch')]]
-    rows += [[button('盈余分红 / 分红记录', 'dividends'), button('全部待报销项目', 'list:plan:0')], nav()]
+    rows += [[button('全部待报销项目', 'list:plan:0')], nav()]
     say(conn, chat_id, '\n'.join(lines), rows, edit=True)
 
 

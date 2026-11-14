@@ -1,4 +1,4 @@
-"""Funds planning and dividend income tests, using isolated ledgers and mocked Telegram/FX."""
+"""Funds planning and reimbursement tests, using isolated ledgers and mocked Telegram/FX."""
 import json
 import time
 import unittest

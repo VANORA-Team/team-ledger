@@ -15,8 +15,9 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from . import config, ai, ai_context, ai_plan, dividends, fx
-from .db import db, init_db, settings
+from . import config, ai, ai_context, ai_plan, backups, fx
+from .backup_api import router as backup_router
+from .db import db, init_db, settings, remove_receipt_file, authenticated_session
 from .domain import (fail, admin, owner, public_user, hash_password, verify_password,
                      text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
                      save_settings, make_payment_quote, currency, receipt_media_type)
@@ -30,15 +31,26 @@ attempt_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    yield
+    scheduler = backups.Scheduler()
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
 
 
 app = FastAPI(title='一起记 · 团队账本', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(backup_router)
 
 
 @app.exception_handler(HTTPException)
 async def http_error(request, exc):
     return JSONResponse({'error': exc.detail}, status_code=exc.status_code)
+
+
+@app.exception_handler(backups.BackupError)
+async def backup_error(request, exc):
+    return JSONResponse({'error': str(exc)}, status_code=exc.status)
 
 
 @app.middleware('http')
@@ -50,16 +62,23 @@ async def security(request, call_next):
             accepted.add(os.environ['PUBLIC_URL'].rstrip('/'))
         if origin and origin.rstrip('/') not in accepted:
             return JSONResponse({'error': '请求来源不正确'}, status_code=403)
-        if int(request.headers.get('content-length', '0') or 0) > 9_000_000:
+        uploading_backup = request.url.path == '/api/backups/restore/upload'
+        maximum = backups.max_bytes() if uploading_backup else 9_000_000
+        try:
+            length = int(request.headers.get('content-length', '0') or 0)
+        except ValueError:
+            return JSONResponse({'error': '上传长度不正确'}, status_code=400)
+        if length < 0 or length > maximum:
             return JSONResponse({'error': '上传内容过大'}, status_code=413)
-        total = 0
-        chunks = []
-        async for chunk in request.stream():
-            total += len(chunk)
-            if total > 9_000_000:
-                return JSONResponse({'error': '上传内容过大'}, status_code=413)
-            chunks.append(chunk)
-        request._body = b''.join(chunks)
+        if not uploading_backup:
+            total = 0
+            chunks = []
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > maximum:
+                    return JSONResponse({'error': '上传内容过大'}, status_code=413)
+                chunks.append(chunk)
+            request._body = b''.join(chunks)
     response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
@@ -92,6 +111,7 @@ def digest(value):
 
 
 def current(request):
+    authenticated_session.set(None)
     token = request.cookies.get('ledger_session', '')
     if not token:
         fail('请先登录', 401)
@@ -102,6 +122,7 @@ def current(request):
         fail('登录已失效，请重新登录', 401)
     if request.method not in ('GET', 'HEAD') and not secrets.compare_digest(request.headers.get('x-csrf-token', ''), row['csrf']):
         fail('安全校验已失效，请刷新页面', 403)
+    authenticated_session.set(digest(token))
     return dict(row)
 
 
@@ -281,7 +302,7 @@ def delete_entry(entry_id: int, request: Request):
     with db(write=True) as conn:
         receipt = remove_entry(conn, user, entry_id)
     if receipt:
-        (config.DATA / 'receipts' / Path(receipt).name).unlink(missing_ok=True)
+        remove_receipt_file(receipt)
     return {'ok': True}
 
 
@@ -334,36 +355,6 @@ def payment_quotes(body: dict, request: Request):
         return [make_payment_quote(conn, user, entry_id, code, rates) for entry_id in ids]
 
 
-@app.get('/api/dividends')
-def dividend_history(request: Request):
-    current(request)
-    with db() as conn:
-        return dividends.history(conn)
-
-
-@app.post('/api/dividends/quote')
-def dividend_quote(body: dict, request: Request):
-    user = current(request)
-    with db() as conn:
-        conf = settings(conn)
-        code = body.get('currency', conf['reference_currency'])
-        currency(conf, code)
-        codes = dividends.needed_codes(conn) | {code}
-    rates = fx.rates_for(conf['reference_currency'], codes)
-    with db(write=True) as conn:
-        return dividends.quote(conn, user, code, rates)
-
-
-@app.post('/api/dividends')
-def create_dividend(body: dict, request: Request):
-    user = current(request)
-    key = request.headers.get('idempotency-key', '')
-    if not re.fullmatch('[A-Za-z0-9_-]{16,100}', key):
-        fail('缺少分红防重复标识，请刷新后重试')
-    with db(write=True) as conn:
-        return dividends.record(conn, user, body.get('quote_id'), body.get('amount'), body.get('note', ''), f'dividend:web:{user["id"]}:{key}')
-
-
 @app.get('/api/entries/{entry_id}/events')
 def events(entry_id: int, request: Request):
     current(request)
@@ -405,7 +396,7 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
             raise
         old = entry['receipt']
     if old:
-        (config.DATA / 'receipts' / old).unlink(missing_ok=True)
+        remove_receipt_file(old)
     return {'ok': True}
 
 
@@ -489,7 +480,7 @@ def ai_execute(body: dict, request: Request):
     with db(write=True) as conn:
         result = ai_plan.execute(conn, user, body.get('plan_id'), body.get('actions'))
     for name in result.pop('receipts', []):
-        (config.DATA / 'receipts' / Path(name).name).unlink(missing_ok=True)
+        remove_receipt_file(name)
     return result
 
 
@@ -599,11 +590,10 @@ def export(request: Request):
     current(request)
     with db() as conn:
         rows = [entry_view(conn, r['id']) for r in conn.execute('SELECT id FROM entries ORDER BY date,id').fetchall()]
-        dividend_rows = dividends.history(conn)
     output = io.StringIO()
     output.write('\ufeff')
     writer = csv.writer(output)
-    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '处理/付款备注', '最近付款时间', '累计已报销（原币种）', '剩余待报销（原币种）', '逐次付款明细'])
+    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '处理/付款备注', '最近付款时间', '累计已报销（原币种）', '剩余待报销（原币种）', '逐次付款明细', '支出方式'])
     from decimal import Decimal
     def safe(value):
         value = str(value or '')
@@ -614,11 +604,8 @@ def export(request: Request):
         due = format(Decimal(row['amount_minor'] - row['reimbursed_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f') if row['kind'] == 'expense' and row['status'] == 'pending' else ''
         writer.writerow([row['id'], row['kind'], row['date'], safe(row['description']), safe(row['payer_name']),
                          amount, row['currency'], '部分报销' if row['status'] == 'pending' and row['reimbursed_minor'] else row['status'], row['source'], safe(row['note']), safe(row['review_note']), row['paid_at'], paid, due,
-                         safe(json.dumps(row['payments'], ensure_ascii=False)) if row['payments'] else ''])
-    for row in reversed(dividend_rows):
-        writer.writerow(['D'+str(row['id']), 'dividend', row['created_at'][:10], '盈余分红', safe(row['name']),
-                         row['amount'], row['currency'], '已分红', 'ledger', safe(row['note']), '', row['created_at'], '', '',
-                         safe(json.dumps({k:row[k] for k in ('reference_currency','fx_rate','fx_date')}, ensure_ascii=False))])
+                         safe(json.dumps(row['payments'], ensure_ascii=False)) if row['payments'] else '',
+                         {'public': '公账支出', 'advance': '成员垫付'}.get(row['expense_type'], '')])
     return StreamingResponse(iter([output.getvalue()]), media_type='text/csv; charset=utf-8',
                              headers={'Content-Disposition': 'attachment; filename="team-ledger.csv"'})
 
@@ -626,7 +613,9 @@ def export(request: Request):
 @app.get('/')
 def index():
     html = (PUBLIC / 'index.html').read_text(encoding='utf-8')
-    for asset in ('app.js', 'style.css'):
+    for asset in ('app.js', 'style.css', 'backups.js', 'backups.css'):
+        if f'/static/{asset}"' not in html:
+            continue
         version = hashlib.sha256((PUBLIC / asset).read_bytes()).hexdigest()[:12]
         html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={version}"')
     return HTMLResponse(html, headers={'Cache-Control': 'no-store'})

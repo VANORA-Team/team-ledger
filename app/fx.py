@@ -83,7 +83,7 @@ def rates_for(base, codes, force=False):
     return result
 
 
-def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None, reimbursement=None):
+def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=None):
     base = fx['base']
     base_decimals = currency(conf, base)['decimals']
     quantum = Decimal(1).scaleb(-base_decimals)
@@ -95,32 +95,28 @@ def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None, r
         return Decimal(entry['amount_minor'] if units is None else units) / (10 ** entry['decimals']) * Decimal(fx['rates'][entry['currency']]['rate'])
 
     payments = payments or []
-    dividends = dividends or []
+    public_expenses = [e for e in entries if e['kind'] == 'expense' and e.get('expense_type') == 'public' and e['status'] == 'posted']
     balances = {}
-    for entry, factor in [(e, 1) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'] + [(p, -1) for p in payments + dividends]:
+    for entry, factor in [(e, 1) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'] + [(p, -1) for p in payments + public_expenses]:
         key = entry['currency']
         balances[key] = balances.get(key, Decimal(0)) + factor * Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
-    dividend_balances = {}
-    for dividend in dividends:
-        code = dividend['currency']
-        dividend_balances[code] = str(Decimal(dividend_balances.get(code, '0')) + Decimal(dividend['amount_minor']) / (10 ** dividend['decimals']))
     choice = reimbursement_plan.normalize(entries, conf, base, reimbursement)
-    common = {'reimbursement': choice, 'dividend_balances': dividend_balances, 'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
+    common = {'reimbursement': choice, 'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
               'complete': not fx['missing'], 'scenario': scenario, 'members': []}
     if fx['missing']:
         return common
     income = sum((convert(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0))
     today_income = sum((convert(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted' and e['date'] == today()), Decimal(0))
     paid = sum((convert(p) for p in payments), Decimal(0))
-    dividend_paid = sum((convert(d) for d in dividends), Decimal(0))
-    due_entries = sorted((e for e in entries if e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
+    public_paid = sum((convert(e) for e in public_expenses), Decimal(0))
+    due_entries = sorted((e for e in entries if e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance' and e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
     due = sum((convert(e, e['amount_minor'] - e['reimbursed_minor']) for e in due_entries), Decimal(0))
     extra = Decimal(0)
     if scenario:
         cur = currency(conf, scenario['currency'])
         units = minor_amount(scenario['amount'], cur['decimals'])
         extra = Decimal(units) / (10 ** cur['decimals']) * Decimal(fx['rates'][cur['code']]['rate'])
-    actual_cash = income - paid - dividend_paid
+    actual_cash = income - paid - public_paid
     cash = actual_cash + extra
     available = max(cash, Decimal(0))
     selected_ids = set(choice['entry_ids']) if choice['mode'] == 'manual' else {e['id'] for e in due_entries}
@@ -154,8 +150,8 @@ def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None, r
             'suggested': formatted(portion),
             'fully_covered': portion >= amount,
         })
-    common.update({k: formatted(v) for k, v in dict(income=income, today_income=today_income, paid=paid, dividend_paid=dividend_paid,
-                   dividend_available=max(actual_cash, Decimal(0)), actual_cash=actual_cash, cash=cash, due=due, selected_due=selected_due,
+    common.update({k: formatted(v) for k, v in dict(income=income, today_income=today_income, paid=paid, public_paid=public_paid,
+                   actual_cash=actual_cash, cash=cash, due=due, selected_due=selected_due,
                    reserve=reserve, payable=payable, remaining=cash-reserve, unplanned=due-reserve,
                    shortage=max(due-available, Decimal(0)), extra=extra).items()})
     common['members'] = [{**g, **{k: formatted(g[k]) for k in ('due', 'suggested')}} for g in groups.values()]
@@ -169,15 +165,13 @@ def report(base=None, scenario=None, force=False, reimbursement=None):
         currency(conf, base)
         entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
         payments = [dict(p) for p in conn.execute('SELECT * FROM payments')]
-        dividends = [dict(d) for d in conn.execute('SELECT * FROM dividends')]
     # Ignore drafts and voided entries when looking up rates.
-    codes = {e['currency'] for e in entries if (e['kind'] == 'income' and e['status'] == 'posted') or e['status'] in ('pending', 'reimbursed')}
+    codes = {e['currency'] for e in entries if e['status'] in ('posted', 'pending', 'reimbursed')}
     codes.update(p['currency'] for p in payments)
-    codes.update(d['currency'] for d in dividends)
     if scenario:
         currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], currency(conf, scenario['currency'])['decimals'])
         codes.add(scenario['currency'])
     # Reject invalid choices before requesting external exchange rates.
     reimbursement = reimbursement_plan.normalize(entries, conf, base, reimbursement)
-    return calculate(entries, conf, rates_for(base, codes, force), scenario, payments, dividends, reimbursement)
+    return calculate(entries, conf, rates_for(base, codes, force), scenario, payments, reimbursement)

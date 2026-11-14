@@ -28,12 +28,12 @@ def _amount(row, units):
 
 def _compact(row):
     item = {
-        'id': row['id'], 'date': row['date'], 'kind': row['kind'],
+        'id': row['id'], 'date': row['date'], 'kind': row['kind'], 'expense_type': row['expense_type'],
         'amount': _amount(row, row['amount_minor']), 'currency': row['currency'],
         'description': row['description'][:120], 'payer': row['payer_name'],
         'status': row['status'],
     }
-    if row['kind'] == 'expense':
+    if row['kind'] == 'expense' and row['expense_type'] == 'advance':
         item['remaining'] = _amount(row, row['amount_minor'] - row['reimbursed_minor'])
         if row['reimbursed_minor']:
             item['reimbursed'] = _amount(row, row['reimbursed_minor'])
@@ -43,7 +43,7 @@ def _compact(row):
 
 
 def _rows(conn, where='', params=(), limit=None):
-    sql = ('SELECT e.id,e.kind,e.amount_minor,e.currency,e.decimals,e.description,e.date,'
+    sql = ('SELECT e.id,e.kind,e.expense_type,e.amount_minor,e.currency,e.decimals,e.description,e.date,'
            'e.status,e.reimbursed_minor,e.note,u.name payer_name '
            'FROM entries e JOIN users u ON u.id=e.payer_id ' + where +
            ' ORDER BY e.date DESC,e.id DESC')
@@ -56,9 +56,9 @@ def _rows(conn, where='', params=(), limit=None):
 
 def entries(conn, limit=None):
     limit = limit or _limit()
-    # Every actionable row can be targeted by edit/void/pay/distribute; recent
+    # Every actionable row can be targeted by edit/void/pay; recent
     # history makes conversational references ("the taxi one") resolvable.
-    actionable = _rows(conn, "WHERE (e.kind='expense' AND e.status IN ('draft','pending')) OR (e.kind='income' AND e.status='posted')", limit=300)
+    actionable = _rows(conn, "WHERE e.status IN ('draft','pending','posted')", limit=300)
     recent = _rows(conn, '', limit=limit)
     merged, seen = [], set()
     for row in list(actionable) + list(recent):
@@ -85,7 +85,7 @@ def funds(conf):
     if not report.get('complete'):
         return {'complete': False, 'base': report.get('base'),
                 'warning': report.get('fx', {}).get('warning') or '汇率不完整'}
-    keys = ('base', 'income', 'paid', 'dividend_paid', 'dividend_available', 'cash', 'due',
+    keys = ('base', 'income', 'paid', 'public_paid', 'cash', 'due',
             'reserve', 'payable', 'remaining', 'shortage')
     return {key: report.get(key) for key in keys}
 

@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from fastapi import HTTPException
-from . import ai, ai_context, ai_plan, config, dividends, fx
+from . import ai, ai_context, ai_plan, config, fx
 from .db import db, init_db, settings, set_setting
 from .bot_ui import (COMMANDS, DELIVERY, PLATFORM, accepts_text, command_text, draft_for, handle,
                      queue, say, nav)
@@ -42,9 +42,6 @@ def _process_update(update, db_provider, platform):
         payload = json.loads(draft['payload']) if draft else {}
         followup_history = payload.get('history') if draft and draft['step'] == 'ai_plan' and payload.get('_flow') == 'ai_plan' else None
         funds_flow = command == '/funds' or callback_data == 'funds' or callback_data.startswith('f:') or (payload.get('_flow') == 'funds' and ((not callback and not command and accepted) or callback_data == f'd:{draft["token"]}:resume'))
-        dividend_open = (command == '/dividends' or callback_data == 'dividends'
-                         or callback_data.startswith('v:') and len(callback_data.split(':')) == 4 and callback_data.split(':')[2] == 'cur'
-                         or payload.get('_flow') == 'dividends' and callback_data == f'd:{draft["token"]}:resume' and draft['step'] in ('dividend_home', 'dividend_currency'))
         codes = {r['currency'] for r in conn.execute('SELECT DISTINCT currency FROM entries')}
         payment_code = None
         if callback and draft:
@@ -92,20 +89,12 @@ def _process_update(update, db_provider, platform):
             # Only posted income, outstanding expenses and actual payments affect
             # this calculator. Draft/voided currencies must not block the plan.
             with db_provider() as conn:
-                codes = {r['currency'] for r in conn.execute("SELECT currency FROM entries WHERE status IN ('posted','pending','reimbursed') UNION SELECT currency FROM payments UNION SELECT currency FROM dividends")}
+                codes = {r['currency'] for r in conn.execute("SELECT currency FROM entries WHERE status IN ('posted','pending','reimbursed') UNION SELECT currency FROM payments")}
             fund_action = callback_data.split(':')[2] if callback_data.startswith('f:') and len(callback_data.split(':')) > 2 else ''
             if payload.get('scenario') and fund_action not in ('refresh', 'cancel', 'batch', 'mode') and command != '/funds' and callback_data != 'funds':
                 codes.add(payload['scenario']['currency'])
             if payload.get('scenario_currency') and draft and draft['step'] == 'funds_amount' and not callback:
                 codes.add(payload['scenario_currency'])
-        if dividend_open:
-            with db_provider() as conn:
-                codes = dividends.needed_codes(conn)
-            codes.add(payload.get('currency', conf['reference_currency']) if command != '/dividends' and callback_data != 'dividends' else conf['reference_currency'])
-            if callback_data.startswith('v:') and callback_data.split(':')[2] == 'cur':
-                code = callback_data.split(':')[3]
-                if any(c['code'] == code for c in conf['currencies']):
-                    codes.add(code)
         if payment_code:
             # A payment quote only needs this entry's pair. Other ledger/default
             # currencies must not block a supported settlement-currency payment.
@@ -115,13 +104,13 @@ def _process_update(update, db_provider, platform):
             callback_data.startswith(f'f:{draft["token"]}:') and fund_action in ('plan', 'receipt', 'note', 'commit')
             or callback_data == f'd:{draft["token"]}:resume' and draft['step'] in ('funds_confirm', 'funds_note', 'funds_receipt')
             or not callback and not command and draft['step'] == 'funds_note')
-        if not frozen_funds and (dividend_open or funds_flow or wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description', 'amount')))):
+        if not frozen_funds and (funds_flow or wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description', 'amount')))):
             try:
                 rates = fx.rates_for(conf['reference_currency'], codes)
             except Exception:
                 rates = None
         if result and isinstance(result, dict) and isinstance(result.get('actions'), list):
-            # AI plans may need dividend/batch/query rates beyond the chat's usual currencies.
+            # AI plans may need batch/query rates beyond the chat's usual currencies.
             try:
                 with db_provider() as conn:
                     plan_rates = ai_plan.needed_rates(conn, conf, result)
