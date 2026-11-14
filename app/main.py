@@ -19,7 +19,7 @@ from . import config, ai, ai_context, ai_plan, dividends, fx
 from .db import db, init_db, settings
 from .domain import (fail, admin, owner, public_user, hash_password, verify_password,
                      text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
-                     save_settings, make_payment_quote, currency)
+                     save_settings, make_payment_quote, currency, receipt_media_type)
 
 PUBLIC = config.ROOT / 'public'
 DUMMY_HASH = hash_password('unused-dummy-password')
@@ -419,7 +419,9 @@ def get_receipt(entry_id: int, request: Request):
     path = config.DATA / 'receipts' / entry['receipt']
     if not path.is_file():
         fail('凭证文件不存在，请检查备份', 404)
-    return FileResponse(path, filename=entry['receipt_name'])
+    return FileResponse(path, filename=entry['receipt_name'],
+                        media_type=receipt_media_type(entry['receipt']),
+                        content_disposition_type='inline')
 
 
 @app.get('/api/report')

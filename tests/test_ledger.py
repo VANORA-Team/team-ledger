@@ -504,6 +504,35 @@ class LedgerTest(unittest.TestCase):
         self.post('/logout')
         self.assertEqual(self.client.get('/api'+url).status_code,401)
 
+    def test_receipt_preview_uses_validated_type_and_inline_response(self):
+        entry=self.entry()
+        self.assertIsNone(entry['receipt_type'])
+        url=f'/entries/{entry["id"]}/receipt'
+        self.assertEqual(self.client.get('/api'+url).status_code,404)
+        for data,name,media_type in (
+            (b'\x89PNG\r\n\x1a\nimage','凭证.pdf','image/png'),
+            (b'\xff\xd8\xffimage','receipt.html','image/jpeg'),
+            (b'%PDF-1.4 document','receipt.png','application/pdf'),
+            (b'\x89PNG\r\n\x1a\nimage','receipt','image/png'),
+        ):
+            with self.subTest(name=name,media_type=media_type):
+                uploaded=self.post(url,{'data':base64.b64encode(data).decode(),'name':name})
+                self.assertEqual(uploaded.status_code,200,uploaded.text)
+                response=self.client.get('/api'+url)
+                self.assertEqual(response.status_code,200)
+                self.assertEqual(response.content,data)
+                self.assertEqual(response.headers['content-type'],media_type)
+                self.assertTrue(response.headers['content-disposition'].startswith('inline;'))
+                self.assertEqual(response.headers['cache-control'],'no-store')
+                saved=self.client.get('/api/entries').json()[0]
+                self.assertTrue(saved['receipt'])
+                self.assertEqual(saved['receipt_name'],name)
+                self.assertEqual(saved['receipt_type'],media_type)
+        with db() as conn:
+            filename=conn.execute('SELECT receipt FROM entries WHERE id=?',(entry['id'],)).fetchone()[0]
+        (config.DATA/'receipts'/filename).unlink()
+        self.assertEqual(self.client.get('/api'+url).status_code,404)
+
     def test_ai_disabled_does_not_create_entries(self):
         self.assertEqual(self.post('/ai/parse',{'text':'打车35元'}).status_code,503)
         self.assertEqual(len(self.client.get('/api/entries').json()),0)

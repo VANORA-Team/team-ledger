@@ -15,6 +15,11 @@ def fail(message, status=400):
     raise HTTPException(status, message)
 
 
+def receipt_media_type(filename):
+    suffix = (filename or '').rsplit('.', 1)[-1].lower()
+    return {'png': 'image/png', 'jpg': 'image/jpeg', 'pdf': 'application/pdf'}.get(suffix)
+
+
 def text_value(value, label, limit=200, required=True):
     if not isinstance(value, str):
         fail(f'{label}格式不正确')
@@ -127,6 +132,7 @@ def entry_view(conn, entry_id):
         item['amount'] = format(Decimal(payment['amount_minor']) / (10 ** payment['decimals']), f'.{payment["decimals"]}f')
         item['entry_amount'] = amount(payment['entry_amount_minor'])
         result['payments'].append(item)
+    result['receipt_type'] = receipt_media_type(result['receipt'])
     result['receipt'] = bool(result['receipt'])
     result.pop('category', None)  # Retained database column only for compatibility with earlier local builds.
     return result

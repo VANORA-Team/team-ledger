@@ -108,9 +108,13 @@ function settlementDisplay(entry, report=state.report) {
   if (!Number.isFinite(convertedAmount)) return '';
   return `<span class="settlement-line">≈ ${money(convertedAmount,base)} <small>结算参考${rate.date?` · ${esc(rate.date)}`:''}</small></span>`;
 }
+function receiptLink(entry,label='查看凭证') {
+  const image=entry.receipt_type?.startsWith('image/');
+  return `<a class="tiny-link" href="/api/entries/${entry.id}/receipt" ${image?`data-receipt="${entry.id}"`:'target="_blank" rel="noreferrer"'}>${esc(label)}${image?'':' ↗'}</a>`;
+}
 function table(entries,{checkbox=false}={}) {
   if (!entries.length) return empty('还没有符合条件的账目','调整筛选条件，或记下新的一笔。',newButton());
-  return `<div class="table-wrap"><table class="data-table"><thead><tr>${checkbox?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>':''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox?`<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id)?'checked':''} aria-label="选择 ${esc(entryDescription(e))}"></td>`:''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(entryDescription(e))}</strong><span class="subline">${e.kind==='income'?'团队收入':'成员垫付'}${e.receipt?' · 已附凭证':''}</span></div></div></td><td>${esc(e.payer_name)}</td><td>${esc(e.date.slice(5).replace('-',' / '))}<span class="subline">${esc(e.date.slice(0,4))}</span></td><td class="money ${e.kind==='income'?'income':''}"><strong>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency,false)}</strong><span class="subline">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${e.source==='telegram'?'↗ Telegram':e.source==='feishu'?'↗ 飞书':e.source==='ai'?'✧ AI':'▣ Web'}</span></td><td>↗</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-wrap"><table class="data-table"><thead><tr>${checkbox?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>':''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox?`<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id)?'checked':''} aria-label="选择 ${esc(entryDescription(e))}"></td>`:''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(entryDescription(e))}</strong><span class="subline">${e.kind==='income'?'团队收入':'成员垫付'}${e.receipt?' · '+receiptLink(e):''}</span></div></div></td><td>${esc(e.payer_name)}</td><td>${esc(e.date.slice(5).replace('-',' / '))}<span class="subline">${esc(e.date.slice(0,4))}</span></td><td class="money ${e.kind==='income'?'income':''}"><strong>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency,false)}</strong><span class="subline">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${e.source==='telegram'?'↗ Telegram':e.source==='feishu'?'↗ 飞书':e.source==='ai'?'✧ AI':'▣ Web'}</span></td><td>↗</td></tr>`).join('')}</tbody></table></div>`;
 }
 function reportWarning(report=state.report) {
   if (!report) return `<div class="callout warning">${icon('info')}<span>资金计算暂不可用，请刷新重试。原币种收支仍可查看。</span></div>`;
@@ -574,9 +578,27 @@ async function openDetail(id) {
     if(!e.reimbursed_minor&&!['reimbursed','voided'].includes(e.status)&&mine)actions.push(`<button class="btn danger" data-action="void" data-id="${id}">作废账目</button>`);
     if(e.status==='voided'&&canManage())actions.push(`<button class="btn danger" data-delete-entry="${id}">永久删除</button>`);
     const actionNames={distribute:'历史记录：收入分红标记',created:'创建了账目',submit:'将草稿记入账本',approve:'历史记录：通过',reject:'历史记录：退回',pay:'登记了报销付款',edited:'修改了账目',receipt:'上传了凭证',void:'作废了账目'};
-    $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(entryDescription(e))}</p></div></div>${badge(entryStatus(e))}${paymentSummary(e)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(({web:'Web',telegram:'Telegram',feishu:'飞书',ai:'AI'})[e.source]||e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?`<a class="tiny-link" href="/api/entries/${id}/receipt" target="_blank" rel="noreferrer">下载 ${esc(e.receipt_name)} ↗</a>`:'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}${paymentHistory(e)}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
+    $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(entryDescription(e))}</p></div></div>${badge(entryStatus(e))}${paymentSummary(e)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(({web:'Web',telegram:'Telegram',feishu:'飞书',ai:'AI'})[e.source]||e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?receiptLink(e,'查看 '+(e.receipt_name||'凭证')):'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}${paymentHistory(e)}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
   }catch(e){$('#detail-content').innerHTML=empty('加载失败',e.message);}
 }
+function openReceipt(id) {
+  const entry=state.entries.find(e=>e.id===id);if(!entry?.receipt)return;
+  const dialog=$('#receipt-dialog'),image=$('#receipt-image'),status=$('#receipt-status'),zoom=$('[data-receipt-zoom]');
+  const url=`/api/entries/${id}/receipt`;
+  $('#receipt-name').textContent=entry.receipt_name||'凭证图片';
+  $('#receipt-original').href=url;
+  $('#receipt-stage').classList.remove('is-zoomed');
+  zoom.textContent='查看原尺寸';zoom.setAttribute('aria-pressed','false');zoom.disabled=true;
+  status.textContent='正在加载凭证…';status.hidden=false;
+  image.hidden=true;image.alt=entryDescription(entry)+'的凭证';
+  image.onload=()=>{image.hidden=false;status.hidden=true;zoom.disabled=false;};
+  image.onerror=()=>{status.textContent='图片加载失败，请稍后重试，或在新窗口查看原图。';};
+  image.src=url;
+  if(!dialog.open)dialog.showModal();
+}
+$('#receipt-dialog').addEventListener('close',()=>{
+  const image=$('#receipt-image');image.onload=image.onerror=null;image.removeAttribute('src');
+});
 async function openAction(action,ids) {
   if(!ids.length){toast('请先选择要处理的账目',true);return;}
   const rows=state.entries.filter(e=>ids.includes(e.id));
@@ -618,6 +640,11 @@ $('#action-payment-amounts').addEventListener('change',event=>{if(event.target.m
 document.addEventListener('click',async event=>{
   const b=event.target.closest('button,a,tr');if(!b)return;
   if(b.hasAttribute('data-close')){b.closest('dialog').close();return;}
+  if(b.hasAttribute('data-receipt')){event.preventDefault();openReceipt(Number(b.dataset.receipt));return;}
+  if(b.hasAttribute('data-receipt-zoom')){
+    const zoomed=$('#receipt-stage').classList.toggle('is-zoomed');
+    b.textContent=zoomed?'适应窗口':'查看原尺寸';b.setAttribute('aria-pressed',String(zoomed));return;
+  }
   if(b.hasAttribute('data-dividend-open')){await openDividend(b.dataset.dividendOpen);return;}
   if(b.hasAttribute('data-dividend-mode')){dividendMode(b.dataset.dividendMode);return;}
   if(b.hasAttribute('data-reload')){location.reload();return;}
