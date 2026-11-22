@@ -860,12 +860,12 @@ button:disabled:focus-visible {
 }
 
 .auth-brand-word {
-  font-family: var(--sans);
+  font-family: var(--font);
   font-size: 46px;
   font-weight: 600;
   letter-spacing: -3.2px;
   line-height: 1.1;
-  color: #2b2b2b;
+  color: #333333;
 }
 
 .auth-heading h1 {
@@ -1009,16 +1009,16 @@ button:disabled:focus-visible {
 }
 
 .brand-word {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
-  letter-spacing: -0.65px;
+  letter-spacing: -0.055em;
   line-height: 1;
-  color: #2a2a2a;
+  color: #333333;
   white-space: nowrap;
 }
 
 .brand-period {
-  color: var(--gold);
+  color: var(--muted);
 }
 
 .workspace-divider {
@@ -4448,8 +4448,8 @@ dialog.modal.modal-drawer .drawer-footer .button-primary:hover:not(:disabled) {
   }
 
   .brand-word {
-    font-size: 16px;
-    letter-spacing: -0.5px;
+    font-size: 18px;
+    letter-spacing: -0.055em;
   }
 
   .brand-symbol {
