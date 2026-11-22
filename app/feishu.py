@@ -1,4 +1,4 @@
-"""Feishu private-chat worker. One worker must own a database's Feishu inbox."""
+"""Feishu bot worker (private chat & allowlisted groups). One worker must own a database's Feishu inbox."""
 import hashlib
 import json
 import logging
@@ -14,39 +14,123 @@ import uuid
 from fastapi import HTTPException
 from . import ai, ai_context, ai_plan, config, feishu_ui
 from .bot_ui import ai_query_line, amount_text
-from .db import db, init_db, settings, remove_receipt_file
+from .db import db, init_db, settings, set_setting, remove_receipt_file
 
 LOG = logging.getLogger(__name__)
 BOT_OPEN_ID = None
-HELP = ('发送「绑定 绑定码」绑定账号。绑定后可发送「支出 35 CNY 打车」或「收入 100 CNY 收款」；'
-        '也可以发送「最近账目」「余额」「待报销」。配置 AI 后可用自然语言记账和查询。'
-        '新增、修改、作废和报销等操作需要回复预览中的确认码。仅支持私聊。')
+MAX_ATTEMPTS = 8
+DOMAIN_ALIASES = {
+    '': 'https://open.feishu.cn',
+    'feishu': 'https://open.feishu.cn',
+    'lark': 'https://open.larksuite.com',
+}
+HELP = (
+    '发送「绑定 绑定码」绑定账号。绑定后发送 /start 或「菜单」打开按钮菜单；'
+    '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「收入 100 CNY 收款」'
+    '或「最近账目」「余额」「待报销」。配置 AI 后支持自然语言多笔记账与查询，确认后才会入账。'
+    '群聊中 @机器人发送 /groupid 获取群 ID 并加入 Web 允许名单即可使用。'
+)
+
+
+def resolve_domain(value=''):
+    raw = str(value or '').strip()
+    if raw.lower() in DOMAIN_ALIASES:
+        return DOMAIN_ALIASES[raw.lower()]
+    if raw.startswith('https://') and len(raw) <= 200:
+        return raw.rstrip('/')
+    return DOMAIN_ALIASES['']
+
+
+def feishu_domain():
+    with db() as conn:
+        row = conn.execute('SELECT domain FROM feishu_config WHERE id=1').fetchone()
+    if row and row['domain']:
+        return resolve_domain(row['domain'])
+    return resolve_domain(os.getenv('FEISHU_DOMAIN', ''))
+
+
+def _extract_post_content(raw_content):
+    """Extract plain text and @-mentioned open_ids from Feishu rich-text `post` payloads."""
+    try:
+        payload = json.loads(raw_content)
+    except (ValueError, TypeError):
+        return '', []
+    if not isinstance(payload, dict):
+        return '', []
+    if 'content' in payload and isinstance(payload['content'], list):
+        block = payload
+    else:
+        block = next(
+            (val for val in payload.values() if isinstance(val, dict) and isinstance(val.get('content'), list)),
+            None,
+        )
+    if not isinstance(block, dict):
+        return '', []
+    lines, at_ids = [], []
+    title = str(block.get('title') or '').strip()
+    if title:
+        lines.append(title)
+    for paragraph in block.get('content') or []:
+        if not isinstance(paragraph, list):
+            continue
+        parts = []
+        for node in paragraph:
+            if not isinstance(node, dict):
+                continue
+            tag = node.get('tag')
+            if tag == 'text':
+                parts.append(str(node.get('text') or ''))
+            elif tag == 'a':
+                parts.append(str(node.get('text') or node.get('href') or ''))
+            elif tag == 'at':
+                uid = node.get('user_id') or node.get('open_id')
+                if isinstance(uid, str) and uid:
+                    at_ids.append(uid)
+        line = ''.join(parts).strip()
+        if line:
+            lines.append(line)
+    return '\n'.join(lines).strip(), at_ids
 
 
 def accept_event(data):
     """Persist a validated SDK event before acknowledging it to Feishu."""
     event = data.event
     msg, sender = event.message, event.sender
-    if (getattr(msg, 'chat_type', None) not in ('p2p', 'group') or
-            getattr(msg, 'message_type', None) != 'text' or
-            getattr(sender, 'sender_type', None) != 'user'):
+    chat_type = getattr(msg, 'chat_type', None)
+    msg_type = getattr(msg, 'message_type', None)
+    if chat_type not in ('p2p', 'group') or getattr(sender, 'sender_type', None) != 'user':
         return
     sender_id = getattr(sender, 'sender_id', None)
     open_id = getattr(sender_id, 'open_id', None)
     message_id, chat_id = getattr(msg, 'message_id', None), getattr(msg, 'chat_id', None)
     if not all(isinstance(x, str) and 0 < len(x) <= 256 for x in (open_id, message_id, chat_id)):
         return
-    try:
-        text = json.loads(msg.content).get('text', '').strip()
-    except (ValueError, TypeError, AttributeError):
+    if msg_type in ('image', 'file') and chat_type == 'p2p':
+        envelope = feishu_ui.PREFIX + json.dumps({'group': False, 'media_hint': True}, ensure_ascii=False)
+        with db(write=True) as conn:
+            conn.execute('INSERT OR IGNORE INTO feishu_inbox(message_id,open_id,chat_id,text,created_at) VALUES (?,?,?,?,?)',
+                         (message_id, open_id, chat_id, envelope, config.now()))
         return
-    if not isinstance(text, str) or not text or len(text) > 4000:
+    if msg_type not in ('text', 'post'):
         return
-    if msg.chat_type == 'group':
+    post_at_ids = []
+    if msg_type == 'post':
+        text, post_at_ids = _extract_post_content(getattr(msg, 'content', ''))
+    else:
+        try:
+            text = json.loads(msg.content).get('text', '').strip()
+        except (ValueError, TypeError, AttributeError):
+            return
+    if not isinstance(text, str) or len(text) > 4000:
+        return
+    if chat_type == 'group':
         mentions = getattr(msg, 'mentions', None) or []
-        bot_mentions = [m for m in mentions if BOT_OPEN_ID and
-                        getattr(getattr(m, 'id', None), 'open_id', None) == BOT_OPEN_ID]
-        if not bot_mentions:
+        bot_mentions = [
+            m for m in mentions
+            if BOT_OPEN_ID and getattr(getattr(m, 'id', None), 'open_id', None) == BOT_OPEN_ID
+        ]
+        mentioned_in_post = bool(BOT_OPEN_ID and BOT_OPEN_ID in post_at_ids)
+        if not bot_mentions and not mentioned_in_post:
             return
         for mention in bot_mentions:
             key = getattr(mention, 'key', None)
@@ -55,11 +139,17 @@ def accept_event(data):
         text = text.strip()
         if not text:
             text = '/start'
-        text = feishu_ui.PREFIX + json.dumps({'group': True, 'text': text,
-                              'parent': getattr(msg, 'parent_id', None)}, ensure_ascii=False)
-    elif text.startswith(feishu_ui.PREFIX):
-        # Internal envelopes must only be constructed by the event adapter.
-        text = feishu_ui.PREFIX + json.dumps({'group': False, 'text': text}, ensure_ascii=False)
+        envelope = {'group': True, 'text': text, 'parent': getattr(msg, 'parent_id', None)}
+        root_id = getattr(msg, 'root_id', None)
+        if isinstance(root_id, str) and root_id:
+            envelope['root'] = root_id
+        text = feishu_ui.PREFIX + json.dumps(envelope, ensure_ascii=False)
+    else:
+        if not text:
+            return
+        if text.startswith(feishu_ui.PREFIX):
+            # Internal envelopes must only be constructed by the event adapter.
+            text = feishu_ui.PREFIX + json.dumps({'group': False, 'text': text}, ensure_ascii=False)
     with db(write=True) as conn:
         conn.execute('INSERT OR IGNORE INTO feishu_inbox(message_id,open_id,chat_id,text,created_at) VALUES (?,?,?,?,?)',
                      (message_id, open_id, chat_id, text, config.now()))
@@ -71,6 +161,7 @@ def accept_card(data):
     token = (getattr(event.action, 'value', None) or {}).get('token')
     open_id = getattr(event.operator, 'open_id', None)
     chat_id = getattr(event.context, 'open_chat_id', None)
+    open_message_id = getattr(event.context, 'open_message_id', None)
     event_id = getattr(getattr(data, 'header', None), 'event_id', None)
     accepted = False
     if all(isinstance(x, str) and 0 < len(x) <= 256 for x in (token, open_id, chat_id, event_id)):
@@ -80,15 +171,20 @@ def accept_card(data):
                 'JOIN feishu_links l ON l.open_id=i.open_id JOIN fsui_links f ON f.telegram_id=a.telegram_id AND f.user_id=l.user_id '
                 'JOIN users u ON u.id=l.user_id AND u.active=1 '
                 'WHERE a.token=? AND i.open_id=? AND a.chat_id=? AND a.expires>?',
-                (token, open_id, chat_id, int(time.time()))).fetchone()
+                (token, open_id, chat_id, int(time.time())),
+            ).fetchone()
             if action and (not action['group_mode'] or chat_id in settings(conn)['feishu_allowed_chats']):
-                value = feishu_ui.PREFIX + json.dumps({'action_token': token, 'group': bool(action['group_mode'])})
+                payload = {'action_token': token, 'group': bool(action['group_mode'])}
+                if isinstance(open_message_id, str) and 0 < len(open_message_id) <= 256:
+                    payload['open_message_id'] = open_message_id
+                value = feishu_ui.PREFIX + json.dumps(payload)
                 conn.execute('INSERT OR IGNORE INTO feishu_inbox(message_id,open_id,chat_id,text,created_at) VALUES (?,?,?,?,?)',
                              ('card:' + event_id, open_id, chat_id, value, config.now()))
                 accepted = True
     return P2CardActionTriggerResponse({'toast': {
         'type': 'info' if accepted else 'warning',
-        'content': '已收到' if accepted else '按钮已过期或不属于你，请重新打开菜单。'}})
+        'content': '处理中…' if accepted else '按钮已过期或不属于你，请重新打开菜单。',
+    }})
 
 
 def enqueue(conn, chat_id, open_id, text):
@@ -102,8 +198,9 @@ def _raw_input(text, conf):
     if match:
         return {'reply': '', 'questions': [], 'actions': [{'type': 'create_entry',
                 'kind': 'income' if match[1] == '收入' else 'expense',
-                'expense_type': '' if match[1] == '收入' else 'public' if match[1] == '公账支出' else 'advance', 'amount': match[2],
-                'currency': match[3].upper(), 'description': match[4] or '', 'date': config.today()}]}
+                'expense_type': '' if match[1] == '收入' else 'public' if match[1] == '公账支出' else 'advance',
+                'amount': match[2], 'currency': match[3].upper(),
+                'description': match[4] or '', 'date': config.today()}]}
     queries = {'最近账目': 'list_entries', '余额': 'balance', '待报销': 'due'}
     if text in queries:
         return {'reply': '', 'questions': [], 'actions': [{'type': 'query', 'query': queries[text]}]}
@@ -144,7 +241,10 @@ def process_one():
         if not msg:
             return False
         msg = dict(msg)
-        user = conn.execute('SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=? AND u.active=1', (msg['open_id'],)).fetchone()
+        user = conn.execute(
+            'SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=? AND u.active=1',
+            (msg['open_id'],),
+        ).fetchone()
         user = dict(user) if user else None
         conf = settings(conn)
     text, open_id, chat_id = msg['text'], msg['open_id'], msg['chat_id']
@@ -157,16 +257,37 @@ def process_one():
             identity = conn.execute('SELECT id FROM fsui_identities WHERE open_id=?', (open_id,)).fetchone()
             active_draft = identity and conn.execute(
                 'SELECT 1 FROM fsui_drafts WHERE telegram_id=? AND chat_id=? AND expires>?',
-                (str(identity['id']), chat_id, int(time.time()))).fetchone()
-        if text.startswith('/') or active_draft:
+                (str(identity['id']), chat_id, int(time.time())),
+            ).fetchone()
+        if text in ('菜单', '主菜单'):
+            ui_event = {'text': '/start', 'group': False}
+        elif text.startswith('/') or active_draft:
             ui_event = {'text': text, 'group': False}
     if ui_event is not None:
-        if ui_event.get('group') and ui_event.get('text') == '/groupid':
+        if ui_event.get('media_hint'):
+            with db(write=True) as conn:
+                if user:
+                    url = os.getenv('PUBLIC_URL', '').rstrip('/')
+                    suffix = f'\nWeb 账本：{url}' if url.startswith(('https://', 'http://')) else ''
+                    enqueue(conn, chat_id, open_id,
+                            '飞书机器人暂不支持直接上传凭证文件，请在 Web 账目详情中上传 PNG / JPG / PDF 凭证。' + suffix)
+                else:
+                    enqueue(conn, chat_id, open_id,
+                            '请先登录 Web「机器人与 AI」生成飞书绑定码，再在此私聊发送「绑定 绑定码」。')
+                conn.execute("UPDATE feishu_inbox SET done=1,text='' WHERE message_id=?", (msg['message_id'],))
+            return True
+        if ui_event.get('group') and str(ui_event.get('text') or '').strip().lower() == '/groupid':
             with db(write=True) as conn:
                 enqueue(conn, chat_id, open_id, '本群 ID：' + chat_id + '\n请在 Web「团队设置」中添加此 ID。')
                 conn.execute("UPDATE feishu_inbox SET done=1,text='' WHERE message_id=?", (msg['message_id'],))
             return True
-        feishu_ui.process(msg, ui_event)
+        try:
+            feishu_ui.process(msg, ui_event)
+        except Exception:
+            LOG.exception('Feishu interactive processing failed for message %s', msg['message_id'])
+            with db(write=True) as conn:
+                if not ui_event.get('group') or chat_id in settings(conn)['feishu_allowed_chats']:
+                    enqueue(conn, chat_id, open_id, '处理这条操作时出现异常，请重新发送 /start 打开菜单重试。')
         with db(write=True) as conn:
             conn.execute("UPDATE feishu_inbox SET done=1,text='' WHERE message_id=?", (msg['message_id'],))
         return True
@@ -190,11 +311,18 @@ def process_one():
         current = conn.execute('SELECT done FROM feishu_inbox WHERE message_id=?', (msg['message_id'],)).fetchone()
         if not current or current['done']:
             return True
-        linked = conn.execute('SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=? AND u.active=1', (open_id,)).fetchone()
+        linked = conn.execute(
+            'SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=? AND u.active=1',
+            (open_id,),
+        ).fetchone()
         reply = None
         if binding:
             code_hash = hashlib.sha256(binding[1].encode()).hexdigest()
-            row = conn.execute('SELECT c.user_id FROM feishu_link_codes c JOIN users u ON u.id=c.user_id WHERE c.code_hash=? AND c.expires>? AND u.active=1', (code_hash, int(time.time()))).fetchone()
+            row = conn.execute(
+                'SELECT c.user_id FROM feishu_link_codes c JOIN users u ON u.id=c.user_id '
+                'WHERE c.code_hash=? AND c.expires>? AND u.active=1',
+                (code_hash, int(time.time())),
+            ).fetchone()
             if row:
                 old_id = conn.execute('SELECT id FROM fsui_identities WHERE open_id=?', (open_id,)).fetchone()
                 if old_id:
@@ -207,14 +335,19 @@ def process_one():
                 conn.execute('DELETE FROM feishu_links WHERE open_id=? OR user_id=?', (open_id, row['user_id']))
                 conn.execute('INSERT INTO feishu_links VALUES (?,?)', (open_id, row['user_id']))
                 conn.execute('DELETE FROM feishu_link_codes WHERE user_id=?', (row['user_id'],))
-                reply = '绑定成功。发送 /start 打开按钮菜单。' + HELP
+                reply = (
+                    '绑定成功。发送 /start 或「菜单」打开按钮菜单；'
+                    '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「收入 100 CNY 收款」或自然语言记账。'
+                )
             else:
                 reply = '绑定码无效或已过期，请在 Web「机器人与 AI」重新生成。'
         elif not linked:
             reply = '请先登录 Web「机器人与 AI」生成飞书绑定码，再在此私聊发送「绑定 绑定码」。'
         elif confirm:
-            pending = conn.execute('SELECT * FROM feishu_pending WHERE open_id=? AND user_id=? AND confirmation=? AND expires>?',
-                                   (open_id, linked['id'], confirm[2].upper(), int(time.time()))).fetchone()
+            pending = conn.execute(
+                'SELECT * FROM feishu_pending WHERE open_id=? AND user_id=? AND confirmation=? AND expires>?',
+                (open_id, linked['id'], confirm[2].upper(), int(time.time())),
+            ).fetchone()
             if not pending:
                 reply = '确认码无效或已过期，请重新发送记账内容。'
             elif confirm[1] == '取消':
@@ -281,14 +414,18 @@ def process_one():
 def send_one(client):
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
     with db() as conn:
-        row = conn.execute('SELECT * FROM feishu_outbox WHERE sent=0 ORDER BY id LIMIT 1').fetchone()
+        row = conn.execute(
+            'SELECT * FROM feishu_outbox WHERE sent=0 AND attempts<? ORDER BY id LIMIT 1',
+            (MAX_ATTEMPTS,),
+        ).fetchone()
         if not row:
             return False
         row = dict(row)
         authorized = row['user_id'] is None or conn.execute(
             'SELECT 1 FROM feishu_links l JOIN users u ON u.id=l.user_id '
             'WHERE l.open_id=? AND l.user_id=? AND u.active=1',
-            (row['open_id'], row['user_id'])).fetchone()
+            (row['open_id'], row['user_id']),
+        ).fetchone()
     if not authorized:
         with db(write=True) as conn:
             conn.execute("UPDATE feishu_outbox SET sent=1,text='' WHERE id=?", (row['id'],))
@@ -298,7 +435,18 @@ def send_one(client):
     request = CreateMessageRequest.builder().receive_id_type('chat_id').request_body(body).build()
     response = client.im.v1.message.create(request)
     if not response.success():
-        raise RuntimeError(f'Feishu send failed (code {response.code})')
+        code = getattr(response, 'code', None)
+        with db(write=True) as conn:
+            if code in feishu_ui.PERMANENT_FEISHU_CODES:
+                conn.execute("UPDATE feishu_outbox SET attempts=?,text='' WHERE id=?", (MAX_ATTEMPTS, row['id']))
+                LOG.warning('Dropping permanent Feishu message failure (code %s, row %s)', code, row['id'])
+                return True
+            next_attempts = int(row.get('attempts', 0)) + 1
+            if next_attempts >= MAX_ATTEMPTS:
+                conn.execute("UPDATE feishu_outbox SET attempts=?,text='' WHERE id=?", (next_attempts, row['id']))
+            else:
+                conn.execute('UPDATE feishu_outbox SET attempts=? WHERE id=?', (next_attempts, row['id']))
+        raise RuntimeError(f'Feishu send failed (code {code})')
     with db(write=True) as conn:
         conn.execute("UPDATE feishu_outbox SET sent=1,text='' WHERE id=?", (row['id'],))
     return True
@@ -318,42 +466,72 @@ def run_worker():
     if not app_id or not app_secret:
         raise SystemExit('请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET。')
     init_db()
-    client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+    domain = feishu_domain()
+    client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
 
     def refresh_bot_id():
         global BOT_OPEN_ID
+        bot_name = ''
+        last_error = ''
         try:
             request = (lark.BaseRequest.builder().http_method(lark.HttpMethod.GET)
                        .uri('/open-apis/bot/v3/info').token_types({lark.AccessTokenType.TENANT}).build())
             response = client.request(request)
             payload = json.loads(response.raw.content)
-            BOT_OPEN_ID = payload.get('bot', {}).get('open_id') if response.success() else None
-        except Exception:
+            if response.success():
+                bot_info = payload.get('bot', {}) or {}
+                BOT_OPEN_ID = bot_info.get('open_id')
+                bot_name = str(bot_info.get('app_name') or '')
+            else:
+                BOT_OPEN_ID = None
+                last_error = f'获取机器人信息失败（code {response.code}）'
+        except Exception as exc:
             BOT_OPEN_ID = None
+            last_error = f'连接飞书接口失败：{exc.__class__.__name__}'
+        with db(write=True) as conn:
+            set_setting(conn, 'feishu_heartbeat', int(time.time()))
+            if bot_name:
+                set_setting(conn, 'feishu_bot_name', bot_name)
+            set_setting(conn, 'feishu_last_error', last_error)
         if not BOT_OPEN_ID:
             LOG.warning('Unable to obtain the Feishu bot identity; group messages are disabled.')
 
+    # Populate BOT_OPEN_ID synchronously before connecting WebSocket so initial group mentions work.
+    refresh_bot_id()
+
     def work():
-        next_identity_check = 0
+        next_identity_check = time.monotonic() + (600 if BOT_OPEN_ID else 60)
+        next_heartbeat = time.monotonic() + 30
         while True:
             try:
-                if not BOT_OPEN_ID and time.monotonic() >= next_identity_check:
+                now_mono = time.monotonic()
+                if now_mono >= next_identity_check:
                     refresh_bot_id()
-                    next_identity_check = time.monotonic() + 60
+                    next_identity_check = now_mono + (600 if BOT_OPEN_ID else 60)
+                if now_mono >= next_heartbeat:
+                    with db(write=True) as conn:
+                        set_setting(conn, 'feishu_heartbeat', int(time.time()))
+                    next_heartbeat = now_mono + 30
                 handled = process_one()
                 sent = send_one(client)
                 ui_sent = feishu_ui.send_one(client)
                 if not handled and not sent and not ui_sent:
                     time.sleep(1)
-            except Exception:
+            except Exception as exc:
                 LOG.exception('Feishu worker failed; retrying')
+                try:
+                    with db(write=True) as conn:
+                        set_setting(conn, 'feishu_last_error', str(exc)[:200])
+                except Exception:
+                    pass
                 time.sleep(5)
+
     threading.Thread(target=work, daemon=True).start()
     handler = (lark.EventDispatcherHandler.builder('', '')
                .register_p2_im_message_receive_v1(accept_event)
                .register_p2_card_action_trigger(accept_card).build())
     from .feishu_ws import Client
-    Client(app_id, app_secret, event_handler=handler).start()
+    Client(app_id, app_secret, event_handler=handler, domain=domain).start()
 
 
 def main():

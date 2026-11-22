@@ -2,12 +2,16 @@
 import json
 import os
 import secrets
+import tempfile
 import time
 import unittest
+import urllib.error
+from pathlib import Path
+from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 from tests import test_ledger as base
 from tests import test_bot_ui as ui
-from app import ai, bot, config
+from app import ai, ai_context, bot, config, feishu
 from app.db import db, init_db
 
 
@@ -472,6 +476,16 @@ class AiTransportTest(unittest.TestCase):
                'currencies': [], 'members': [], 'entries': [], 'funds': {'complete': False}}
     env = {'AI_API_KEY': 'test-only-not-real', 'AI_MODEL': 'test-model', 'AI_RESPONSE_FORMAT': 'json_object'}
 
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='ledger-ai-transport-', dir=os.getenv('LEDGER_TEST_TMP'))
+        self.old_data, self.old_db = config.DATA, config.DB_PATH
+        config.DATA = Path(self.temp.name)
+        config.DB_PATH = config.DATA / 'nonexistent.sqlite3'
+
+    def tearDown(self):
+        config.DATA, config.DB_PATH = self.old_data, self.old_db
+        self.temp.cleanup()
+
     def response(self, content):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps(
@@ -691,6 +705,279 @@ class AiTelegramPlanTest(unittest.TestCase):
         self.assertIn('没有可以执行的操作', text)
         self.assertIn('⚠️', text)
         self.assertEqual(self.entries(), [])
+
+
+class AiWebConfigTest(unittest.TestCase):
+    setUp = base.LedgerTest.setUp
+    tearDown = base.LedgerTest.tearDown
+    post = base.LedgerTest.post
+    entry = base.LedgerTest.entry
+    new_member = base.LedgerTest.new_member
+    link_bot = base.LedgerTest.link_bot
+    message = staticmethod(base.LedgerTest.message)
+
+    EMPTY_AI_ENV = {
+        'AI_BASE_URL': '', 'AI_API_KEY': '', 'AI_MODEL': '',
+        'AI_RESPONSE_FORMAT': '', 'AI_TIMEOUT': '',
+        'AI_CONTEXT_ENTRIES': '', 'AI_CONTEXT_CHARS': '', 'AI_MAX_ACTIONS': '',
+    }
+
+    def put_ai(self, payload):
+        return self.client.put('/api/ai/config', json=payload, headers=self.headers)
+
+    def upstream(self, content, model='gpt-4o-mini'):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            'model': model,
+            'choices': [{'message': {'content': content}}],
+        }).encode()
+        return response
+
+    def test_web_ai_config_works_without_any_env_vars(self):
+        with patch.dict(os.environ, self.EMPTY_AI_ENV):
+            initial = self.client.get('/api/ai/config')
+            self.assertEqual(initial.status_code, 200)
+            self.assertFalse(initial.json()['configured'])
+            self.assertFalse(initial.json()['has_api_key'])
+            self.assertEqual(initial.json()['source'], 'none')
+
+            disabled = self.post('/ai/plan', {'text': '打车 35 元'})
+            self.assertEqual(disabled.status_code, 503)
+            self.assertIn('机器人与 AI', disabled.json()['error'])
+            self.assertNotIn('.env', disabled.json()['error'])
+
+            secret = 'sk-web-only-secret-987654'
+            saved = self.put_ai({
+                'enabled': True,
+                'base_url': 'https://ai.example.test/v1/chat/completions/',
+                'api_key': secret,
+                'model': 'gpt-4o-mini',
+                'response_format': 'none',
+                'timeout': 25,
+                'context_entries': 25,
+                'context_chars': 12000,
+                'max_actions': 2,
+            })
+            self.assertEqual(saved.status_code, 200, saved.text)
+            body = saved.json()
+            self.assertTrue(body['configured'])
+            self.assertTrue(body['has_api_key'])
+            self.assertEqual(body['source'], 'db')
+            self.assertEqual(body['base_url'], 'https://ai.example.test/v1')
+            self.assertEqual(body['response_format'], 'none')
+            self.assertEqual((body['timeout'], body['context_entries'], body['context_chars'], body['max_actions']),
+                             (25, 25, 12000, 2))
+            self.assertNotIn(secret, saved.text)
+            self.assertNotIn(secret, self.client.get('/api/ai/config').text)
+            self.assertNotIn(secret, self.client.get('/api/integrations').text)
+            self.assertNotIn(secret, self.client.get('/api/settings').text)
+            self.assertTrue(self.client.get('/api/integrations').json()['ai_configured'])
+
+            raw_plan = {'reply': '已识别', 'questions': [], 'actions': [
+                {'type': 'create_entry', 'kind': 'expense', 'amount': '35', 'currency': 'CNY',
+                 'description': '打车', 'date': config.today()},
+            ]}
+            captured = {}
+
+            def fake_urlopen(req, timeout=None):
+                captured['url'] = req.full_url
+                captured['auth'] = req.get_header('Authorization')
+                captured['timeout'] = timeout
+                captured['body'] = json.loads(req.data.decode())
+                return self.upstream(json.dumps(raw_plan, ensure_ascii=False))
+
+            with patch('urllib.request.urlopen', side_effect=fake_urlopen):
+                planned = self.post('/ai/plan', {'text': '今天打车35元'})
+            self.assertEqual(planned.status_code, 200, planned.text)
+            self.assertEqual(captured['url'], 'https://ai.example.test/v1/chat/completions')
+            self.assertEqual(captured['auth'], 'Bearer ' + secret)
+            self.assertEqual(captured['timeout'], 25)
+            self.assertEqual(captured['body']['model'], 'gpt-4o-mini')
+            self.assertNotIn('response_format', captured['body'])
+            self.assertEqual(len(planned.json()['actions']), 1)
+
+            # Web-configured max_actions=2 is enforced.
+            too_many = {'reply': '', 'questions': [], 'actions': [
+                {'type': 'create_entry', 'kind': 'expense', 'amount': str(n), 'currency': 'CNY',
+                 'description': f'笔{n}', 'date': config.today()} for n in range(1, 4)
+            ]}
+            with patch('urllib.request.urlopen', return_value=self.upstream(json.dumps(too_many))):
+                rejected = self.post('/ai/plan', {'text': '三笔账'})
+            self.assertEqual(rejected.status_code, 400)
+            self.assertIn('一次最多处理 2 项操作', rejected.json()['error'])
+
+            # Web-configured context limits are read by ai_context.
+            with db() as conn:
+                self.assertEqual(ai_context._limit(conn), 25)
+                self.assertEqual(ai_context._char_cap(conn), 12000)
+
+    def test_blank_api_key_preserves_secret_and_disable_or_clear_overrides_env(self):
+        with patch.dict(os.environ, {'AI_API_KEY': 'sk-env-legacy', 'AI_MODEL': 'env-model'}):
+            # Before any Web save, legacy env fallback works.
+            self.assertTrue(self.client.get('/api/integrations').json()['ai_configured'])
+            self.assertEqual(self.client.get('/api/ai/config').json()['source'], 'env')
+
+            # Save in Web with a new key.
+            self.assertEqual(self.put_ai({
+                'enabled': True, 'base_url': 'http://127.0.0.1:11434/v1',
+                'api_key': 'sk-web-1', 'model': 'qwen2.5',
+            }).status_code, 200)
+
+            # Updating model with blank api_key keeps sk-web-1.
+            self.assertEqual(self.put_ai({
+                'enabled': True, 'base_url': 'http://127.0.0.1:11434/v1',
+                'api_key': '', 'model': 'qwen2.5:14b',
+            }).status_code, 200)
+            self.assertEqual(ai.load_config()['api_key'], 'sk-web-1')
+            self.assertEqual(ai.load_config()['model'], 'qwen2.5:14b')
+
+            # Disabling in Web overrides env vars.
+            dis = self.put_ai({'enabled': False})
+            self.assertEqual(dis.status_code, 200)
+            self.assertFalse(dis.json()['configured'])
+            self.assertTrue(dis.json()['has_api_key'])
+            self.assertFalse(self.client.get('/api/integrations').json()['ai_configured'])
+            res = self.post('/ai/plan', {'text': '打车 10 元'})
+            self.assertEqual(res.status_code, 503)
+            self.assertIn('停用', res.json()['error'])
+
+            # Re-enabling without resending api_key works immediately.
+            en = self.put_ai({'enabled': True})
+            self.assertEqual(en.status_code, 200)
+            self.assertTrue(en.json()['configured'])
+
+            # Clearing via DELETE removes key and still overrides lingering env vars.
+            cleared = self.client.delete('/api/ai/config', headers=self.headers)
+            self.assertEqual(cleared.status_code, 200, cleared.text)
+            self.assertFalse(cleared.json()['configured'])
+            self.assertFalse(cleared.json()['has_api_key'])
+            self.assertFalse(cleared.json()['enabled'])
+            self.assertEqual(cleared.json()['source'], 'db')
+            self.assertEqual(ai.load_config()['api_key'], '')
+            self.assertFalse(self.client.get('/api/integrations').json()['ai_configured'])
+
+    def test_ai_connection_test_endpoint(self):
+        with patch.dict(os.environ, self.EMPTY_AI_ENV):
+            self.assertEqual(self.post('/ai/test').status_code, 400)
+            secret = 'sk-probe-secret-42'
+            self.assertEqual(self.put_ai({
+                'enabled': True, 'base_url': 'https://ai.example.test/v1',
+                'api_key': secret, 'model': 'deepseek-chat', 'response_format': 'json_schema',
+            }).status_code, 200)
+
+            with patch('urllib.request.urlopen', return_value=self.upstream('{"ok": true}', model='deepseek-chat-v3')):
+                ok = self.post('/ai/test')
+            self.assertEqual(ok.status_code, 200, ok.text)
+            self.assertTrue(ok.json()['ok'])
+            self.assertEqual(ok.json()['model'], 'deepseek-chat-v3')
+            self.assertIsInstance(ok.json()['latency_ms'], int)
+            self.assertNotIn(secret, ok.text)
+
+            for exc, expected_text in [
+                (urllib.error.HTTPError('https://ai.example.test/v1/chat/completions', 401, 'Unauthorized', {}, None), 'API Key'),
+                (urllib.error.HTTPError('https://ai.example.test/v1/chat/completions', 404, 'Not Found', {}, None), '404'),
+                (urllib.error.HTTPError('https://ai.example.test/v1/chat/completions', 400, 'Bad Request', {}, None), '返回格式'),
+                (TimeoutError('timed out'), '超时'),
+            ]:
+                with self.subTest(exc=type(exc).__name__):
+                    with patch('urllib.request.urlopen', side_effect=exc):
+                        failed = self.post('/ai/test')
+                    self.assertEqual(failed.status_code, 502)
+                    self.assertIn(expected_text, failed.json()['error'])
+                    self.assertNotIn(secret, failed.text)
+
+            with patch('urllib.request.urlopen', return_value=self.upstream('not json at all')):
+                bad_json = self.post('/ai/test')
+            self.assertEqual(bad_json.status_code, 502)
+            self.assertIn('合法 JSON', bad_json.json()['error'])
+
+    def test_ai_config_validation_auth_and_csrf(self):
+        with patch.dict(os.environ, self.EMPTY_AI_ENV):
+            # Missing CSRF -> 403
+            self.assertEqual(self.client.put('/api/ai/config', json={'enabled': False}).status_code, 403)
+            self.assertEqual(self.client.delete('/api/ai/config').status_code, 403)
+            self.assertEqual(self.client.post('/api/ai/test', json={}).status_code, 403)
+
+            # Invalid payloads -> 400
+            valid = {'enabled': True, 'base_url': 'https://api.openai.com/v1', 'api_key': 'sk-test', 'model': 'gpt-4o-mini'}
+            for patch_fields in [
+                {'base_url': 'file:///etc/passwd'},
+                {'base_url': 'https://user:pass@api.openai.com/v1'},
+                {'base_url': 'https://api.openai.com/v1?foo=bar'},
+                {'response_format': 'xml'},
+                {'timeout': True},
+                {'timeout': 4},
+                {'timeout': 181},
+                {'context_entries': 19},
+                {'context_entries': 501},
+                {'context_chars': 1000},
+                {'max_actions': 0},
+                {'max_actions': 51},
+                {'enabled': 'true'},
+                {'model': ''},
+                {'api_key': ''},
+            ]:
+                with self.subTest(patch_fields=patch_fields):
+                    res = self.put_ai({**valid, **patch_fields})
+                    self.assertEqual(res.status_code, 400, res.text)
+
+            # Non-owner member cannot view/change/test AI config or see private base_url.
+            self.assertEqual(self.put_ai(valid).status_code, 200)
+            self.new_member()
+            login = self.client.post('/api/login', json={'username': 'bob', 'password': 'test-password-456'})
+            self.assertEqual(login.status_code, 200)
+            member_headers = {'X-CSRF-Token': login.json()['csrf']}
+            self.assertEqual(self.client.get('/api/ai/config').status_code, 403)
+            self.assertEqual(self.client.put('/api/ai/config', json={'enabled': False}, headers=member_headers).status_code, 403)
+            self.assertEqual(self.client.delete('/api/ai/config', headers=member_headers).status_code, 403)
+            self.assertEqual(self.client.post('/api/ai/test', json={}, headers=member_headers).status_code, 403)
+            member_integ = self.client.get('/api/integrations').json()
+            self.assertTrue(member_integ['ai_configured'])
+            self.assertNotIn('base_url', member_integ['ai'])
+
+            # Unauthenticated -> 401
+            self.client.cookies.clear()
+            self.assertEqual(self.client.get('/api/ai/config').status_code, 401)
+            self.assertEqual(self.client.put('/api/ai/config', json={'enabled': False}).status_code, 401)
+            self.assertEqual(self.client.delete('/api/ai/config').status_code, 401)
+            self.assertEqual(self.client.post('/api/ai/test', json={}).status_code, 401)
+
+    def test_bots_use_web_ai_config_without_env_vars(self):
+        with patch.dict(os.environ, self.EMPTY_AI_ENV):
+            self.assertEqual(self.put_ai({
+                'enabled': True, 'base_url': 'https://ai.example.test/v1',
+                'api_key': 'sk-bot-shared', 'model': 'shared-model',
+            }).status_code, 200)
+            raw = {'reply': '已识别', 'questions': [], 'actions': [
+                {'type': 'create_entry', 'kind': 'expense', 'amount': '42', 'currency': 'CNY',
+                 'description': '共享配置测试', 'date': config.today()},
+            ]}
+            # Telegram worker picks up Web DB AI config directly
+            self.link_bot()
+            with patch('urllib.request.urlopen', return_value=self.upstream(json.dumps(raw, ensure_ascii=False))):
+                bot.process_update(self.message(2, '今天打车42元'))
+            with db() as conn:
+                tg_reply = json.loads(conn.execute('SELECT payload FROM tg_outbox ORDER BY id DESC LIMIT 1').fetchone()['payload'])['text']
+            self.assertIn('共享配置测试', tg_reply)
+
+            # Feishu worker picks up Web DB AI config directly
+            code = self.post('/feishu/link-code').json()['code']
+            feishu.accept_event(NS(event=NS(
+                message=NS(chat_type='p2p', message_type='text', message_id='om_ai_bind',
+                           chat_id='oc_ai', content=json.dumps({'text': '绑定 ' + code})),
+                sender=NS(sender_type='user', sender_id=NS(open_id='ou_ai')),
+            )))
+            self.assertTrue(feishu.process_one())
+            feishu.accept_event(NS(event=NS(
+                message=NS(chat_type='p2p', message_type='text', message_id='om_ai_msg',
+                           chat_id='oc_ai', content=json.dumps({'text': '今天打车42元'})),
+                sender=NS(sender_type='user', sender_id=NS(open_id='ou_ai')),
+            )))
+            with patch('urllib.request.urlopen', return_value=self.upstream(json.dumps(raw, ensure_ascii=False))):
+                self.assertTrue(feishu.process_one())
+            with db() as conn:
+                fs_reply = conn.execute('SELECT text FROM feishu_outbox ORDER BY id DESC LIMIT 1').fetchone()['text']
+            self.assertIn('共享配置测试', fs_reply)
 
 
 if __name__ == '__main__':

@@ -8,8 +8,8 @@ from decimal import Decimal, InvalidOperation
 from fastapi import HTTPException
 from . import config, fx
 from .db import settings
-from .domain import (add_entry, currency, delete_entry, edit_entry, entry_view, fail, make_payment_quote,
-                     minor_amount, normalized_entry, payment_preview, text_value, transition)
+from .domain import (add_entry, admin, currency, delete_entry, edit_entry, entry_view, fail, make_payment_quote,
+                     minor_amount, normalized_entry, payment_preview, require_entry_access, text_value, transition)
 from .funds_plan import build_plan as build_funds_plan, snapshot as funds_snapshot
 
 PLAN_TTL = 1800
@@ -268,6 +268,7 @@ def _resolve_create(conn, user, conf, action):
 def _resolve_edit(conn, user, conf, action, context_ids):
     card = _card('edit_entry', '修改账目')
     entry, warning = _target(conn, action.get('id'), context_ids)
+    require_entry_access(user, entry)
     if warning:
         card['warnings'].append(warning)
     if entry['kind'] != 'expense' or entry['status'] not in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')) or entry['reimbursed_minor']:
@@ -329,6 +330,7 @@ def _resolve_transition(conn, user, conf, action, context_ids):
     card = _card(kind, labels[kind])
     entry_id = action.get('id')
     entry, warning = _target(conn, entry_id, context_ids)
+    require_entry_access(user, entry)
     if warning:
         card['warnings'].append(warning)
     if kind == 'void_entry':
@@ -349,6 +351,7 @@ def _resolve_transition(conn, user, conf, action, context_ids):
 
 
 def _resolve_delete(conn, user, conf, action, context_ids):
+    admin(user)
     card = _card('delete_entry', '永久删除账目')
     entry, warning = _target(conn, action.get('id'), context_ids)
     if warning:
@@ -363,6 +366,7 @@ def _resolve_delete(conn, user, conf, action, context_ids):
 
 
 def _resolve_pay(conn, user, conf, action, context_ids, rates):
+    admin(user)
     card = _card('pay_entry', '登记报销')
     entry, warning = _target(conn, action.get('id'), context_ids)
     if warning:
@@ -416,6 +420,7 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
 
 
 def _resolve_batch(conn, user, conf, action, rates, context_ids):
+    admin(user)
     card = _card('batch_pay', '批量登记报销')
     requested = action.get('settlement_currency') or 'original'
     mode = 'original' if requested in ('original', '', None) else 'settlement'

@@ -74,6 +74,32 @@ class TelegramUiTest(unittest.TestCase):
         self.assertEqual(payload['message_id'],77)
         self.assertTrue(any(b.get('url')=='https://ledger.example' for row in payload['reply_markup']['inline_keyboard'] for b in row))
 
+    def test_member_cannot_use_finance_commands_or_old_payment_buttons(self):
+        member = self.new_member()
+        entry = self.entry()
+        member_path = f'/api/members/{member["id"]}'
+        with db(write=True) as conn:
+            conn.execute('INSERT INTO tg_links VALUES (?,?)', ('123', member['id']))
+        self.click(2, 'home')
+        callbacks = {button.get('callback_data') for row in self.last_message()['reply_markup']['inline_keyboard']
+                     for button in row}
+        self.assertIn('new', callbacks)
+        self.assertNotIn('newpublic', callbacks)
+        bot.process_update(self.message(3, '/expense'))
+        self.assertIn('财务管理员', self.last_message()['text'])
+        self.assertEqual(self.client.patch(member_path, json={'role': 'finance'}, headers=self.headers).status_code, 200)
+        self.click(4, f'pay:{entry["id"]}')
+        token = self.draft()['token']
+        self.assertEqual(self.client.patch(member_path, json={'role': 'member'}, headers=self.headers).status_code, 200)
+        self.click(5, f'd:{token}:paycur:CNY')
+        self.click(6, f'pay:{entry["id"]}')
+        with db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM tg_drafts').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM payment_quotes').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM payments').fetchone()[0], 0)
+            alert = conn.execute("SELECT payload FROM tg_outbox WHERE method='answerCallbackQuery' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertIn('财务管理员', json.loads(alert['payload'])['text'])
+
     def test_recent_entries_paginate_and_edit_original_message(self):
         self.link_bot()
         for i in range(7):

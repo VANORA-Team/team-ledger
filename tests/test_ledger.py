@@ -97,17 +97,109 @@ class LedgerTest(unittest.TestCase):
         self.assertIn('?',scripts[1])
         self.assertEqual(second.headers['cache-control'],'no-store')
 
-    def test_all_members_are_administrators(self):
-        member = self.new_member()
-        self.assertEqual(member['role'], 'owner')
-        login = self.client.post('/api/login', json={'username':'bob','password':'test-password-456'})
-        self.assertEqual(login.status_code, 200)
-        self.headers = {'X-CSRF-Token':login.json()['csrf']}
-        self.entry(kind='income', amount='50')
-        e = self.entry(payer_id=self.user['id'])
-        self.assertEqual(e['status'], 'pending')
-        self.assertEqual(self.action(e,'pay','支付宝').status_code, 200)
-        self.assertEqual(self.client.put('/api/settings',json={'team_name':'共同管理'},headers=self.headers).status_code,200)
+    def test_member_and_finance_permissions(self):
+        credentials = {'username': 'bookkeeper', 'password': 'role-test-password'}
+        member = self.post('/members', {**credentials, 'name': '记账成员'}).json()
+        self.assertEqual(member['role'], 'member')
+        member_path = f'/api/members/{member["id"]}'
+        other_entry = self.entry()
+        public_draft = self.entry(expense_type='public', payer_id=member['id'], status='draft')
+        body = {'amount': '10', 'currency': 'CNY', 'date': config.today()}
+        receipt = {'name': '凭证.pdf', 'data': base64.b64encode(b'%PDF-1.4').decode()}
+
+        with TestClient(app) as client:
+            login = client.post('/api/login', json=credentials)
+            headers = {'X-CSRF-Token': login.json()['csrf']}
+
+            def create(**overrides):
+                return client.post('/api/entries', json={**body, **overrides},
+                                   headers={**headers, 'Idempotency-Key': secrets.token_hex(16)})
+
+            own = create(status='draft')
+            self.assertEqual(own.status_code, 200, own.text)
+            own_path = f'/api/entries/{own.json()["id"]}'
+            self.assertEqual(client.put(own_path, json={**body, 'amount': '12', 'status': 'draft'},
+                                        headers=headers).status_code, 200)
+            self.assertEqual(client.post(own_path + '/receipt', json=receipt, headers=headers).status_code, 200)
+            self.assertEqual(client.post('/api/entries/action',
+                                         json={'ids': [own.json()['id']], 'action': 'submit'}, headers=headers).status_code, 200)
+            self.assertEqual(client.get('/api/entries').status_code, 200)
+            self.assertEqual(client.get('/api/report').status_code, 200)
+            for overrides in ({'kind': 'income'}, {'expense_type': 'public'}, {'payer_id': self.user['id']}):
+                self.assertEqual(create(**overrides).status_code, 403)
+            for entry in (other_entry, public_draft):
+                entry_path = f'/api/entries/{entry["id"]}'
+                self.assertEqual(client.put(entry_path, json=body, headers=headers).status_code, 403)
+                self.assertEqual(client.post(entry_path + '/receipt', json=receipt, headers=headers).status_code, 403)
+            self.assertEqual(client.post('/api/entries/action',
+                                         json={'ids': [public_draft['id']], 'action': 'submit'}, headers=headers).status_code, 403)
+            self.assertEqual(client.post('/api/entries/payment-quotes',
+                                         json={'ids': [other_entry['id']]}, headers=headers).status_code, 403)
+            self.assertEqual(client.get('/api/export').status_code, 403)
+            self.assertEqual(client.patch(member_path, json={'role': 'owner'}, headers=headers).status_code, 403)
+
+            change = self.client.patch(member_path, json={'role': 'finance'}, headers=self.headers)
+            self.assertEqual(change.status_code, 200, change.text)
+            self.assertEqual(client.get('/api/session').status_code, 401)
+            init_db()
+            login = client.post('/api/login', json=credentials)
+            self.assertEqual(login.json()['user']['role'], 'finance')
+            headers = {'X-CSRF-Token': login.json()['csrf']}
+            self.assertEqual(create(kind='income', amount='50').status_code, 200)
+            self.assertEqual(create(expense_type='public').status_code, 200)
+            self.assertEqual(client.put(f'/api/entries/{other_entry["id"]}',
+                                        json={**body, 'payer_id': self.user['id']}, headers=headers).status_code, 200)
+            quote = client.post('/api/entries/payment-quotes', json={'ids': [other_entry['id']]}, headers=headers)
+            self.assertEqual(quote.status_code, 200, quote.text)
+            payment = client.post('/api/entries/action', json={
+                'ids': [other_entry['id']], 'action': 'pay', 'note': '实际付款',
+                'payments': [{'id': other_entry['id'], 'amount': '10', 'quote_id': quote.json()[0]['id']}],
+            }, headers={**headers, 'Idempotency-Key': secrets.token_hex(16)})
+            self.assertEqual(payment.status_code, 200, payment.text)
+            self.assertEqual(client.get('/api/export').status_code, 200)
+            self.assertEqual(client.get('/api/backups/config').status_code, 403)
+            self.assertEqual(client.get('/api/member-events').status_code, 403)
+            self.assertEqual(client.put('/api/settings', json={'team_name': '禁止修改'}, headers=headers).status_code, 403)
+            self.assertEqual(client.post('/api/feishu/config', json={}, headers=headers).status_code, 403)
+            self.assertEqual(client.patch(member_path, json={'role': 'owner'}, headers=headers).status_code, 403)
+
+            change = self.client.patch(member_path, json={'role': 'member'}, headers=self.headers)
+            self.assertEqual(change.status_code, 200, change.text)
+            self.assertEqual(client.get('/api/export').status_code, 401)
+
+        changes = [event for event in self.client.get('/api/member-events').json() if event['action'] == 'role_changed']
+        self.assertEqual([(event['previous_role'], event['new_role']) for event in changes],
+                         [('finance', 'member'), ('member', 'finance')])
+        self.assertTrue(all(event['actor_id'] == self.user['id'] and event['member_id'] == member['id'] for event in changes))
+
+    def test_ai_plan_only_offers_actions_allowed_for_member(self):
+        credentials = {'username': 'ai-member', 'password': 'role-test-password'}
+        self.assertEqual(self.post('/members', {**credentials, 'name': '成员'}).status_code, 200)
+        void_target = self.entry()
+        pay_target = self.entry()
+        advance = {'type': 'create_entry', 'kind': 'expense', 'amount': '12',
+                   'currency': 'CNY', 'date': config.today(), 'description': '本人垫付'}
+        raw = {'actions': [
+            advance,
+            {**advance, 'expense_type': 'public'},
+            {'type': 'void_entry', 'id': void_target['id']},
+            {'type': 'pay_entry', 'id': pay_target['id']},
+        ]}
+        with TestClient(app) as client:
+            login = client.post('/api/login', json=credentials)
+            headers = {'X-CSRF-Token': login.json()['csrf']}
+            with patch('app.ai.plan', return_value=raw):
+                response = client.post('/api/ai/plan', json={'text': '新增与修改账目'}, headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            plan = response.json()
+            available = [card['index'] for card in plan['actions'] if not card['errors']]
+            self.assertEqual(len(plan['actions']), 4)
+            self.assertEqual(available, [0])
+            execution = client.post('/api/ai/execute', json={'plan_id': plan['plan_id'], 'actions': available},
+                                    headers={**headers, 'Idempotency-Key': secrets.token_hex(16)})
+            self.assertEqual(execution.status_code, 200, execution.text)
+            mine = client.get('/api/entries').json()[0]
+            self.assertEqual((mine['expense_type'], mine['payer_id']), ('advance', login.json()['user']['id']))
 
     def test_auth_csrf_origin_and_logout(self):
         self.assertEqual(self.client.post('/api/entries',json={}).status_code,403)
@@ -167,9 +259,16 @@ class LedgerTest(unittest.TestCase):
                 self.assertEqual(login.status_code, 401, login.text)
         self.assertEqual(self.client.get('/api/session').status_code, 200)
 
-    def test_last_member_cannot_be_disabled(self):
-        response=self.client.patch('/api/members/1',json={'active':False},headers=self.headers)
-        self.assertEqual(response.status_code,400)
+    def test_last_owner_cannot_be_disabled_or_demoted(self):
+        path = f'/api/members/{self.user["id"]}'
+        self.assertEqual(self.client.patch(path, json={'active': False}, headers=self.headers).status_code, 400)
+        self.assertEqual(self.client.patch(path, json={'role': 'finance'}, headers=self.headers).status_code, 400)
+        self.assertEqual(self.client.patch(path, json={'role': ['owner']}, headers=self.headers).status_code, 400)
+        other_owner = self.post('/members', {'username': 'second-owner', 'name': '所有者',
+                                             'password': 'role-test-password', 'role': 'owner'})
+        self.assertEqual(other_owner.status_code, 200, other_owner.text)
+        self.assertEqual(self.client.patch(path, json={'role': 'finance'}, headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.get('/api/session').status_code, 401)
 
     def test_disabled_account_loses_session_and_bot_access(self):
         member=self.new_member()
@@ -665,6 +764,40 @@ class LedgerTest(unittest.TestCase):
         with db() as conn:token=conn.execute('SELECT token FROM tg_drafts').fetchone()[0]
         bot.process_update(self.callback(3,f'd:{token}:save'))
         self.assertEqual(len(self.client.get('/api/entries').json()),1)
+
+    def test_frame_security_headers_feishu_embed_and_receipt_download(self):
+        # Default strict headers
+        home = self.client.get('/')
+        self.assertEqual(home.headers.get('x-frame-options'), 'DENY')
+        self.assertIn("frame-ancestors 'none'", home.headers['content-security-policy'])
+
+        # Receipt allows SAMEORIGIN inline preview and optional attachment download
+        item = self.entry()
+        url = f'/api/entries/{item["id"]}/receipt'
+        self.assertEqual(self.post(f'/entries/{item["id"]}/receipt', {
+            'data': base64.b64encode(b'%PDF-1.4 sample').decode(),
+            'name': 'invoice.pdf',
+        }).status_code, 200)
+        inline = self.client.get(url)
+        self.assertEqual(inline.headers.get('x-frame-options'), 'SAMEORIGIN')
+        self.assertIn("frame-ancestors 'self'", inline.headers['content-security-policy'])
+        self.assertTrue(inline.headers['content-disposition'].startswith('inline;'))
+        download = self.client.get(url + '?download=1')
+        self.assertTrue(download.headers['content-disposition'].startswith('attachment;'))
+
+        # Opt-in Feishu workbench embed
+        with patch.dict(os.environ, {'FEISHU_EMBED': 'true'}):
+            embedded = self.client.get('/')
+            self.assertIsNone(embedded.headers.get('x-frame-options'))
+            self.assertIn('https://*.feishu.cn', embedded.headers['content-security-policy'])
+            self.assertIn('https://*.larksuite.com', embedded.headers['content-security-policy'])
+            self.assertTrue(self.client.get('/api/integrations').json()['feishu_embed_enabled'])
+
+        with patch.dict(os.environ, {'FEISHU_FRAME_ANCESTORS': 'https://corp.feishu.cn https://open.larksuite.com'}):
+            custom = self.client.get('/')
+            self.assertIsNone(custom.headers.get('x-frame-options'))
+            self.assertIn("frame-ancestors 'self' https://corp.feishu.cn https://open.larksuite.com",
+                          custom.headers['content-security-policy'])
 
 
 if __name__=='__main__':

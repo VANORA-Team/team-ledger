@@ -127,7 +127,9 @@ class PartialPaymentTest(unittest.TestCase):
     def test_other_member_cannot_reuse_payment_quote(self):
         entry = self.entry()
         quote = self.quote(entry)
-        self.new_member()
+        member = self.new_member()
+        response = self.client.patch(f'/api/members/{member["id"]}', json={'role': 'finance'}, headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
         login = self.client.post('/api/login',json={'username':'bob','password':'test-password-456'}).json()
         self.headers = {'X-CSRF-Token':login['csrf']}
         self.assertEqual(self.pay(quote,'5').status_code,409)

@@ -98,13 +98,16 @@ class BackupTest(unittest.TestCase):
 
     def test_local_roundtrip_receipts_settings_and_sessions(self):
         entry = self.entry()
+        member = self.post('/members', {'name': '财务', 'username': 'finance',
+                                        'password': 'role-test-password', 'role': 'finance'}).json()
         receipt = b'%PDF-1.4\nbackup receipt'
         response = self.post(f"/entries/{entry['id']}/receipt",
                              {'name': '测试.pdf', 'data': base64.b64encode(receipt).decode()})
         self.assertEqual(response.status_code, 200, response.text)
         with db(write=True) as conn:
             conn.execute('INSERT INTO tg_links VALUES (?,?)', ('12345', 1))
-            conn.execute('INSERT INTO feishu_config VALUES (1,?,?,1)', ('app-test', 'db-secret'))
+            conn.execute('INSERT INTO feishu_config(id,app_id,app_secret,version,domain) VALUES (1,?,?,1,?)',
+                         ('app-test', 'db-secret', 'lark'))
         name = self.backup()
         downloaded = self.client.get('/api/backups/download/' + name)
         self.assertEqual(downloaded.status_code, 200)
@@ -118,6 +121,8 @@ class BackupTest(unittest.TestCase):
                 self.assertEqual(info['sha256'], hashlib.sha256(data).hexdigest())
             self.assertNotIn('backup-control.json', archive.namelist())
         self.entry('备份后')
+        member_path = f'/api/members/{member["id"]}'
+        self.assertEqual(self.client.patch(member_path, json={'role': 'member'}, headers=self.headers).status_code, 200)
         self.client.put('/api/settings', json={'team_name': '后来的团队'}, headers=self.headers)
         response = self.post('/backups/restore', {'name': name, 'target': 'local', 'confirm': True})
         self.assertEqual(response.status_code, 200, response.text)
@@ -128,9 +133,14 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(len(self.client.get('/api/entries').json()), 1)
         self.assertEqual(self.client.get('/api/settings').json()['team_name'], '备份测试')
         self.assertEqual(self.client.get(f"/api/entries/{entry['id']}/receipt").content, receipt)
+        restored_members = {item['id']: item for item in self.client.get('/api/members').json()}
+        self.assertEqual(restored_members[member['id']]['role'], 'finance')
+        events = self.client.get('/api/member-events').json()
+        self.assertEqual([(event['action'], event['new_role']) for event in events if event['member_id'] == member['id']],
+                         [('created', 'finance')])
         with db() as conn:
             self.assertEqual(conn.execute('SELECT telegram_id FROM tg_links').fetchone()[0], '12345')
-            self.assertEqual(conn.execute('SELECT app_secret FROM feishu_config').fetchone()[0], 'db-secret')
+            self.assertEqual(conn.execute('SELECT app_secret,domain FROM feishu_config').fetchone()[:], ('db-secret', 'lark'))
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0], 1)
 
     def test_upload_restore_preserves_destination_backup_settings(self):
@@ -146,6 +156,54 @@ class BackupTest(unittest.TestCase):
         self.login()
         self.assertEqual(len(self.client.get('/api/entries').json()), 1)
         self.assertEqual(self.client.get('/api/backups/config').json()['keep'], 7)
+
+    def test_ai_config_roundtrip_and_legacy_backup_without_ai_config_table(self):
+        saved = self.client.put('/api/ai/config', json={
+            'enabled': True, 'base_url': 'https://ai.backup.test/v1',
+            'api_key': 'sk-backup-secret', 'model': 'backup-model', 'timeout': 55,
+        }, headers=self.headers)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        name = self.backup()
+        self.assertEqual(self.client.delete('/api/ai/config', headers=self.headers).status_code, 200)
+        self.assertFalse(self.client.get('/api/ai/config').json()['configured'])
+        restored = self.post('/backups/restore', {'name': name, 'target': 'local', 'confirm': True})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.login()
+        ai_cfg = self.client.get('/api/ai/config').json()
+        self.assertTrue(ai_cfg['configured'])
+        self.assertEqual(ai_cfg['base_url'], 'https://ai.backup.test/v1')
+        self.assertEqual(ai_cfg['model'], 'backup-model')
+        self.assertEqual(ai_cfg['timeout'], 55)
+
+        original = backups.local_path(name).read_bytes()
+        with zipfile.ZipFile(io.BytesIO(original)) as source:
+            files = {n: source.read(n) for n in source.namelist()}
+        manifest = json.loads(files.pop('manifest.json'))
+        legacy_db = config.DATA / 'legacy.sqlite3'
+        legacy_db.write_bytes(files['ledger.sqlite3'])
+        with closing(sqlite3.connect(legacy_db)) as conn:
+            with conn:
+                conn.execute('DROP TABLE ai_config')
+                conn.execute('DROP TABLE member_events')
+        files['ledger.sqlite3'] = legacy_db.read_bytes()
+        manifest['files']['ledger.sqlite3'] = {
+            'size': len(files['ledger.sqlite3']),
+            'sha256': hashlib.sha256(files['ledger.sqlite3']).hexdigest(),
+        }
+        legacy_zip = io.BytesIO()
+        with zipfile.ZipFile(legacy_zip, 'w') as archive:
+            for key, data in files.items():
+                archive.writestr(key, data)
+            archive.writestr('manifest.json', json.dumps(manifest))
+        response = self.client.post('/api/backups/restore/upload', content=legacy_zip.getvalue(),
+                                    headers={**self.headers, 'Content-Type': 'application/zip',
+                                             'X-Backup-Confirm': 'restore'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.login()
+        with db() as conn:
+            row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_config'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(self.client.get('/api/member-events').json(), [])
 
     def test_remote_backup_restore_download_and_connection_probe(self):
         self.configure_remote()

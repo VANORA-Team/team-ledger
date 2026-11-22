@@ -37,6 +37,9 @@ RECEIPT = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}')
 EPHEMERAL = ('sessions', 'payment_quotes', 'link_codes', 'feishu_link_codes',
              'ai_plans', 'tg_drafts', 'tg_outbox', 'tg_prompts', 'fsui_drafts', 'fsui_outbox',
              'fsui_prompts', 'fsui_actions', 'feishu_pending', 'feishu_outbox')
+# Newer tables may be absent in older backups and will be
+# created by init_db() right after restore.
+OPTIONAL_TABLES = {'ai_config', 'member_events'}
 
 
 class BackupError(Exception):
@@ -412,12 +415,14 @@ def _validate_database(path, receipt_names):
                 for (table,) in expected.execute("SELECT name FROM sqlite_master WHERE type='table'"):
                     columns = {r[1] for r in expected.execute(f'PRAGMA table_info("{table}")')}
                     actual = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+                    if table in OPTIONAL_TABLES and not actual:
+                        continue
                     if not columns.issubset(actual):
                         raise BackupError('备份数据库结构不受支持，请使用兼容版本的备份')
             if conn.execute('PRAGMA foreign_key_check').fetchone():
                 raise BackupError('备份数据库包含缺失的关联记录')
             if not conn.execute("SELECT 1 FROM users WHERE active=1 AND role='owner'").fetchone():
-                raise BackupError('备份中没有可登录的团队成员')
+                raise BackupError('备份中没有可登录的账本所有者')
             for (value,) in conn.execute('SELECT value FROM settings'):
                 json.loads(value)
             for (name,) in conn.execute("SELECT DISTINCT receipt FROM entries WHERE receipt IS NOT NULL AND receipt<>''"):

@@ -36,7 +36,9 @@ jobs:
       - name: Verify ledger behavior
         run: python -m unittest discover -s tests -v
       - name: Verify JavaScript syntax
-        run: node --check public/app.js
+        run: |
+          node --check public/app.js
+          node --check public/backups.js
 
   publish:
     name: Build and publish

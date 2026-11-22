@@ -45,13 +45,30 @@ def verify_password(password, encoded):
     return hmac.compare_digest(actual, expected)
 
 
+def is_finance(user):
+    return bool(user['active'] and user['role'] in ('owner', 'finance'))
+
+
 def admin(user):
-    if not user['active']:
-        fail('账号已停用', 403)
+    if not is_finance(user):
+        fail('此操作需要财务管理员权限', 403)
 
 
 def owner(user):
-    admin(user)
+    if not user['active'] or user['role'] != 'owner':
+        fail('此操作需要账本所有者权限', 403)
+
+
+def can_manage_entry(user, entry):
+    return is_finance(user) or (
+        user['active'] and entry['kind'] == 'expense' and
+        entry['expense_type'] == 'advance' and entry['payer_id'] == user['id']
+    )
+
+
+def require_entry_access(user, entry):
+    if not can_manage_entry(user, entry):
+        fail('仅财务管理员可管理这笔账目', 403)
 
 
 def public_user(user):
@@ -87,7 +104,7 @@ def normalized_entry(conn, user, body):
     expense_type = body.get('expense_type', 'advance') if kind == 'expense' else ''
     if kind == 'expense' and expense_type not in ('public', 'advance'):
         fail('支出请选择公账支出或成员垫付')
-    if kind == 'income':
+    if kind == 'income' or expense_type == 'public':
         admin(user)
     cur = currency(conf, body.get('currency', conf['default_currency']))
     amount = minor_amount(body.get('amount', ''), cur['decimals'])
@@ -99,7 +116,7 @@ def normalized_entry(conn, user, body):
     except (ValueError, TypeError):
         fail('日期格式不正确')
     payer_id = body.get('payer_id', user['id'])
-    if not isinstance(payer_id, int):
+    if type(payer_id) is not int:
         fail('成员格式不正确')
     if payer_id != user['id']:
         admin(user)
@@ -242,8 +259,7 @@ def record_payment(conn, user, entry_id, amount, note, payment_key, quote_id):
 def transition(conn, user, entry_id, action, note='', *, amount=None, payment_key=None, quote_id=None):
     entry = entry_view(conn, entry_id)
     if action == 'void':
-        if entry['kind'] == 'income' or entry['payer_id'] != user['id']:
-            admin(user)
+        require_entry_access(user, entry)
         if entry['reimbursed_minor'] or entry['status'] in ('reimbursed', 'voided'):
             fail('已有报销记录或已作废的账目不能作废', 409)
         note = text_value(note, '作废原因', 500)
@@ -258,11 +274,7 @@ def transition(conn, user, entry_id, action, note='', *, amount=None, payment_ke
     transitions = {'submit': (('draft',), 'posted' if entry['expense_type'] == 'public' else 'pending')}
     if action not in transitions:
         fail('操作不正确')
-    if action == 'submit':
-        if entry['payer_id'] != user['id']:
-            admin(user)
-    else:
-        admin(user)
+    require_entry_access(user, entry)
     allowed, target = transitions[action]
     if entry['status'] not in allowed:
         fail('账目状态已变化，请刷新后重试', 409)
@@ -289,11 +301,10 @@ def delete_entry(conn, user, entry_id):
 
 def edit_entry(conn, user, entry_id, body):
     old = entry_view(conn, entry_id)
+    require_entry_access(user, old)
     allowed = ('draft', 'posted') if old['expense_type'] == 'public' else ('draft', 'pending')
     if old['kind'] != 'expense' or old['status'] not in allowed or old['reimbursed_minor']:
         fail('仅没有报销记录的支出可以修改', 409)
-    if old['payer_id'] != user['id']:
-        admin(user)
     data = normalized_entry(conn, user, {**body, 'expense_type': body.get('expense_type', old['expense_type'])})
     if data['kind'] != old['kind']:
         fail('不支持更改账目类型')

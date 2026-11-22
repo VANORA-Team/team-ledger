@@ -3,9 +3,9 @@ import json
 import time
 from decimal import Decimal
 from .db import settings
-from .domain import currency, fail, minor_amount, payment_preview, text_value, transition
+from .domain import admin, currency, fail, is_finance, minor_amount, payment_preview, text_value, transition
 from .funds_plan import build_plan, report, snapshot
-from .bot_ui import amount_text, ask, button, draft_for, entry_description, nav, new_draft, persist, say
+from .bot_ui import PLATFORM, amount_text, ask, button, draft_for, entry_description, nav, new_draft, persist, say
 
 PAGE_SIZE = 5
 
@@ -24,7 +24,7 @@ def paging(token, action, page, total):
     return [row] if row else []
 
 
-def show(conn, chat_id, token, payload, rates, page=0):
+def show(conn, user, chat_id, token, payload, rates, page=0):
     conf = settings(conn)
     result = report(conn, rates, payload.get('scenario'), payload.get('reimbursement'))
     persist(conn, token, payload, 'funds_view')
@@ -68,9 +68,9 @@ def show(conn, chat_id, token, payload, rates, page=0):
     rows += [[button('模拟新进账', f'f:{token}:calc'), button('刷新 / 实际余额', f'f:{token}:refresh')]]
     rows += [[button('设置报销预算', f'f:{token}:budget'), button('选择报销项目', f'f:{token}:pick:0')],
              [button('恢复自动安排', f'f:{token}:auto')]]
-    if payload.get('scenario'):
+    if payload.get('scenario') and is_finance(user):
         rows += [[button('＋ 将这笔真实进账记入账本', f'f:{token}:income')]]
-    if Decimal(result['due']) > 0:
+    if Decimal(result['due']) > 0 and is_finance(user):
         rows += [[button('💳 按实际余额一键报销', f'f:{token}:batch')]]
     rows += [[button('全部待报销项目', 'list:plan:0')], nav()]
     say(conn, chat_id, '\n'.join(lines), rows, edit=True)
@@ -78,7 +78,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
 
 def start(conn, user, telegram_id, chat_id, rates):
     token, payload = new_draft(conn, user, telegram_id, chat_id, {'_flow': 'funds'}, 'funds_view')
-    show(conn, chat_id, token, payload, rates)
+    show(conn, user, chat_id, token, payload, rates)
 
 
 def calculator_currencies(conn, chat_id, token, payload, page=0):
@@ -171,6 +171,8 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
     if payload.get('_flow') != 'funds':
         fail('请使用 /funds 重新打开资金计算。')
     action = parts[2]
+    if action in ('batch', 'mode', 'plan', 'note', 'commit', 'income'):
+        admin(user)
     if action == 'budget' and step in ('funds_view', 'funds_projects'):
         payload.pop('_plan', None)
         payload['budget_currency'] = settings(conn)['reference_currency']
@@ -180,7 +182,7 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
     elif action == 'auto':
         payload.pop('reimbursement', None)
         payload.pop('_plan', None)
-        show(conn, chat_id, token, payload, rates)
+        show(conn, user, chat_id, token, payload, rates)
     elif action == 'pick' and len(parts) == 4 and parts[3].isdigit() and len(parts[3]) <= 6:
         payload.pop('_plan', None)
         if payload.get('reimbursement', {}).get('mode') != 'manual':
@@ -201,7 +203,7 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
         page = int(parts[3])
         if action == 'view':
             payload.pop('_plan', None)
-            show(conn, chat_id, token, payload, rates, page)
+            show(conn, user, chat_id, token, payload, rates, page)
         elif action == 'currencies' and step == 'funds_currency':
             calculator_currencies(conn, chat_id, token, payload, page)
         elif action == 'plan' and step == 'funds_confirm':
@@ -213,7 +215,7 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
     elif action in ('refresh', 'cancel'):
         payload.pop('scenario', None)
         payload.pop('_plan', None)
-        show(conn, chat_id, token, payload, rates)
+        show(conn, user, chat_id, token, payload, rates)
     elif action == 'calc':
         payload.pop('_plan', None)
         calculator_currencies(conn, chat_id, token, payload)
@@ -238,9 +240,10 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
             fail('账本或结算币种已变化，或确认已过期。请用 /funds 重新计算并核对，尚未登记任何付款。')
         for item in plan['items']:
             payment_preview(conn, user, item['id'], item['amount'], item['quote_id'])
+        source_prefix = 'feishu' if PLATFORM.get() == 'feishu' else 'tg'
         for item in plan['items']:
             transition(conn, user, item['id'], 'pay', plan['note'], amount=item['amount'],
-                       payment_key=f'pay:tg:batch:{token}:{item["id"]}', quote_id=item['quote_id'])
+                       payment_key=f'pay:{source_prefix}:batch:{token}:{item["id"]}', quote_id=item['quote_id'])
         payload['_receipt'] = payload.pop('_plan')
         persist(conn, token, payload, 'funds_receipt')
         show_plan(conn, chat_id, token, plan, done=True)
@@ -250,12 +253,12 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
         body = {'kind': 'income', 'amount': payload['scenario']['amount'], 'currency': payload['scenario']['currency'],
                 'description': '团队进账', 'date': today(), 'note': '', 'status': 'posted'}
         new_token, body = new_draft(conn, user, telegram_id, chat_id, body)
-        preview(conn, chat_id, new_token, body, rates)
+        preview(conn, user, chat_id, new_token, body, rates)
     else:
         fail('此按钮不属于当前步骤，请使用 /funds 重新开始。')
 
 
-def resume(conn, chat_id, draft, rates):
+def resume(conn, user, chat_id, draft, rates):
     payload, token, step = json.loads(draft['payload']), draft['token'], draft['step']
     if step == 'funds_confirm':
         show_plan(conn, chat_id, token, payload['_plan'])
@@ -273,16 +276,16 @@ def resume(conn, chat_id, draft, rates):
             else f'请输入模拟进账金额（{payload["scenario_currency"]}）。只计算，不入账。')
         ask(conn, chat_id, draft, step, prompt)
     else:
-        show(conn, chat_id, token, payload, rates)
+        show(conn, user, chat_id, token, payload, rates)
 
 
-def text_input(conn, chat_id, draft, text, rates):
+def text_input(conn, user, chat_id, draft, text, rates):
     payload, token, step = json.loads(draft['payload']), draft['token'], draft['step']
     if step == 'funds_amount':
         cur = currency(settings(conn), payload['scenario_currency'])
         minor_amount(text, cur['decimals'])
         payload['scenario'] = {'amount': text, 'currency': cur['code']}
-        show(conn, chat_id, token, payload, rates)
+        show(conn, user, chat_id, token, payload, rates)
     elif step == 'funds_note':
         payload['_plan']['note'] = text_value(text, '付款备注', 500)
         persist(conn, token, payload, 'funds_confirm')
@@ -294,6 +297,6 @@ def text_input(conn, chat_id, draft, text, rates):
         cur = currency(conf, conf['reference_currency'])
         minor_amount(text, cur['decimals'], allow_zero=True)
         payload['reimbursement'] = {'mode': 'budget', 'budget': text, 'currency': cur['code']}
-        show(conn, chat_id, token, payload, rates)
+        show(conn, user, chat_id, token, payload, rates)
     else:
         say(conn, chat_id, '请点击当前计算的按钮继续，或使用 /funds 重新计算。', [nav()])

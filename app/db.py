@@ -24,11 +24,17 @@ DEFAULTS = {
     'feishu_allowed_chats': [],
 }
 
+USER_ROLES = ('owner', 'finance', 'member')
+
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
  name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL,
  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS member_events (
+ id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES users(id),
+ member_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
+ previous_role TEXT, new_role TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (
  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
  csrf TEXT NOT NULL, expires INTEGER NOT NULL);
@@ -68,7 +74,7 @@ CREATE TABLE IF NOT EXISTS feishu_links (
  open_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS feishu_config (
  id INTEGER PRIMARY KEY CHECK(id=1), app_id TEXT NOT NULL, app_secret TEXT NOT NULL,
- version INTEGER NOT NULL);
+ version INTEGER NOT NULL, domain TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS feishu_link_codes (
  code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_inbox (
@@ -77,7 +83,7 @@ CREATE TABLE IF NOT EXISTS feishu_inbox (
 CREATE TABLE IF NOT EXISTS feishu_outbox (
  id INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, open_id TEXT NOT NULL,
  user_id INTEGER REFERENCES users(id), text TEXT NOT NULL,
- message_uuid TEXT NOT NULL UNIQUE, sent INTEGER NOT NULL DEFAULT 0);
+ message_uuid TEXT NOT NULL UNIQUE, attempts INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS feishu_pending (
  open_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
  plan_id TEXT NOT NULL, confirmation TEXT NOT NULL, expires INTEGER NOT NULL);
@@ -118,6 +124,18 @@ CREATE TABLE IF NOT EXISTS ai_plans (
  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), source TEXT NOT NULL,
  payload TEXT NOT NULL, created_at TEXT NOT NULL, expires INTEGER NOT NULL,
  executed_at TEXT, result TEXT);
+CREATE TABLE IF NOT EXISTS ai_config (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ enabled INTEGER NOT NULL DEFAULT 1,
+ base_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
+ api_key TEXT NOT NULL DEFAULT '',
+ model TEXT NOT NULL DEFAULT '',
+ response_format TEXT NOT NULL DEFAULT 'json_object',
+ timeout INTEGER NOT NULL DEFAULT 40,
+ context_entries INTEGER NOT NULL DEFAULT 120,
+ context_chars INTEGER NOT NULL DEFAULT 60000,
+ max_actions INTEGER NOT NULL DEFAULT 20,
+ updated_at TEXT NOT NULL DEFAULT '');
 '''
 
 
@@ -171,6 +189,10 @@ def _init_db():
             conn.execute('ALTER TABLE entries ADD COLUMN reimbursed_minor INTEGER NOT NULL DEFAULT 0 CHECK(reimbursed_minor>=0 AND reimbursed_minor<=amount_minor)')
         if 'expense_type' not in {r[1] for r in conn.execute('PRAGMA table_info(entries)')}:
             conn.execute("ALTER TABLE entries ADD COLUMN expense_type TEXT NOT NULL DEFAULT 'advance'")
+        if 'domain' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_config)')}:
+            conn.execute("ALTER TABLE feishu_config ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
+        if 'attempts' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_outbox)')}:
+            conn.execute('ALTER TABLE feishu_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
         conn.execute("UPDATE entries SET expense_type='' WHERE kind='income' AND expense_type<>''")
         # Earlier versions only supported full payments. Preserve their dates and notes,
         # and create exactly one payment record without rewriting their audit history.
@@ -181,7 +203,6 @@ def _init_db():
         conn.execute("UPDATE entries SET reimbursed_minor=amount_minor WHERE kind='expense' AND status='reimbursed' AND reimbursed_minor=0")
         migrate_public_expenses(conn)
         conn.execute("UPDATE entries SET status='posted' WHERE kind='income' AND status='distributed'")
-        conn.execute("UPDATE users SET role='owner' WHERE role<>'owner'")
         conn.execute("DELETE FROM settings WHERE key='categories'")
         # Retire the approval workflow without changing amounts, payment data or history.
         conn.execute("UPDATE entries SET status='pending' WHERE kind='expense' AND status IN ('submitted','approved')")

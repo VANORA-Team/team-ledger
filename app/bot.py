@@ -119,6 +119,7 @@ def _process_update(update, db_provider, platform):
             except Exception:
                 pass
     context = DELIVERY.set({'callback': bool(callback), 'message_id': msg.get('message_id'),
+                            'feishu_message_id': msg.get('feishu_message_id'),
                             'user_message_id': msg.get('message_id') if not callback else None,
                             'thread_id': msg.get('message_thread_id'),
                             'actor': telegram_id, 'chat_id': chat_id,

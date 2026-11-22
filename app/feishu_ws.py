@@ -1,6 +1,7 @@
 """Dispatch card frames on SDK releases that otherwise drop them."""
 import base64
 import http
+import logging
 import time
 
 from lark_oapi.ws.client import Client as SDKClient, _get_by_key
@@ -8,6 +9,8 @@ from lark_oapi.ws.const import HEADER_TYPE, HEADER_MESSAGE_ID, HEADER_SUM, HEADE
 from lark_oapi.ws.enum import MessageType
 from lark_oapi.ws.model import Response
 from lark_oapi.core.json import JSON
+
+LOG = logging.getLogger(__name__)
 
 
 class Client(SDKClient):
@@ -28,6 +31,7 @@ class Client(SDKClient):
             if result is not None:
                 response.data = base64.b64encode(JSON.marshal(result).encode('utf-8'))
         except Exception:
+            LOG.exception('Feishu card callback dispatch failed')
             response = Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
         frame.headers.add(key=HEADER_BIZ_RT, value=str(int((time.monotonic() - started) * 1000)))
         frame.payload = JSON.marshal(response).encode('utf-8')

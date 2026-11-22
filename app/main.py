@@ -17,8 +17,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from . import config, ai, ai_context, ai_plan, backups, fx
 from .backup_api import router as backup_router
-from .db import db, init_db, settings, remove_receipt_file, authenticated_session
-from .domain import (fail, admin, owner, public_user, hash_password, verify_password,
+from .db import USER_ROLES, db, init_db, settings, remove_receipt_file, authenticated_session
+from .domain import (fail, admin, owner, is_finance, require_entry_access, public_user, hash_password, verify_password,
                      text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
                      save_settings, make_payment_quote, currency, receipt_media_type)
 
@@ -53,6 +53,17 @@ async def backup_error(request, exc):
     return JSONResponse({'error': str(exc)}, status_code=exc.status)
 
 
+def _feishu_embed_ancestors():
+    custom = os.getenv('FEISHU_FRAME_ANCESTORS', '').strip()
+    if custom:
+        origins = [item for item in custom.split() if re.fullmatch(r'https://[A-Za-z0-9.*:-]{1,180}', item)]
+        if origins:
+            return "'self' " + ' '.join(origins)
+    if os.getenv('FEISHU_EMBED', 'false').lower() == 'true':
+        return "'self' https://*.feishu.cn https://*.larkoffice.com https://*.larksuite.com"
+    return None
+
+
 @app.middleware('http')
 async def security(request, call_next):
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
@@ -80,10 +91,17 @@ async def security(request, call_next):
                 chunks.append(chunk)
             request._body = b''.join(chunks)
     response = await call_next(request)
+    ancestors = _feishu_embed_ancestors()
+    is_receipt = bool(re.fullmatch(r'/api/entries/\d+/receipt', request.url.path))
     response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
+    if ancestors is None:
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN' if is_receipt else 'DENY'
     response.headers['Referrer-Policy'] = 'same-origin'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    frame_policy = ancestors if ancestors else ("'self'" if is_receipt else "'none'")
+    response.headers['Content-Security-Policy'] = (
+        f"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        f"connect-src 'self'; frame-ancestors {frame_policy}; base-uri 'self'; form-action 'self'"
+    )
     if request.url.path.startswith('/api/'):
         response.headers['Cache-Control'] = 'no-store'
     return response
@@ -131,19 +149,34 @@ def new_session(conn, user_id, response):
     csrf = secrets.token_urlsafe(32)
     conn.execute('DELETE FROM sessions WHERE expires<?', (int(time.time()),))
     conn.execute('INSERT INTO sessions VALUES (?,?,?,?)', (digest(token), user_id, csrf, int(time.time()) + 7 * 86400))
-    response.set_cookie('ledger_session', token, httponly=True, samesite='lax', max_age=7 * 86400,
-                        secure=os.getenv('COOKIE_SECURE', 'false').lower() == 'true', path='/')
+    secure = os.getenv('COOKIE_SECURE', 'false').lower() == 'true'
+    configured_samesite = os.getenv('COOKIE_SAMESITE', '').strip().lower()
+    if configured_samesite in ('lax', 'strict', 'none'):
+        samesite = configured_samesite if (configured_samesite != 'none' or secure) else 'lax'
+    else:
+        samesite = 'none' if (secure and _feishu_embed_ancestors()) else 'lax'
+    response.set_cookie('ledger_session', token, httponly=True, samesite=samesite, max_age=7 * 86400,
+                        secure=secure, path='/')
     return csrf
 
 
-def make_user(conn, body, role=None):
+def member_role(role):
+    if role not in USER_ROLES:
+        fail('成员角色不正确')
+    return role
+
+
+def member_event(conn, actor_id, member_id, action, previous_role=None, new_role=None):
+    conn.execute('INSERT INTO member_events(actor_id,member_id,action,previous_role,new_role,created_at) VALUES (?,?,?,?,?,?)',
+                 (actor_id, member_id, action, previous_role, new_role, config.now()))
+
+
+def make_user(conn, body, role):
     username = text_value(body.get('username', ''), '用户名', 32)
     if not re.fullmatch('[a-zA-Z0-9_.-]{3,32}', username):
         fail('用户名需为 3–32 位英文字母、数字、点、横线或下划线')
     name = text_value(body.get('name', ''), '成员姓名', 30)
     password = hash_password(body.get('password', ''))
-    # Flat team: every enabled account has the same management permissions.
-    role = 'owner'
     if conn.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone():
         fail('用户名已被使用', 409)
     cursor = conn.execute('INSERT INTO users(username,name,password_hash,role,created_at) VALUES (?,?,?,?,?)',
@@ -169,6 +202,7 @@ def bootstrap(body: dict, request: Request, response: Response):
         if conn.execute('SELECT id FROM users LIMIT 1').fetchone():
             fail('团队已初始化，请登录', 409)
         user = make_user(conn, body, 'owner')
+        member_event(conn, user['id'], user['id'], 'created', new_role='owner')
         conf_body = {'team_name': body.get('team_name', '一起记')}
         save_settings(conn, user, conf_body)
         csrf = new_session(conn, user['id'], response)
@@ -236,7 +270,13 @@ def put_settings(body: dict, request: Request):
 def members(request: Request):
     current(request)
     with db() as conn:
-        return [dict(r) for r in conn.execute('SELECT u.id,u.username,u.name,u.role,u.active,CASE WHEN t.telegram_id IS NULL THEN 0 ELSE 1 END telegram_linked FROM users u LEFT JOIN tg_links t ON t.user_id=u.id ORDER BY u.id')]
+        return [dict(r) for r in conn.execute(
+            'SELECT u.id,u.username,u.name,u.role,u.active,'
+            'CASE WHEN t.telegram_id IS NULL THEN 0 ELSE 1 END telegram_linked,'
+            'CASE WHEN f.open_id IS NULL THEN 0 ELSE 1 END feishu_linked '
+            'FROM users u LEFT JOIN tg_links t ON t.user_id=u.id '
+            'LEFT JOIN feishu_links f ON f.user_id=u.id ORDER BY u.id'
+        )]
 
 
 @app.post('/api/members')
@@ -244,7 +284,20 @@ def add_member(body: dict, request: Request):
     user = current(request)
     owner(user)
     with db(write=True) as conn:
-        return public_user(make_user(conn, body))
+        role = member_role(body.get('role', 'member'))
+        target = make_user(conn, body, role)
+        member_event(conn, user['id'], target['id'], 'created', new_role=role)
+        return public_user(target)
+
+
+@app.get('/api/member-events')
+def member_events(request: Request):
+    owner(current(request))
+    with db() as conn:
+        return [dict(row) for row in conn.execute(
+            'SELECT e.*,a.name actor_name,m.name member_name FROM member_events e '
+            'JOIN users a ON a.id=e.actor_id JOIN users m ON m.id=e.member_id ORDER BY e.id DESC LIMIT 50'
+        )]
 
 
 @app.patch('/api/members/{member_id}')
@@ -258,16 +311,34 @@ def update_member(member_id: int, body: dict, request: Request):
         active = body.get('active', target['active'])
         if type(active) not in (int, bool) or active not in (0, 1):
             fail('成员状态不正确')
-        role = 'owner'
-        if target['role'] == 'owner' and target['active'] and (role != 'owner' or not active):
-            others = conn.execute("SELECT COUNT(*) FROM users WHERE role='owner' AND active=1 AND id<>?", (member_id,)).fetchone()[0]
-            if not others:
-                fail('必须保留至少一位启用的团队成员')
+        role = member_role(body.get('role', target['role']))
+        role_changed = role != target['role']
+        if target['role'] == 'owner' and target['active'] and (role_changed or not active):
+            if not conn.execute("SELECT 1 FROM users WHERE role='owner' AND active=1 AND id<>?", (member_id,)).fetchone():
+                fail('必须保留至少一位启用的账本所有者')
         conn.execute('UPDATE users SET active=?,role=? WHERE id=?', (int(active), role, member_id))
+        if role_changed:
+            member_event(conn, user['id'], member_id, 'role_changed', target['role'], role)
+        if active != target['active']:
+            member_event(conn, user['id'], member_id, 'enabled' if active else 'disabled')
         if 'password' in body:
             conn.execute('UPDATE users SET password_hash=? WHERE id=?', (hash_password(body['password']), member_id))
-        if not active or 'password' in body:
+            member_event(conn, user['id'], member_id, 'password_reset')
+        if role_changed or not active or 'password' in body:
             conn.execute('DELETE FROM sessions WHERE user_id=?', (member_id,))
+        if role_changed or not active:
+            virtual_ids = [row['telegram_id'] for row in conn.execute('SELECT telegram_id FROM fsui_links WHERE user_id=?', (member_id,))]
+            for virtual_id in virtual_ids:
+                conn.execute('DELETE FROM fsui_actions WHERE telegram_id=?', (virtual_id,))
+                conn.execute('DELETE FROM fsui_prompts WHERE telegram_id=?', (virtual_id,))
+            conn.execute('DELETE FROM fsui_drafts WHERE user_id=?', (member_id,))
+            conn.execute('DELETE FROM tg_prompts WHERE token IN (SELECT token FROM tg_drafts WHERE user_id=?)', (member_id,))
+            conn.execute('DELETE FROM tg_drafts WHERE user_id=?', (member_id,))
+            conn.execute('DELETE FROM feishu_pending WHERE user_id=?', (member_id,))
+            conn.execute('DELETE FROM feishu_link_codes WHERE user_id=?', (member_id,))
+            conn.execute('DELETE FROM link_codes WHERE user_id=?', (member_id,))
+            conn.execute('DELETE FROM payment_quotes WHERE user_id=?', (member_id,))
+            conn.execute('DELETE FROM ai_plans WHERE user_id=? AND executed_at IS NULL', (member_id,))
         return {'ok': True}
 
 
@@ -314,6 +385,7 @@ def entry_action(body: dict, request: Request):
         fail('请选择 1–100 笔不同账目')
     payment_data, prefix = {}, ''
     if body.get('action') == 'pay':
+        admin(user)
         key = request.headers.get('idempotency-key', '')
         if not re.fullmatch('[A-Za-z0-9_-]{16,100}', key):
             fail('缺少付款防重复标识，请刷新页面后重试')
@@ -343,6 +415,7 @@ def entry_action(body: dict, request: Request):
 @app.post('/api/entries/payment-quotes')
 def payment_quotes(body: dict, request: Request):
     user = current(request)
+    admin(user)
     ids = body.get('ids')
     if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(i) is not int for i in ids) or len(set(ids)) != len(ids):
         fail('请选择 1–100 笔不同账目')
@@ -380,9 +453,8 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
         entry = conn.execute('SELECT * FROM entries WHERE id=?', (entry_id,)).fetchone()
         if not entry:
             fail('账目不存在', 404)
-        if entry['payer_id'] != user['id']:
-            admin(user)
-        if entry['status'] not in ('draft', 'pending', 'posted'):
+        require_entry_access(user, entry)
+        if entry['status'] not in ('draft', 'pending', 'posted') or (entry['reimbursed_minor'] and not is_finance(user)):
             fail('已报销或已作废的账目不能替换凭证', 409)
         folder = config.DATA / 'receipts'
         folder.mkdir(exist_ok=True)
@@ -401,7 +473,7 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
 
 
 @app.get('/api/entries/{entry_id}/receipt')
-def get_receipt(entry_id: int, request: Request):
+def get_receipt(entry_id: int, request: Request, download: int = 0):
     current(request)
     with db() as conn:
         entry = conn.execute('SELECT receipt,receipt_name FROM entries WHERE id=?', (entry_id,)).fetchone()
@@ -412,7 +484,7 @@ def get_receipt(entry_id: int, request: Request):
         fail('凭证文件不存在，请检查备份', 404)
     return FileResponse(path, filename=entry['receipt_name'],
                         media_type=receipt_media_type(entry['receipt']),
-                        content_disposition_type='inline')
+                        content_disposition_type='attachment' if download else 'inline')
 
 
 @app.get('/api/report')
@@ -484,6 +556,42 @@ def ai_execute(body: dict, request: Request):
     return result
 
 
+@app.get('/api/ai/config')
+def get_ai_config(request: Request):
+    user = current(request)
+    owner(user)
+    with db() as conn:
+        return ai.public_config(conn)
+
+
+@app.put('/api/ai/config')
+def update_ai_config(body: dict, request: Request):
+    user = current(request)
+    owner(user)
+    limited(request, 'ai-config', 20)
+    with db(write=True) as conn:
+        return ai.save_config(conn, body)
+
+
+@app.delete('/api/ai/config')
+def delete_ai_config(request: Request):
+    user = current(request)
+    owner(user)
+    limited(request, 'ai-config', 20)
+    with db(write=True) as conn:
+        return ai.clear_config(conn)
+
+
+@app.post('/api/ai/test')
+def test_ai_config(request: Request):
+    user = current(request)
+    owner(user)
+    limited(request, 'ai-test', 10)
+    with db() as conn:
+        cfg = ai.load_config(conn)
+    return ai.test_connection(cfg)
+
+
 @app.get('/api/integrations')
 def integrations(request: Request):
     user = current(request)
@@ -491,13 +599,29 @@ def integrations(request: Request):
         conf = settings(conn)
         linked = conn.execute('SELECT telegram_id FROM tg_links WHERE user_id=?', (user['id'],)).fetchone()
         feishu_linked = conn.execute('SELECT open_id FROM feishu_links WHERE user_id=?', (user['id'],)).fetchone()
-        feishu_config = conn.execute('SELECT app_id FROM feishu_config WHERE id=1').fetchone()
+        feishu_config = conn.execute('SELECT app_id,domain FROM feishu_config WHERE id=1').fetchone()
+        ai_conf = ai.public_config(conn)
     heartbeat = conf.get('bot_heartbeat', 0)
-    return {'ai_configured': ai.configured(), 'bot_configured': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
+    feishu_heartbeat = conf.get('feishu_heartbeat', 0)
+    raw_domain = (feishu_config['domain'] if feishu_config and feishu_config['domain'] else os.getenv('FEISHU_DOMAIN', '')).strip()
+    ai_public = ai_conf if user['role'] == 'owner' else {
+        'enabled': ai_conf['enabled'],
+        'configured': ai_conf['configured'],
+        'model': ai_conf['model'] if ai_conf['configured'] else '',
+        'context_entries': ai_conf['context_entries'],
+        'max_actions': ai_conf['max_actions'],
+    }
+    return {'ai_configured': ai_conf['configured'], 'ai': ai_public,
+            'bot_configured': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
             'bot_online': time.time() - heartbeat < 90, 'bot_username': conf.get('bot_username'),
             'telegram_linked': bool(linked), 'feishu_linked': bool(feishu_linked),
             'feishu_configured': bool(feishu_config or (os.getenv('FEISHU_APP_ID') and os.getenv('FEISHU_APP_SECRET'))),
-            'feishu_app_id': feishu_config['app_id'] if feishu_config else os.getenv('FEISHU_APP_ID', '')}
+            'feishu_app_id': feishu_config['app_id'] if feishu_config else os.getenv('FEISHU_APP_ID', ''),
+            'feishu_domain': raw_domain or 'feishu',
+            'feishu_online': time.time() - feishu_heartbeat < 90,
+            'feishu_bot_name': conf.get('feishu_bot_name', ''),
+            'feishu_last_error': conf.get('feishu_last_error', ''),
+            'feishu_embed_enabled': bool(_feishu_embed_ancestors())}
 
 
 @app.post('/api/feishu/config')
@@ -507,6 +631,10 @@ def feishu_configure(body: dict, request: Request):
     limited(request, 'feishu-config', 10)
     app_id = text_value(body.get('app_id'), 'App ID', 128)
     secret = text_value(body.get('app_secret'), 'App Secret', 512, False)
+    domain_raw = text_value(body.get('domain', ''), '服务域名', 200, False)
+    if domain_raw and domain_raw.lower() not in ('feishu', 'lark') and not re.fullmatch(r'https://[A-Za-z0-9.-]+(?::\d{1,5})?(?:/[A-Za-z0-9._/-]*)?', domain_raw):
+        fail('飞书服务域名支持 feishu、lark 或完整的 https:// 地址。')
+    domain = '' if domain_raw.lower() == 'feishu' else domain_raw.lower() if domain_raw.lower() == 'lark' else domain_raw.rstrip('/')
     with db(write=True) as conn:
         existing = conn.execute('SELECT * FROM feishu_config WHERE id=1').fetchone()
         old_id = existing['app_id'] if existing else os.getenv('FEISHU_APP_ID', '')
@@ -533,7 +661,8 @@ def feishu_configure(body: dict, request: Request):
             conn.execute('DELETE FROM feishu_outbox')
             conn.execute('DELETE FROM feishu_link_codes')
         version = (existing['version'] if existing else 0) + 1
-        conn.execute('INSERT OR REPLACE INTO feishu_config VALUES (1,?,?,?)', (app_id, secret, version))
+        conn.execute('INSERT OR REPLACE INTO feishu_config(id,app_id,app_secret,version,domain) VALUES (1,?,?,?,?)',
+                     (app_id, secret, version, domain))
     return {'ok': True}
 
 
@@ -587,7 +716,7 @@ def unlink(request: Request):
 
 @app.get('/api/export')
 def export(request: Request):
-    current(request)
+    admin(current(request))
     with db() as conn:
         rows = [entry_view(conn, r['id']) for r in conn.execute('SELECT id FROM entries ORDER BY date,id').fetchall()]
     output = io.StringIO()

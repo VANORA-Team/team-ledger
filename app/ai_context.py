@@ -1,25 +1,18 @@
 """Compact, privacy-safe ledger context for the AI planner."""
 import json
-import os
 from decimal import Decimal
-from . import config, fx
+from . import ai, config, fx
 
-DEFAULT_LIMIT = 120
-DEFAULT_CHARS = 60000
-
-
-def _limit():
-    try:
-        return max(20, min(int(os.getenv('AI_CONTEXT_ENTRIES', str(DEFAULT_LIMIT)) or DEFAULT_LIMIT), 500))
-    except ValueError:
-        return DEFAULT_LIMIT
+DEFAULT_LIMIT = ai.DEFAULT_CONTEXT_ENTRIES
+DEFAULT_CHARS = ai.DEFAULT_CONTEXT_CHARS
 
 
-def _char_cap():
-    try:
-        return max(5000, min(int(os.getenv('AI_CONTEXT_CHARS', str(DEFAULT_CHARS)) or DEFAULT_CHARS), 200000))
-    except ValueError:
-        return DEFAULT_CHARS
+def _limit(conn=None):
+    return ai.load_config(conn)['context_entries']
+
+
+def _char_cap(conn=None):
+    return ai.load_config(conn)['context_chars']
 
 
 def _amount(row, units):
@@ -55,7 +48,7 @@ def _rows(conn, where='', params=(), limit=None):
 
 
 def entries(conn, limit=None):
-    limit = limit or _limit()
+    limit = limit or _limit(conn)
     # Every actionable row can be targeted by edit/void/pay; recent
     # history makes conversational references ("the taxi one") resolvable.
     actionable = _rows(conn, "WHERE e.status IN ('draft','pending','posted')", limit=300)
@@ -91,15 +84,16 @@ def funds(conf):
 
 
 def build(conn, conf, user, limit=None):
+    ai_cfg = ai.load_config(conn)
     context = {
         'timezone': config.TIMEZONE,
         'current_user': {'id': user['id'], 'name': user['name']},
         'currencies': currencies(conf),
         'members': members(conn),
-        'entries': entries(conn, limit),
+        'entries': entries(conn, limit or ai_cfg['context_entries']),
         'funds': funds(conf),
     }
-    cap = _char_cap()
+    cap = ai_cfg['context_chars']
     while context['entries'] and len(json.dumps(context, ensure_ascii=False)) > cap:
         context['entries'].pop()
     return context
