@@ -34,12 +34,17 @@ DEFAULT = {
 }
 RECEIPT = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}')
 # Pending actions must be confirmed afresh after restoring a historical ledger.
-EPHEMERAL = ('sessions', 'payment_quotes', 'link_codes', 'feishu_link_codes',
+EPHEMERAL = ('sessions', 'oidc_flows', 'oidc_invites', 'oidc_revoked_jti',
+             'payment_quotes', 'link_codes', 'feishu_link_codes',
              'ai_plans', 'tg_drafts', 'tg_outbox', 'tg_prompts', 'fsui_drafts', 'fsui_outbox',
              'fsui_prompts', 'fsui_actions', 'feishu_pending', 'feishu_outbox')
-# Newer tables may be absent in older backups and will be
+# Newer tables and columns may be absent in older backups and will be
 # created by init_db() right after restore.
-OPTIONAL_TABLES = {'ai_config', 'member_events'}
+OPTIONAL_TABLES = {'ai_config', 'oidc_flows', 'oidc_revoked_jti'}
+OPTIONAL_COLUMNS = {
+    'users': {'oidc_issuer', 'oidc_sub', 'oidc_email'},
+    'sessions': {'oidc_sid'},
+}
 
 
 class BackupError(Exception):
@@ -417,7 +422,8 @@ def _validate_database(path, receipt_names):
                     actual = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
                     if table in OPTIONAL_TABLES and not actual:
                         continue
-                    if not columns.issubset(actual):
+                    required = columns - OPTIONAL_COLUMNS.get(table, set())
+                    if not required.issubset(actual):
                         raise BackupError('备份数据库结构不受支持，请使用兼容版本的备份')
             if conn.execute('PRAGMA foreign_key_check').fetchone():
                 raise BackupError('备份数据库包含缺失的关联记录')
@@ -484,9 +490,12 @@ def _restore(path, work):
     (restored / 'receipts').mkdir(exist_ok=True)
     with closing(sqlite3.connect(restored / 'ledger.sqlite3')) as conn:
         with conn:
+            existing_tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table in EPHEMERAL:
-                conn.execute(f'DELETE FROM "{table}"')
-            conn.execute('DELETE FROM feishu_inbox WHERE done=0')
+                if table in existing_tables:
+                    conn.execute(f'DELETE FROM "{table}"')
+            if 'feishu_inbox' in existing_tables:
+                conn.execute('DELETE FROM feishu_inbox WHERE done=0')
     with data_guard(exclusive=True):
         safety = _name('before-restore')
         safety_work = work / 'safety'

@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import patch
 from tests import test_ledger as base
-from app import bot, bot_ui, config
+from app import bot, bot_ui, config, oidc
 from app.db import db, set_setting
 
 
@@ -77,7 +77,6 @@ class TelegramUiTest(unittest.TestCase):
     def test_member_cannot_use_finance_commands_or_old_payment_buttons(self):
         member = self.new_member()
         entry = self.entry()
-        member_path = f'/api/members/{member["id"]}'
         with db(write=True) as conn:
             conn.execute('INSERT INTO tg_links VALUES (?,?)', ('123', member['id']))
         self.click(2, 'home')
@@ -87,10 +86,17 @@ class TelegramUiTest(unittest.TestCase):
         self.assertNotIn('newpublic', callbacks)
         bot.process_update(self.message(3, '/expense'))
         self.assertIn('财务管理员', self.last_message()['text'])
-        self.assertEqual(self.client.patch(member_path, json={'role': 'finance'}, headers=self.headers).status_code, 200)
+        self.oidc.set_user('vanora-member-bob', roles=('finance',))
+        self.assertEqual(self.post('/members/sync').status_code, 200)
         self.click(4, f'pay:{entry["id"]}')
         token = self.draft()['token']
-        self.assertEqual(self.client.patch(member_path, json={'role': 'member'}, headers=self.headers).status_code, 200)
+        self.oidc.set_user('vanora-member-bob', roles=('member',))
+        self.assertEqual(
+            self.oidc.send_backchannel_logout(
+                self.client, sub='vanora-member-bob', extra_events=[oidc.PERMISSIONS_CHANGED_EVENT]
+            ).status_code,
+            200,
+        )
         self.click(5, f'd:{token}:paycur:CNY')
         self.click(6, f'pay:{entry["id"]}')
         with db() as conn:

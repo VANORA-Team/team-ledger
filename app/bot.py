@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from fastapi import HTTPException
-from . import ai, ai_context, ai_plan, config, fx
+from . import ai, ai_context, ai_plan, config, fx, permissions_sync
 from .db import db, init_db, settings, set_setting
 from .bot_ui import (COMMANDS, DELIVERY, PLATFORM, accepts_text, command_text, draft_for, handle,
                      queue, say, nav)
@@ -35,7 +35,8 @@ def _process_update(update, db_provider, platform):
         conf = settings(conn)
         command, argument = command_text(text, conf)
         authorized_chat = msg.get('chat', {}).get('type') == 'private' or chat_id in conf['feishu_allowed_chats' if platform == 'feishu' else 'telegram_allowed_chats']
-        linked = conn.execute('SELECT u.* FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=? AND u.active=1', (telegram_id,)).fetchone()
+        linked_any = conn.execute('SELECT u.* FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=?', (telegram_id,)).fetchone()
+        linked = linked_any if (linked_any and linked_any['active']) else None
         draft = draft_for(conn, telegram_id, chat_id)
         accepted = accepts_text(conn, msg, telegram_id, chat_id, draft)
         callback_data = callback.get('data', '') if callback else ''
@@ -50,8 +51,16 @@ def _process_update(update, db_provider, platform):
             if len(parts) == 4 and parts[:3] == ['d', draft['token'], 'paycur'] and payload.get('_action') == 'pay':
                 row = conn.execute('SELECT currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
                 payment_code = row['currency'] if row else None
+    if linked_any and linked_any['oidc_sub']:
+        if permissions_sync.sync_member(linked_any['oidc_sub'], force=False, db_provider=db_provider):
+            with db_provider() as conn:
+                linked = conn.execute('SELECT u.* FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=? AND u.active=1', (telegram_id,)).fetchone()
+                draft = draft_for(conn, telegram_id, chat_id)
+                payload = json.loads(draft['payload']) if draft else {}
     result, error, rates = None, None, None
     authorized = bool(linked and authorized_chat and command != 'foreign' and not sender.get('is_bot'))
+    if authorized and (callback_data.endswith(':edit:payer') or (not callback and text)):
+        permissions_sync.sync_all_members(force=False, db_provider=db_provider)
     wants_ai = not callback and (
         (command == '/ai' and bool(argument))
         or (not command and text and accepted and (

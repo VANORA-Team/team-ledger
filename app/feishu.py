@@ -12,7 +12,7 @@ import time
 import uuid
 
 from fastapi import HTTPException
-from . import ai, ai_context, ai_plan, config, feishu_ui
+from . import ai, ai_context, ai_plan, config, feishu_ui, permissions_sync
 from .bot_ui import ai_query_line, amount_text
 from .db import db, init_db, settings, set_setting, remove_receipt_file
 
@@ -241,12 +241,20 @@ def process_one():
         if not msg:
             return False
         msg = dict(msg)
-        user = conn.execute(
-            'SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=? AND u.active=1',
+        user_any = conn.execute(
+            'SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=?',
             (msg['open_id'],),
         ).fetchone()
-        user = dict(user) if user else None
+        user = dict(user_any) if (user_any and user_any['active']) else None
         conf = settings(conn)
+    if user_any and user_any['oidc_sub']:
+        if permissions_sync.sync_member(user_any['oidc_sub'], force=False):
+            with db() as conn:
+                refreshed = conn.execute(
+                    'SELECT u.* FROM feishu_links l JOIN users u ON u.id=l.user_id WHERE l.open_id=? AND u.active=1',
+                    (msg['open_id'],),
+                ).fetchone()
+                user = dict(refreshed) if refreshed else None
     text, open_id, chat_id = msg['text'], msg['open_id'], msg['chat_id']
     binding = re.fullmatch(r'(?:绑定|/start)\s+([A-Za-z0-9_-]{1,100})', text)
     ui_event = None
@@ -294,6 +302,7 @@ def process_one():
     confirm = re.fullmatch(r'(确认|取消)\s+([A-Fa-f0-9]{8})', text)
     prepared = context = rates = error = None
     if user and not binding and not confirm and text not in ('帮助', '/start', '/help'):
+        permissions_sync.sync_all_members(force=False)
         try:
             prepared = _raw_input(text, conf)
             if prepared is None:
@@ -421,6 +430,13 @@ def send_one(client):
         if not row:
             return False
         row = dict(row)
+        linked_sub = None
+        if row['user_id'] is not None:
+            sub_row = conn.execute('SELECT oidc_sub FROM users WHERE id=?', (row['user_id'],)).fetchone()
+            linked_sub = sub_row['oidc_sub'] if sub_row else None
+    if linked_sub:
+        permissions_sync.sync_member(linked_sub, force=False)
+    with db() as conn:
         authorized = row['user_id'] is None or conn.execute(
             'SELECT 1 FROM feishu_links l JOIN users u ON u.id=l.user_id '
             'WHERE l.open_id=? AND l.user_id=? AND u.active=1',

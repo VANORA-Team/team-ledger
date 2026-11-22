@@ -63,6 +63,8 @@ const paths = {
   move: 'M8 7 4 11l4 4 M16 7l4 4-4 4 M4 11h16',
   key: 'M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4',
   logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9',
+  user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8',
+  link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
 };
 
 const icon = (name, cls = '') =>
@@ -86,12 +88,24 @@ const ROLES = {owner: '账本所有者', finance: '财务管理员', member: '�
 const roleName = role => ROLES[role] || '未识别角色';
 const COLORS = ['green', 'orange', 'blue', 'purple'];
 
+const AUTH_ERRORS = {
+  oidc_unconfigured: '服务器尚未配置 Vanora OAuth，请联系管理员完成环境变量配置。',
+  cancelled: '你已取消 Vanora 授权登录，请重试。',
+  invalid_state: '登录状态已过期或校验失败，请重新点击登录。',
+  exchange_failed: '与 Vanora OAuth 交换令牌失败，请稍后重试或检查网络配置。',
+  invalid_token: 'Vanora 身份令牌校验失败，请重新登录。',
+  disabled: '你的 Vanora 账号已被停用，请联系管理员在 Vanora 管理后台检查账号状态。',
+  not_member: '当前 Vanora 账号尚未被分配本团队账本的客户端角色（owner / finance / member），请联系管理员在 Vanora 管理后台授权后再登录。',
+};
+const RETURN_HASH_RE = /^#[a-z]{1,30}(?:\/\d{1,12})?$/;
+
 const state = {
-  user: null, csrf: '', conf: null, members: [], memberEvents: [], entries: [], integrations: {}, report: null, page: 'overview',
+  user: null, csrf: '', accountUrl: '', adminUrl: '', boot: null, authError: '',
+  conf: null, members: [], entries: [], integrations: {}, report: null, page: 'overview',
   pendingEntryId: null,
   filter: {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''},
   reimburseTab: 'pending', selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
-  action: null, setup: false, base: null, loadId: 0,
+  action: null, base: null, loadId: 0,
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
   ai: {busy: false, conversation: [], plan: null, selected: new Set(), error: ''},
 };
@@ -212,9 +226,9 @@ function triggerDownload(url, filename = '') {
   }
 }
 
-/* Custom Vanora Confirm & Password-Prompt Dialog (zero native confirm/prompt) */
+/* Custom Vanora Confirm Dialog (zero native confirm/prompt) */
 let confirmResolver = null;
-function uiConfirm({title = '请确认', message = '', confirmLabel = '确认', danger = false, inputLabel = '', inputPlaceholder = '', inputType = 'password'} = {}) {
+function uiConfirm({title = '请确认', message = '', confirmLabel = '确认', danger = false, inputLabel = '', inputPlaceholder = '', inputType = 'text'} = {}) {
   return new Promise(resolve => {
     const dialog = $('#confirm-dialog');
     const okBtn = $('#confirm-ok');
@@ -241,10 +255,6 @@ function uiConfirm({title = '请确认', message = '', confirmLabel = '确认', 
     if (!dialog.open) dialog.showModal();
     setTimeout(() => (inputLabel ? inputEl : okBtn).focus(), 40);
   });
-}
-
-function uiPromptPassword({title, message, label = '新密码', placeholder = '输入新密码', confirmLabel = '保存新密码'}) {
-  return uiConfirm({title, message, confirmLabel, inputLabel: label, inputPlaceholder: placeholder, inputType: 'password'});
 }
 
 function resolveConfirm(value) {
@@ -289,8 +299,9 @@ async function api(path, method = 'GET', body, extraHeaders = {}) {
   if (!response.ok) {
     if (response.status === 401 && state.user) {
       state.user = null;
+      state.csrf = '';
       $$('dialog[open]').forEach(d => d.close());
-      await showAuth(false);
+      await showAuth();
     }
     const error = new Error(typeof data.error === 'string' ? data.error : response.status === 422 ? '输入格式不正确，请检查表单' : '操作失败，请稍后重试');
     error.status = response.status;
@@ -1011,50 +1022,41 @@ async function calculateFunds() {
 }
 
 function renderMembers() {
-  const activeOwners = state.members.filter(member => member.active && member.role === 'owner').length;
-  const eventLabels = {created: '创建账号', enabled: '启用账号', disabled: '停用账号', password_reset: '重置密码'};
+  const actions = [];
+  if (canManage()) {
+    actions.push(`<button type="button" class="button button-outline" id="sync-members">${icon('refresh', 'ico-refresh')}同步成员权限</button>`);
+  }
+  if (isOwner() && state.adminUrl) {
+    actions.push(`<a class="button button-primary" href="${esc(state.adminUrl)}" target="_blank" rel="noreferrer">前往 Vanora 管理后台 ${icon('arrowUpRight', 'icon-sm')}</a>`);
+  }
+  const activeCount = state.members.filter(m => m.active).length;
   return heading(
     '团队成员',
-    '查看团队成员、账本角色和待报销金额。',
-    isOwner() ? `<button type="button" class="button button-primary" id="add-member">${icon('plus', 'ico-plus')}邀请新伙伴</button>` : '',
+    `只读成员名录 · 当前共 ${activeCount} 位启用成员，成员角色与启停由 Vanora OAuth 统一管理。`,
+    actions.join(''),
   ) + `
-    <div class="members-grid">
-      ${state.members.map(m => {
-        const lastOwner = m.active && m.role === 'owner' && activeOwners === 1;
-        const lock = lastOwner ? ' disabled title="必须保留至少一位启用的账本所有者"' : '';
-        return `
+    <div class="notice">
+      成员的账本角色（<code>owner</code> 账本所有者 / <code>finance</code> 财务管理员 / <code>member</code> 普通成员）、账号启停与权限审计日志均由 <strong>Vanora OAuth</strong> 集中管理。在 Vanora 管理后台调整角色或停用账号后，系统会通过 OIDC Back-channel Logout 与权限同步自动生效。个人显示名称可在右上角「个人资料」中修改。
+    </div>
+    ${state.members.length ? `<div class="members-grid">
+      ${state.members.map(m => `
         <section class="person-card ${m.active ? '' : 'inactive'}">
           <div class="person-card-top">
             ${avatar(m.name, m.id)}
             <div>
               <h3>${esc(m.name)}${m.id === state.user.id ? ' · 我' : ''}</h3>
               <p class="person-handle">@${esc(m.username)}</p>
+              ${m.oidc_email ? `<p class="person-email">${esc(m.oidc_email)}</p>` : ''}
             </div>
           </div>
           <hr>
           <div class="person-detail"><span>账本角色</span><span class="badge ${m.active ? 'good' : 'draft'}">${esc(roleName(m.role))}${m.active ? '' : ' · 已停用'}</span></div>
+          <div class="person-detail"><span>Vanora 账号</span><span class="badge ${m.oidc_linked ? 'good' : 'draft'}">${m.oidc_linked ? '已同步' : '历史记录'}</span></div>
           <div class="person-detail"><span>飞书绑定</span><span class="badge ${m.feishu_linked ? 'good' : 'draft'}">${m.feishu_linked ? '已绑定' : '未绑定'}</span></div>
           <div class="person-detail"><span>Telegram</span><span class="badge ${m.telegram_linked ? 'good' : 'draft'}">${m.telegram_linked ? '已绑定' : '未绑定'}</span></div>
           <div class="person-detail"><span>待报销 · 原币种</span><strong>${groupedTotals(state.entries.filter(e => e.payer_id === m.id && e.status === 'pending'), 'remaining_amount')}</strong></div>
-          ${isOwner() ? `<label><span>分配角色</span><select data-member-role="${m.id}" aria-label="${esc(m.name)}的账本角色"${lock}>${options(Object.keys(ROLES), role => role, roleName, m.role)}</select></label>
-          <div class="person-actions">
-            <button type="button" class="btn small" data-reset-password="${m.id}">重置密码</button>
-            <button type="button" class="btn small ${m.active ? 'danger' : ''}" data-toggle-member="${m.id}"${lock}>${m.active ? '停用账号' : '启用账号'}</button>
-          </div>` : ''}
-        </section>`;
-      }).join('')}
-    </div>
-    ${isOwner() ? `<section class="panel recent-panel">
-      <div class="panel-heading"><div><h3>成员管理记录</h3><p>最近 50 条账号和角色变更</p></div></div>
-      <div class="panel-inner timeline">
-        ${state.memberEvents.map(event => {
-          const action = event.action === 'role_changed'
-            ? `${roleName(event.previous_role)} → ${roleName(event.new_role)}`
-            : `${eventLabels[event.action] || event.action}${event.new_role ? ' · ' + roleName(event.new_role) : ''}`;
-          return `<div class="timeline-item"><strong>${esc(event.actor_name)}</strong> · ${esc(event.member_name)} · ${esc(action)}<small>${esc(event.created_at.replace('T', ' ').slice(0, 19))}</small></div>`;
-        }).join('') || '<p>暂无成员管理记录。</p>'}
-      </div>
-    </section>` : ''}`;
+        </section>`).join('')}
+    </div>` : empty('暂无已同步成员', '请先在 Vanora OAuth 为成员分配客户端角色（owner / finance / member），再点击上方「同步成员权限」或等待成员登录。')}`;
 }
 
 function renderIntegrations() {
@@ -1342,7 +1344,7 @@ function hydrateStaticChrome() {
   $('#menu-new-entry').innerHTML = `${icon('plus')}<span>记一笔账目</span>`;
   $('#menu-integrations').innerHTML = `${icon('message')}<span>机器人与 AI</span>`;
   $('#settings-link').innerHTML = `${icon('settings')}<span>团队设置</span>`;
-  $('#profile-button').innerHTML = `${icon('key')}<span>修改密码</span>`;
+  $('#profile-button').innerHTML = `${icon('user')}<span>个人资料</span>`;
   $('#menu-logout').innerHTML = `${icon('logout')}<span>退出登录</span>`;
   if (feishuEnv.isFeishu) {
     const envBadge = $('#feishu-env-badge');
@@ -1410,18 +1412,88 @@ function render() {
   document.title = `${PAGES[state.page][0]} · Vanora 财务管理`;
 }
 
+function isEmbedded() {
+  try { return window.self !== window.top; } catch { return true; }
+}
+
+function safeReturnHash() {
+  const hash = location.hash || '';
+  return RETURN_HASH_RE.test(hash) ? hash : '';
+}
+
+function consumeAuthQueryParams() {
+  const params = new URLSearchParams(location.search);
+  const errCode = (params.get('auth_error') || '').trim();
+  if (errCode) {
+    state.authError = AUTH_ERRORS[errCode] || '登录失败，请稍后重试。';
+    params.delete('auth_error');
+    const qs = params.toString();
+    history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+  }
+}
+
+function buildOidcLoginUrl() {
+  const params = new URLSearchParams();
+  if (state.boot?.needs_setup) {
+    const teamName = $('#auth-team-name')?.value.trim() || '';
+    if (teamName) params.set('team_name', teamName);
+  }
+  const nextHash = safeReturnHash();
+  if (nextHash) params.set('next', nextHash);
+  const qs = params.toString();
+  return '/api/auth/oidc/login' + (qs ? '?' + qs : '');
+}
+
+function syncAuthExternalLink() {
+  const link = $('#auth-external-link');
+  if (link) link.href = buildOidcLoginUrl();
+}
+
+function navigateExternal(url) {
+  if (isEmbedded()) {
+    try {
+      window.top.location.assign(url);
+      return;
+    } catch {
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (opened) return;
+    }
+  }
+  location.assign(url);
+}
+
+function openProfileDialog() {
+  if (!state.user) return;
+  const u = state.user;
+  $('#profile-identity').innerHTML = `
+    <div class="profile-identity-row"><span>账本账号</span><strong>@${esc(u.username)} · ${esc(roleName(u.role))}</strong></div>
+    <div class="profile-identity-row"><span>Vanora 账号</span><span class="badge ${u.oidc_linked ? 'good' : 'warn'}">${u.oidc_linked ? '已绑定' : '未绑定'}</span></div>
+    <div class="profile-identity-row"><span>Vanora 邮箱</span><strong>${u.oidc_email ? esc(u.oidc_email) : '未设置'}</strong></div>`;
+  $('#profile-name').value = u.name || '';
+  $('#profile-error').textContent = '';
+  const accountPanel = $('#profile-account-panel');
+  const accountLink = $('#vanora-account-link');
+  if (state.accountUrl) {
+    accountLink.href = state.accountUrl;
+    accountLink.innerHTML = `前往 Vanora 账户中心 ${icon('arrowUpRight', 'icon-sm')}`;
+    accountPanel.hidden = false;
+  } else {
+    accountPanel.hidden = true;
+  }
+  $('#profile-dialog').showModal();
+  setTimeout(() => $('#profile-name')?.focus(), 40);
+}
+
 async function refresh(renderAfter = true) {
   const loadId = ++state.loadId;
   ++state.calculator.request;
   state.calculator.report = null;
-  const [conf, members, entries, integrations, memberEvents] = await Promise.all([
+  const [conf, members, entries, integrations] = await Promise.all([
     api('/settings'), api('/members'), api('/entries'), api('/integrations'),
-    isOwner() ? api('/member-events') : [],
   ]);
   if (loadId !== state.loadId) return;
   state.conf = conf;
   state.members = members;
-  state.memberEvents = memberEvents;
   state.entries = entries;
   state.integrations = integrations;
   const pendingIds = new Set(entries.filter(e => e.kind === 'expense' && e.status === 'pending').map(e => e.id));
@@ -1448,26 +1520,83 @@ async function refresh(renderAfter = true) {
   }
 }
 
-async function showAuth(setup) {
-  state.setup = setup;
+async function showAuth(preloadedBoot = null) {
+  const boot = preloadedBoot && typeof preloadedBoot === 'object' ? preloadedBoot : await api('/bootstrap');
+  state.boot = boot;
   document.documentElement.classList.remove('app-shell-active');
   setAccountMenuOpen(false);
   $('#loading').hidden = true;
   $('#app').hidden = true;
   $('#auth').hidden = false;
-  $('#auth-title').textContent = setup ? '创建团队账本' : '欢迎回来';
-  $('#auth-subtitle').textContent = setup ? '创建第一个账本所有者账号，之后可添加团队成员。' : '登录账号，查看团队收支或提交垫付。';
-  $('#auth-submit').textContent = setup ? '创建并进入账本' : '登录账本';
-  $$('.setup-only').forEach(e => {
-    e.hidden = !setup;
-    $('input', e).required = setup;
-  });
-  $('#auth-form [name=password]').autocomplete = setup ? 'new-password' : 'current-password';
+
+  const page = $('#auth-page');
+  const ctx = $('#auth-context');
+  const teamWrap = $('#auth-team-wrap');
+  const submitBtn = $('#auth-submit');
+  const recheckBtn = $('#auth-recheck');
+  const embedHint = $('#auth-embed-hint');
+  const errorBox = $('#auth-error');
+  const noteBox = $('#auth-note');
+
+  page.classList.remove('is-wide');
+  ctx.hidden = true;
+  ctx.innerHTML = '';
+  teamWrap.hidden = true;
+  submitBtn.hidden = false;
+  submitBtn.disabled = false;
+  recheckBtn.hidden = true;
+  embedHint.hidden = true;
+  errorBox.textContent = state.authError || '';
+  state.authError = '';
+
+  if (!boot.oidc_configured) {
+    page.classList.add('is-wide');
+    $('#auth-title').textContent = '尚未配置 Vanora OAuth';
+    $('#auth-subtitle').textContent = '请先使用 Vanora OAuth 的 configure-vanora.py 或管理后台创建机密 OIDC 客户端与客户端角色，并在服务器环境变量中配置后重启服务。';
+    ctx.innerHTML = `
+      <div class="auth-card">
+        <div class="auth-card-title"><span>客户端接入与权限同步参数</span><span class="badge warn">待配置</span></div>
+        <p>启用 <strong>Standard Flow</strong>、<strong>PKCE S256</strong>、客户端角色（<code>owner</code> / <code>finance</code> / <code>member</code>）与 <code>vanora.permissions.sync.enabled=true</code>，并配置 <code>VANORA_OIDC_ISSUER</code>、<code>VANORA_OIDC_CLIENT_ID</code> 与 <code>VANORA_OIDC_CLIENT_SECRET</code>。</p>
+        <div class="auth-config-list">
+          <div class="auth-config-item">
+            <span>Valid redirect URI</span>
+            <div class="copy-field"><code>${esc(boot.callback_url || '')}</code>${copyButtonHtml(boot.callback_url || '')}</div>
+          </div>
+          <div class="auth-config-item">
+            <span>Backchannel logout URL（需开启 session required）</span>
+            <div class="copy-field"><code>${esc(boot.backchannel_logout_url || '')}</code>${copyButtonHtml(boot.backchannel_logout_url || '')}</div>
+          </div>
+        </div>
+      </div>`;
+    ctx.hidden = false;
+    submitBtn.hidden = true;
+    recheckBtn.hidden = false;
+    noteBox.textContent = '配置完成后重启账本服务，再点击上方「重新检测状态」。';
+    return;
+  }
+
+  if (boot.needs_setup) {
+    $('#auth-title').textContent = '启用团队账本';
+    $('#auth-subtitle').textContent = '请使用已在 Vanora OAuth 分配本账本客户端角色（owner / finance / member）的 Vanora 账号登录。';
+    teamWrap.hidden = false;
+    submitBtn.textContent = '使用 Vanora 账号登录';
+    noteBox.textContent = '拥有 owner 角色的账号首次登录时可一并设定团队名称；兼容邮箱、手机号、微信或 QQ 登录的 Vanora 账号。';
+  } else {
+    $('#auth-title').textContent = '欢迎回来';
+    $('#auth-subtitle').textContent = '使用 Vanora 账号登录，继续管理团队的每一笔收支与报销。';
+    submitBtn.textContent = '使用 Vanora 账号登录';
+    noteBox.textContent = '成员角色（owner / finance / member）、账号启停与两步验证由 Vanora OAuth 统一管理。';
+  }
+
+  syncAuthExternalLink();
+  embedHint.hidden = !isEmbedded();
 }
 
 async function enterApp(data) {
   state.user = data.user;
   state.csrf = data.csrf;
+  state.accountUrl = data.account_url || state.boot?.account_url || '';
+  state.adminUrl = data.admin_url || state.boot?.admin_url || '';
   document.documentElement.classList.add('app-shell-active');
   $('#auth').hidden = true;
   $('#app').hidden = false;
@@ -1479,17 +1608,19 @@ async function enterApp(data) {
 
 async function start() {
   hydrateStaticChrome();
+  consumeAuthQueryParams();
   try {
     const boot = await api('/bootstrap');
+    state.boot = boot;
     if (boot.needs_setup) {
-      await showAuth(true);
+      await showAuth(boot);
       return;
     }
     try {
       await enterApp(await api('/session'));
     } catch (e) {
       if (state.user) throw e;
-      await showAuth(false);
+      await showAuth(boot);
     }
   } catch (e) {
     $('#loading').innerHTML = `<h1>无法连接到账本服务</h1><p>${esc(e.message)}</p><button type="button" class="button button-outline" data-reload>重新连接</button>`;
@@ -1975,15 +2106,30 @@ document.addEventListener('click', async event => {
     return;
   }
   if (b.id === 'profile-button') {
-    $('#password-form').reset();
-    $('#password-error').textContent = '';
-    $('#profile-dialog').showModal();
+    openProfileDialog();
     return;
   }
-  if (b.id === 'add-member') {
-    $('#member-form').reset();
-    $('#member-error').textContent = '';
-    $('#member-dialog').showModal();
+  if (b.id === 'sync-members') {
+    await busy(b, async () => {
+      try {
+        const res = await api('/members/sync', 'POST');
+        await refresh();
+        toast(`已从 Vanora OAuth 同步成员权限（当前 ${res.total} 位成员）`);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+    return;
+  }
+  if (b.id === 'auth-recheck') {
+    await busy(b, async () => {
+      try {
+        await showAuth();
+        toast('已重新检测配置状态');
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
     return;
   }
   if (b.id === 'save-draft') {
@@ -1993,10 +2139,15 @@ document.addEventListener('click', async event => {
   if (b.id === 'logout' || b.id === 'menu-logout') {
     await busy(b, async () => {
       try {
-        await api('/logout', 'POST');
+        const data = await api('/logout', 'POST');
         state.user = null;
+        state.csrf = '';
         $$('dialog[open]').forEach(d => d.close());
-        await showAuth(false);
+        if (data?.logout_url) {
+          navigateExternal(data.logout_url);
+          return;
+        }
+        await showAuth();
         toast('已安全退出登录');
       } catch (e) {
         toast(e.message, true);
@@ -2122,41 +2273,6 @@ document.addEventListener('click', async event => {
     });
     return;
   }
-  if (b.hasAttribute('data-toggle-member')) {
-    const m = state.members.find(item => item.id === Number(b.dataset.toggleMember));
-    const ok = await uiConfirm({
-      title: m.active ? `停用「${m.name}」` : `启用「${m.name}」`,
-      message: m.active ? '停用后其登录会话及待确认机器人草稿将立即失效，历史账目会完整保留。' : `启用后该成员可以「${roleName(m.role)}」角色登录。`,
-      confirmLabel: m.active ? '确认停用' : '确认启用',
-      danger: Boolean(m.active),
-    });
-    if (!ok) return;
-    try {
-      await api('/members/' + m.id, 'PATCH', {active: m.active ? 0 : 1});
-      await refresh();
-      toast('已更新成员状态');
-    } catch (e) {
-      toast(e.message, true);
-    }
-    return;
-  }
-  if (b.hasAttribute('data-reset-password')) {
-    const m = state.members.find(item => item.id === Number(b.dataset.resetPassword));
-    const value = await uiPromptPassword({
-      title: `重置「${m.name}」的密码`,
-      message: '设置新密码后，该成员原有的登录会话将立即失效。请私下将新密码交给对方。',
-      label: '新密码',
-      placeholder: '输入新密码',
-      confirmLabel: '重置密码',
-    });
-    if (value === null) return;
-    try {
-      await api('/members/' + m.id, 'PATCH', {password: value});
-      toast('密码已重置，请把新密码私下交给成员');
-    } catch (e) {
-      toast(e.message, true);
-    }
-  }
 });
 
 document.addEventListener('keydown', e => {
@@ -2186,35 +2302,13 @@ document.addEventListener('input', event => {
     state.filter.text = el.value;
     $('#ledger-results').innerHTML = ledgerResults();
   }
+  if (el.id === 'auth-team-name') {
+    syncAuthExternalLink();
+  }
 });
 
 document.addEventListener('change', async event => {
   const el = event.target;
-  if (el.hasAttribute('data-member-role')) {
-    const member = state.members.find(item => item.id === Number(el.dataset.memberRole));
-    const role = el.value;
-    el.value = member.role;
-    const confirmed = await uiConfirm({
-      title: `调整「${member.name}」的角色`,
-      message: `将「${roleName(member.role)}」改为「${roleName(role)}」。变更后，该成员需要重新登录，待确认操作也会失效。`,
-      confirmLabel: '确认调整',
-    });
-    if (!confirmed) return;
-    try {
-      await api('/members/' + member.id, 'PATCH', {role});
-      if (member.id === state.user?.id) {
-        state.user = null;
-        await showAuth(false);
-        toast('角色已更新，请重新登录');
-        return;
-      }
-      await refresh();
-      toast('成员角色已更新');
-    } catch (e) {
-      toast(e.message, true);
-    }
-    return;
-  }
   if (el.id === 'feishu-domain-preset') {
     const wrap = $('#feishu-domain-custom-wrap');
     if (wrap) wrap.hidden = el.value !== 'custom';
@@ -2327,19 +2421,10 @@ function updateCurrencySelects() {
   });
 }
 
-$('#auth-form').addEventListener('submit', async event => {
+$('#auth-form').addEventListener('submit', event => {
   event.preventDefault();
-  const button = $('#auth-submit');
-  await busy(button, async () => {
-    try {
-      $('#auth-error').textContent = '';
-      const data = await api(state.setup ? '/bootstrap' : '/login', 'POST', Object.fromEntries(new FormData(event.target)));
-      await enterApp(data);
-      event.target.reset();
-    } catch (e) {
-      $('#auth-error').textContent = e.message;
-    }
-  });
+  if (!state.boot?.oidc_configured) return;
+  navigateExternal(buildOidcLoginUrl());
 });
 
 $('#entry-form').addEventListener('submit', async event => {
@@ -2347,30 +2432,19 @@ $('#entry-form').addEventListener('submit', async event => {
   await saveEntry('pending', $('#save-entry'));
 });
 
-$('#member-form').addEventListener('submit', async event => {
+$('#profile-form').addEventListener('submit', async event => {
   event.preventDefault();
   await busy($('button[type=submit]', event.target), async () => {
     try {
-      await api('/members', 'POST', Object.fromEntries(new FormData(event.target)));
-      $('#member-dialog').close();
-      await refresh();
-      toast('成员账号已创建');
-    } catch (e) {
-      $('#member-error').textContent = e.message;
-    }
-  });
-});
-
-$('#password-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  await busy($('button[type=submit]', event.target), async () => {
-    try {
-      const data = await api('/password', 'POST', Object.fromEntries(new FormData(event.target)));
-      state.csrf = data.csrf;
+      $('#profile-error').textContent = '';
+      const name = $('#profile-name').value.trim();
+      const data = await api('/me', 'PATCH', {name});
+      state.user = data.user;
       $('#profile-dialog').close();
-      toast('密码已更新，其他登录会话已失效');
+      await refresh();
+      toast('个人资料已更新');
     } catch (e) {
-      $('#password-error').textContent = e.message;
+      $('#profile-error').textContent = e.message;
     }
   });
 });

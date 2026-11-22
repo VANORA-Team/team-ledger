@@ -122,7 +122,7 @@ function renderBackupSettings() {
           <label><span>选择备份文件</span><input type="file" id="backup-upload-file" accept=".zip,application/zip,application/x-zip-compressed"></label>
           <button class="btn danger" type="button" data-backup-upload>上传并恢复</button>
         </div>
-        <p class="fx-caption">恢复前会校验完整性并自动保存当前账本，失败时回退。备份包含密码哈希以及数据库中的机器人与 AI 密钥，请妥善保管；远程存储凭据和定时设置单独保存在服务器，不包含在 ZIP 中。</p>
+        <p class="fx-caption">恢复前会校验完整性并自动保存当前账本，失败时回退。备份包含历史账目、成员投影以及数据库中的机器人与 AI 密钥，请妥善保管；成员角色与启用状态由 Vanora OAuth 统一管理，恢复后重新登录时将自动同步。远程存储凭据和定时设置单独保存在服务器，不包含在 ZIP 中。</p>
       </div>
     </section>`;
 }
@@ -177,8 +177,8 @@ async function afterBackupRestore(result) {
   state.conf = null;
   state.ai = {busy: false, conversation: [], plan: null, selected: new Set(), error: ''};
   $$('dialog[open]').forEach(dialog => dialog.close());
-  await showAuth(false);
-  toast(`账本已恢复，请使用备份中的账号密码登录。恢复前副本：${result.safety_copy}`);
+  await showAuth();
+  toast(`账本已恢复，请使用 Vanora 账号重新登录。恢复前副本：${result.safety_copy}`);
 }
 
 document.addEventListener('submit', async event => {
@@ -224,7 +224,7 @@ document.addEventListener('click', async event => {
     const name = file?.name || button.dataset.backupRestore, target = backupUI.target;
     const ok = await uiConfirm({
       title: '确认恢复备份',
-      message: `即将从「${name}」恢复账本。\n\n当前全部账目、成员和凭证将被覆盖，恢复前会自动保存当前账本副本。所有登录会话将退出，请使用备份中的账号密码重新登录。`,
+      message: `即将从「${name}」恢复账本。\n\n当前全部账目、成员投影和凭证将被覆盖，恢复前会自动保存当前账本副本。所有登录会话将退出，请使用已授权的 Vanora 账号重新登录，成员角色与状态将自动与 Vanora OAuth 保持同步。`,
       confirmLabel: '确认恢复',
       danger: true,
     });

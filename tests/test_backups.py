@@ -23,6 +23,7 @@ from app import backups, config
 from app.backup_storage import S3, WebDAV, StorageError
 from app.db import db, remove_receipt_file
 from app.main import app, attempts
+from tests.oidc_helper import FakeVanoraOidc
 
 
 class MemoryStorage:
@@ -53,15 +54,22 @@ class BackupTest(unittest.TestCase):
         config.DATA = Path(self.temporary.name)
         config.DB_PATH = config.DATA / 'test.sqlite3'
         attempts.clear()
+        self.oidc = FakeVanoraOidc().start()
         self.client = TestClient(app)
         self.client.__enter__()
-        result = self.client.post('/api/bootstrap', json={'username': 'owner', 'name': '测试成员',
-                                                        'password': 'test-pass', 'team_name': '备份测试'})
-        self.assertEqual(result.status_code, 200, result.text)
-        self.headers = {'X-CSRF-Token': result.json()['csrf']}
+        session = self.oidc.login(
+            self.client,
+            sub='vanora-backup-owner',
+            preferred_username='owner',
+            name='测试成员',
+            roles=('owner',),
+            team_name='备份测试',
+        )
+        self.headers = {'X-CSRF-Token': session['csrf']}
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        self.oidc.stop()
         config.DATA, config.DB_PATH = self.old_data, self.old_path
         self.temporary.cleanup()
 
@@ -92,14 +100,20 @@ class BackupTest(unittest.TestCase):
         return response
 
     def login(self):
-        response = self.client.post('/api/login', json={'username': 'owner', 'password': 'test-pass'})
-        self.assertEqual(response.status_code, 200, response.text)
-        self.headers = {'X-CSRF-Token': response.json()['csrf']}
+        session = self.oidc.login(
+            self.client,
+            sub='vanora-backup-owner',
+            preferred_username='owner',
+            name='测试成员',
+            roles=('owner',),
+        )
+        self.headers = {'X-CSRF-Token': session['csrf']}
 
     def test_local_roundtrip_receipts_settings_and_sessions(self):
         entry = self.entry()
-        member = self.post('/members', {'name': '财务', 'username': 'finance',
-                                        'password': 'role-test-password', 'role': 'finance'}).json()
+        self.oidc.set_user('vanora-backup-finance', username='finance', name='财务', roles=('finance',))
+        self.assertEqual(self.post('/members/sync', {}).status_code, 200)
+        member = next(m for m in self.client.get('/api/members').json() if m.get('oidc_sub') == 'vanora-backup-finance')
         receipt = b'%PDF-1.4\nbackup receipt'
         response = self.post(f"/entries/{entry['id']}/receipt",
                              {'name': '测试.pdf', 'data': base64.b64encode(receipt).decode()})
@@ -121,8 +135,8 @@ class BackupTest(unittest.TestCase):
                 self.assertEqual(info['sha256'], hashlib.sha256(data).hexdigest())
             self.assertNotIn('backup-control.json', archive.namelist())
         self.entry('备份后')
-        member_path = f'/api/members/{member["id"]}'
-        self.assertEqual(self.client.patch(member_path, json={'role': 'member'}, headers=self.headers).status_code, 200)
+        self.oidc.set_user('vanora-backup-finance', roles=('member',))
+        self.assertEqual(self.post('/members/sync', {}).status_code, 200)
         self.client.put('/api/settings', json={'team_name': '后来的团队'}, headers=self.headers)
         response = self.post('/backups/restore', {'name': name, 'target': 'local', 'confirm': True})
         self.assertEqual(response.status_code, 200, response.text)
@@ -133,11 +147,10 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(len(self.client.get('/api/entries').json()), 1)
         self.assertEqual(self.client.get('/api/settings').json()['team_name'], '备份测试')
         self.assertEqual(self.client.get(f"/api/entries/{entry['id']}/receipt").content, receipt)
+        # Authoritative Vanora-oauth role wins after restore + sync (changed to 'member' above)
+        self.assertEqual(self.post('/members/sync', {}).status_code, 200)
         restored_members = {item['id']: item for item in self.client.get('/api/members').json()}
-        self.assertEqual(restored_members[member['id']]['role'], 'finance')
-        events = self.client.get('/api/member-events').json()
-        self.assertEqual([(event['action'], event['new_role']) for event in events if event['member_id'] == member['id']],
-                         [('created', 'finance')])
+        self.assertEqual(restored_members[member['id']]['role'], 'member')
         with db() as conn:
             self.assertEqual(conn.execute('SELECT telegram_id FROM tg_links').fetchone()[0], '12345')
             self.assertEqual(conn.execute('SELECT app_secret,domain FROM feishu_config').fetchone()[:], ('db-secret', 'lark'))
@@ -184,7 +197,7 @@ class BackupTest(unittest.TestCase):
         with closing(sqlite3.connect(legacy_db)) as conn:
             with conn:
                 conn.execute('DROP TABLE ai_config')
-                conn.execute('DROP TABLE member_events')
+                conn.execute('DROP TABLE IF EXISTS member_events')
         files['ledger.sqlite3'] = legacy_db.read_bytes()
         manifest['files']['ledger.sqlite3'] = {
             'size': len(files['ledger.sqlite3']),
@@ -203,7 +216,77 @@ class BackupTest(unittest.TestCase):
         with db() as conn:
             row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_config'").fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual(self.client.get('/api/member-events').json(), [])
+
+    def test_legacy_pre_oidc_backup_restore_and_vanora_resync(self):
+        self.entry('旧版账目')
+        name = self.backup()
+        original = backups.local_path(name).read_bytes()
+        with zipfile.ZipFile(io.BytesIO(original)) as source:
+            files = {n: source.read(n) for n in source.namelist()}
+        manifest = json.loads(files.pop('manifest.json'))
+        legacy_db = config.DATA / 'legacy-pre-oidc.sqlite3'
+        legacy_db.write_bytes(files['ledger.sqlite3'])
+        with closing(sqlite3.connect(legacy_db)) as conn:
+            conn.execute('PRAGMA foreign_keys=OFF')
+            conn.execute('PRAGMA legacy_alter_table=ON')
+            with conn:
+                for table in ('oidc_flows', 'oidc_invites', 'oidc_revoked_jti'):
+                    conn.execute(f'DROP TABLE IF EXISTS {table}')
+                conn.execute('DROP INDEX IF EXISTS users_oidc_identity')
+                conn.execute('DROP INDEX IF EXISTS sessions_oidc_sid')
+                conn.execute('ALTER TABLE users RENAME TO users_oidc')
+                conn.execute('''CREATE TABLE users (
+                    id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)''')
+                conn.execute(
+                    "INSERT INTO users(id,username,name,password_hash,role,active,created_at) "
+                    "SELECT id,username,name,'pbkdf2_sha256$legacy',role,active,created_at FROM users_oidc"
+                )
+                conn.execute('DROP TABLE users_oidc')
+                conn.execute('ALTER TABLE sessions RENAME TO sessions_oidc')
+                conn.execute('''CREATE TABLE sessions (
+                    token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+                    csrf TEXT NOT NULL, expires INTEGER NOT NULL)''')
+                conn.execute('DROP TABLE sessions_oidc')
+            conn.execute('PRAGMA legacy_alter_table=OFF')
+        files['ledger.sqlite3'] = legacy_db.read_bytes()
+        manifest['files']['ledger.sqlite3'] = {
+            'size': len(files['ledger.sqlite3']),
+            'sha256': hashlib.sha256(files['ledger.sqlite3']).hexdigest(),
+        }
+        legacy_zip = io.BytesIO()
+        with zipfile.ZipFile(legacy_zip, 'w') as archive:
+            for key, data in files.items():
+                archive.writestr(key, data)
+            archive.writestr('manifest.json', json.dumps(manifest))
+
+        response = self.client.post('/api/backups/restore/upload', content=legacy_zip.getvalue(),
+                                    headers={**self.headers, 'Content-Type': 'application/zip',
+                                             'X-Backup-Confirm': 'restore'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get('/api/session').status_code, 401)
+
+        with db() as conn:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertTrue({'oidc_flows', 'oidc_revoked_jti'}.issubset(tables))
+            user_cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
+            self.assertTrue({'oidc_issuer', 'oidc_sub', 'oidc_email'}.issubset(user_cols))
+            session_cols = {r[1] for r in conn.execute('PRAGMA table_info(sessions)')}
+            self.assertIn('oidc_sid', session_cols)
+
+        # Authorized Vanora owner can sign in immediately and see all restored legacy entries
+        session = self.oidc.login(
+            self.client,
+            sub='vanora-migrated-owner',
+            preferred_username='owner_new',
+            name='新同步所有者',
+            roles=('owner',),
+        )
+        self.headers = {'X-CSRF-Token': session['csrf']}
+        entries = self.client.get('/api/entries').json()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]['description'], '旧版账目')
 
     def test_remote_backup_restore_download_and_connection_probe(self):
         self.configure_remote()

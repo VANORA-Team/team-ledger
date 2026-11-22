@@ -752,9 +752,85 @@ button:disabled:focus-visible {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  width: min(360px, 100%);
+  width: min(380px, 100%);
   margin: auto;
   padding: 40px 0 32px;
+}
+
+.auth-page.is-wide {
+  width: min(520px, 100%);
+}
+
+.auth-context {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.auth-card {
+  padding: 16px 18px;
+  border: 1px solid var(--line-bright);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.auth-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.auth-card p + p {
+  margin-top: 6px;
+}
+
+.auth-card code {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--text-strong);
+}
+
+.auth-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.auth-config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.auth-config-item > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.auth-config-item .copy-field {
+  margin-top: 0;
+}
+
+.auth-embed-hint {
+  font-size: 12px;
+  color: var(--meta);
+  text-align: center;
+  line-height: 1.6;
 }
 
 .auth-heading {
@@ -2850,6 +2926,105 @@ button:disabled:focus-visible {
   flex-wrap: wrap;
   margin-top: auto;
   padding-top: 16px;
+}
+
+.person-email {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--quiet);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.invites-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.invite-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.invite-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.invite-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-strong);
+}
+
+.invite-row-meta {
+  font-size: 12px;
+  color: var(--quiet);
+}
+
+.invite-result {
+  padding: 12px 14px;
+  border: 1px solid var(--line-bright);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.invite-result .copy-field {
+  margin-top: 0;
+}
+
+.profile-identity {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.profile-identity-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--meta);
+}
+
+.profile-identity-row strong {
+  font-weight: 600;
+  color: var(--text-strong);
+  text-align: right;
+  word-break: break-all;
+}
+
+.profile-account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+@media (max-width: 640px) {
+  .invite-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 /* ============================================================================

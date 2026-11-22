@@ -6,7 +6,7 @@
 
 > **通用约束**
 > - 每个 SQLite 数据库只运行 **一个** 飞书 worker 和 **一个** Telegram worker，且不要与其他服务共用同一个应用凭证或 Bot Token。
-> - 成员需在 Web「机器人与 AI」生成 **10 分钟有效、一次性** 的绑定码，并在机器人**私聊**中完成绑定（请勿将绑定码发送到群聊）。Telegram 与飞书绑定相互独立，在「团队成员」页可查看每位成员的绑定状态。
+> - 成员需在 Web「机器人与 AI」生成 **10 分钟有效、一次性** 的绑定码，并在机器人**私聊**中完成绑定（请勿将绑定码发送到群聊）。Telegram 与飞书绑定相互独立，在只读「团队成员」页可查看每位成员的绑定状态；当成员在 Vanora OAuth 被降级、撤权或停用时，机器人待确认草稿/卡片会立即失效并停止响应。
 > - 若在 `.env` 配置了 `PUBLIC_URL`，机器人账目详情卡片会自动附带 `#entry/<id>` 直达按钮，方便跳转 Web 查看详情或上传凭证。
 > - 机器人仅登记账目与已完成的报销付款，**不会发起真实银行或链上转账**。
 
@@ -59,7 +59,7 @@
   # 如使用私有化域名，可改用空格分隔的自定义 allowlist：
   # FEISHU_FRAME_ANCESTORS=https://your-feishu.example.com
   ```
-- 同时开启 `COOKIE_SECURE=true` 与飞书嵌入且未手动指定 `COOKIE_SAMESITE` 时，服务端会自动将登录 Cookie 设为 `SameSite=None`（也可显式指定 `COOKIE_SAMESITE=none`）。
+- 同时开启 `COOKIE_SECURE=true` 与飞书嵌入且未手动指定 `COOKIE_SAMESITE` 时，服务端会自动将登录 Cookie 与 Vanora OAuth 流程绑定 Cookie（`ledger_oidc_flow`）设为 `SameSite=None`（也可显式指定 `COOKIE_SAMESITE=none`）。在 iframe 嵌入态发起 Vanora OAuth 登录时，前端会自动尝试顶层跳转或提供新窗口打开入口。
 - Web 前端已内置飞书 WebView 适配：无原生 `confirm`/`prompt` 弹窗、三级降级剪贴板复制、飞书移动端 `tt.downloadFile` 下载适配与安全区留白。
 
 ### 1.4 队列与可靠性

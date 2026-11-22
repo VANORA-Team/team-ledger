@@ -1,6 +1,3 @@
-import base64
-import hashlib
-import hmac
 import re
 import secrets
 import time
@@ -27,22 +24,6 @@ def text_value(value, label, limit=200, required=True):
     if (required and not value) or len(value) > limit:
         fail(f'{label}不能为空且最多 {limit} 个字符' if required else f'{label}最多 {limit} 个字符')
     return value
-
-
-def hash_password(password):
-    if not isinstance(password, str) or not password:
-        fail('密码不能为空')
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 310000).hex()
-    return f'{salt}${digest}'
-
-
-def verify_password(password, encoded):
-    if not isinstance(password, str) or not password:
-        return False
-    salt, expected = encoded.split('$')
-    actual = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 310000).hex()
-    return hmac.compare_digest(actual, expected)
 
 
 def is_finance(user):
@@ -72,7 +53,12 @@ def require_entry_access(user, entry):
 
 
 def public_user(user):
-    return {k: user[k] for k in ('id', 'username', 'name', 'role', 'active')}
+    data = {k: user[k] for k in ('id', 'username', 'name', 'role', 'active')}
+    sub = user['oidc_sub'] if 'oidc_sub' in user.keys() else None
+    email = user['oidc_email'] if 'oidc_email' in user.keys() else ''
+    data['oidc_linked'] = bool(sub)
+    data['oidc_email'] = email or ''
+    return data
 
 
 def currency(conf, code):

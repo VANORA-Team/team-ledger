@@ -29,15 +29,18 @@ USER_ROLES = ('owner', 'finance', 'member')
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
- name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL,
- active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS member_events (
- id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES users(id),
- member_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
- previous_role TEXT, new_role TEXT, created_at TEXT NOT NULL);
+ name TEXT NOT NULL, password_hash TEXT NOT NULL DEFAULT '', role TEXT NOT NULL,
+ active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+ oidc_issuer TEXT NOT NULL DEFAULT '', oidc_sub TEXT, oidc_email TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS sessions (
  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
- csrf TEXT NOT NULL, expires INTEGER NOT NULL);
+ csrf TEXT NOT NULL, expires INTEGER NOT NULL, oidc_sid TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS oidc_flows (
+ state_hash TEXT PRIMARY KEY, browser_hash TEXT NOT NULL, nonce TEXT NOT NULL,
+ code_verifier TEXT NOT NULL, team_name TEXT NOT NULL DEFAULT '',
+ return_hash TEXT NOT NULL DEFAULT '', expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS oidc_revoked_jti (
+ jti_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS entries (
  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, expense_type TEXT NOT NULL DEFAULT 'advance',
@@ -193,6 +196,20 @@ def _init_db():
             conn.execute("ALTER TABLE feishu_config ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
         if 'attempts' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_outbox)')}:
             conn.execute('ALTER TABLE feishu_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
+        user_cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
+        if 'oidc_issuer' not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN oidc_issuer TEXT NOT NULL DEFAULT ''")
+        if 'oidc_sub' not in user_cols:
+            conn.execute('ALTER TABLE users ADD COLUMN oidc_sub TEXT')
+        if 'oidc_email' not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN oidc_email TEXT NOT NULL DEFAULT ''")
+        if 'oidc_sid' not in {r[1] for r in conn.execute('PRAGMA table_info(sessions)')}:
+            conn.execute("ALTER TABLE sessions ADD COLUMN oidc_sid TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS users_oidc_identity "
+            "ON users(oidc_issuer, oidc_sub) WHERE oidc_sub IS NOT NULL AND oidc_sub<>''"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS sessions_oidc_sid ON sessions(oidc_sid) WHERE oidc_sid<>''")
         conn.execute("UPDATE entries SET expense_type='' WHERE kind='income' AND expense_type<>''")
         # Earlier versions only supported full payments. Preserve their dates and notes,
         # and create exactly one payment record without rewriting their audit history.

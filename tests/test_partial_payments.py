@@ -18,6 +18,7 @@ class PartialPaymentTest(unittest.TestCase):
     entry = base.LedgerTest.entry
     action = base.LedgerTest.action
     new_member = base.LedgerTest.new_member
+    login_as = base.LedgerTest.login_as
 
     def quote(self, entry, code='original'):
         response = self.post('/entries/payment-quotes', {'ids':[entry['id']], 'currency':code})
@@ -127,11 +128,10 @@ class PartialPaymentTest(unittest.TestCase):
     def test_other_member_cannot_reuse_payment_quote(self):
         entry = self.entry()
         quote = self.quote(entry)
-        member = self.new_member()
-        response = self.client.patch(f'/api/members/{member["id"]}', json={'role': 'finance'}, headers=self.headers)
-        self.assertEqual(response.status_code, 200, response.text)
-        login = self.client.post('/api/login',json={'username':'bob','password':'test-password-456'}).json()
-        self.headers = {'X-CSRF-Token':login['csrf']}
+        self.new_member()
+        self.oidc.set_user('vanora-member-bob', roles=('finance',))
+        login = self.login_as(self.client, 'vanora-member-bob', preferred_username='bob', name='小周')
+        self.headers = {'X-CSRF-Token': login['csrf']}
         self.assertEqual(self.pay(quote,'5').status_code,409)
 
     def test_missing_exchange_rate_still_allows_original_currency(self):

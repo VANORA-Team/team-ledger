@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
-from app import config, feishu
+from app import config, feishu, oidc
 from app.db import db
 from tests import test_ledger as base
 
@@ -297,7 +297,10 @@ class FeishuTest(unittest.TestCase):
         self.assertTrue(members[member['id']]['feishu_linked'])
         self.assertFalse(members[self.user['id']]['feishu_linked'])
 
-        res = self.client.patch(f'/api/members/{member["id"]}', json={'active': False}, headers=self.headers)
+        self.oidc.set_user('vanora-member-bob', roles=('member',), enabled=False)
+        res = self.oidc.send_backchannel_logout(
+            self.client, sub='vanora-member-bob', extra_events=[oidc.PERMISSIONS_CHANGED_EVENT]
+        )
         self.assertEqual(res.status_code, 200, res.text)
         with db() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM fsui_actions WHERE telegram_id=?', (vid,)).fetchone()[0], 0)

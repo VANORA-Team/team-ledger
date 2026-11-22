@@ -11,19 +11,18 @@ import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from . import config, ai, ai_context, ai_plan, backups, fx
+from . import config, ai, ai_context, ai_plan, backups, fx, oidc, permissions_sync
 from .backup_api import router as backup_router
 from .db import USER_ROLES, db, init_db, settings, remove_receipt_file, authenticated_session
-from .domain import (fail, admin, owner, is_finance, require_entry_access, public_user, hash_password, verify_password,
+from .domain import (fail, admin, owner, is_finance, require_entry_access, public_user,
                      text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
                      save_settings, make_payment_quote, currency, receipt_media_type)
 
 PUBLIC = config.ROOT / 'public'
-DUMMY_HASH = hash_password('unused-dummy-password')
 attempts = defaultdict(deque)
 attempt_lock = threading.Lock()
 
@@ -39,7 +38,7 @@ async def lifespan(app):
         scheduler.stop()
 
 
-app = FastAPI(title='一起记 · 团队账本', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='Vanora 财务管理', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(backup_router)
 
 
@@ -51,6 +50,11 @@ async def http_error(request, exc):
 @app.exception_handler(backups.BackupError)
 async def backup_error(request, exc):
     return JSONResponse({'error': str(exc)}, status_code=exc.status)
+
+
+@app.exception_handler(oidc.OidcError)
+async def oidc_error(request, exc):
+    return JSONResponse({'error': exc.message, 'code': exc.code}, status_code=exc.status)
 
 
 def _feishu_embed_ancestors():
@@ -89,7 +93,9 @@ async def security(request, call_next):
                 if total > maximum:
                     return JSONResponse({'error': '上传内容过大'}, status_code=413)
                 chunks.append(chunk)
-            request._body = b''.join(chunks)
+            raw_body = b''.join(chunks)
+            request._body = raw_body
+            request.state.raw_body = raw_body
     response = await call_next(request)
     ancestors = _feishu_embed_ancestors()
     is_receipt = bool(re.fullmatch(r'/api/entries/\d+/receipt', request.url.path))
@@ -133,55 +139,65 @@ def current(request):
     token = request.cookies.get('ledger_session', '')
     if not token:
         fail('请先登录', 401)
+    token_hash = digest(token)
     with db() as conn:
-        row = conn.execute('SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires>? AND u.active=1',
-                           (digest(token), int(time.time()))).fetchone()
+        row = conn.execute(
+            'SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id '
+            'WHERE s.token_hash=? AND s.expires>? AND u.active=1',
+            (token_hash, int(time.time())),
+        ).fetchone()
     if not row:
         fail('登录已失效，请重新登录', 401)
+    cfg = oidc.load_config()
+    if cfg.configured and row['oidc_sub'] and row['oidc_issuer'] == cfg.issuer:
+        if permissions_sync.sync_member(row['oidc_sub'], force=False):
+            with db() as conn:
+                row = conn.execute(
+                    'SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id '
+                    'WHERE s.token_hash=? AND s.expires>? AND u.active=1',
+                    (token_hash, int(time.time())),
+                ).fetchone()
+            if not row:
+                fail('权限或账号状态已更新，请重新登录', 401)
     if request.method not in ('GET', 'HEAD') and not secrets.compare_digest(request.headers.get('x-csrf-token', ''), row['csrf']):
         fail('安全校验已失效，请刷新页面', 403)
-    authenticated_session.set(digest(token))
+    authenticated_session.set(token_hash)
     return dict(row)
 
 
-def new_session(conn, user_id, response):
-    token = secrets.token_urlsafe(36)
-    csrf = secrets.token_urlsafe(32)
-    conn.execute('DELETE FROM sessions WHERE expires<?', (int(time.time()),))
-    conn.execute('INSERT INTO sessions VALUES (?,?,?,?)', (digest(token), user_id, csrf, int(time.time()) + 7 * 86400))
+def _cookie_policy(*, oidc_flow=False):
     secure = os.getenv('COOKIE_SECURE', 'false').lower() == 'true'
+    if oidc_flow:
+        # Cross-site top-level callback redirects from Vanora OAuth must include this cookie.
+        samesite = 'none' if (secure and _feishu_embed_ancestors()) else 'lax'
+        return secure, samesite
     configured_samesite = os.getenv('COOKIE_SAMESITE', '').strip().lower()
     if configured_samesite in ('lax', 'strict', 'none'):
         samesite = configured_samesite if (configured_samesite != 'none' or secure) else 'lax'
     else:
         samesite = 'none' if (secure and _feishu_embed_ancestors()) else 'lax'
+    return secure, samesite
+
+
+def new_session(conn, user_id, response, oidc_sid=''):
+    token = secrets.token_urlsafe(36)
+    csrf = secrets.token_urlsafe(32)
+    conn.execute('DELETE FROM sessions WHERE expires<?', (int(time.time()),))
+    conn.execute(
+        'INSERT INTO sessions(token_hash,user_id,csrf,expires,oidc_sid) VALUES (?,?,?,?,?)',
+        (digest(token), user_id, csrf, int(time.time()) + 7 * 86400, oidc_sid or ''),
+    )
+    secure, samesite = _cookie_policy()
     response.set_cookie('ledger_session', token, httponly=True, samesite=samesite, max_age=7 * 86400,
                         secure=secure, path='/')
     return csrf
 
 
-def member_role(role):
-    if role not in USER_ROLES:
-        fail('成员角色不正确')
-    return role
-
-
-def member_event(conn, actor_id, member_id, action, previous_role=None, new_role=None):
-    conn.execute('INSERT INTO member_events(actor_id,member_id,action,previous_role,new_role,created_at) VALUES (?,?,?,?,?,?)',
-                 (actor_id, member_id, action, previous_role, new_role, config.now()))
-
-
-def make_user(conn, body, role):
-    username = text_value(body.get('username', ''), '用户名', 32)
-    if not re.fullmatch('[a-zA-Z0-9_.-]{3,32}', username):
-        fail('用户名需为 3–32 位英文字母、数字、点、横线或下划线')
-    name = text_value(body.get('name', ''), '成员姓名', 30)
-    password = hash_password(body.get('password', ''))
-    if conn.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone():
-        fail('用户名已被使用', 409)
-    cursor = conn.execute('INSERT INTO users(username,name,password_hash,role,created_at) VALUES (?,?,?,?,?)',
-                          (username, name, password, role, config.now()))
-    return conn.execute('SELECT * FROM users WHERE id=?', (cursor.lastrowid,)).fetchone()
+def _auth_redirect(location: str):
+    response = RedirectResponse(location, status_code=302)
+    response.headers['Cache-Control'] = 'no-store'
+    response.delete_cookie('ledger_oidc_flow', path='/api/auth/oidc')
+    return response
 
 
 @app.get('/api/health')
@@ -190,42 +206,219 @@ def health():
 
 
 @app.get('/api/bootstrap')
-def bootstrap_status():
+def bootstrap_status(request: Request):
+    cfg = oidc.load_config()
     with db() as conn:
-        return {'needs_setup': not bool(conn.execute('SELECT id FROM users LIMIT 1').fetchone())}
+        has_users = bool(conn.execute('SELECT id FROM users LIMIT 1').fetchone())
+    return {
+        'needs_setup': not has_users,
+        'oidc_configured': cfg.configured,
+        'issuer': cfg.issuer,
+        'account_url': cfg.account_url,
+        'admin_url': cfg.admin_url,
+        'callback_url': oidc.callback_url(request),
+        'backchannel_logout_url': oidc.backchannel_logout_url(request),
+        'permissions_managed_by': 'vanora-oauth',
+        'required_roles': list(USER_ROLES),
+    }
 
 
-@app.post('/api/bootstrap')
-def bootstrap(body: dict, request: Request, response: Response):
-    limited(request, 'bootstrap', 8)
+@app.get('/api/auth/oidc/login')
+def oidc_login(request: Request, team_name: str = '', next: str = ''):
+    limited(request, 'oidc-login', 30)
+    cfg = oidc.require_config()
+    clean_team_name = team_name.strip()[:40] if isinstance(team_name, str) else ''
+    return_hash = oidc.sanitize_return_hash(next)
+    state_value = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    browser_token = secrets.token_urlsafe(32)
+    code_verifier, code_challenge = oidc.pkce_pair()
+    auth_url = oidc.build_authorization_url(
+        cfg,
+        redirect_uri=oidc.callback_url(request),
+        state=state_value,
+        nonce=nonce,
+        code_challenge=code_challenge,
+    )
+    now_ts = int(time.time())
     with db(write=True) as conn:
-        if conn.execute('SELECT id FROM users LIMIT 1').fetchone():
-            fail('团队已初始化，请登录', 409)
-        user = make_user(conn, body, 'owner')
-        member_event(conn, user['id'], user['id'], 'created', new_role='owner')
-        conf_body = {'team_name': body.get('team_name', '一起记')}
-        save_settings(conn, user, conf_body)
-        csrf = new_session(conn, user['id'], response)
-        return {'user': public_user(user), 'csrf': csrf}
+        conn.execute('DELETE FROM oidc_flows WHERE expires<?', (now_ts,))
+        conn.execute(
+            'INSERT INTO oidc_flows(state_hash,browser_hash,nonce,code_verifier,team_name,return_hash,expires) '
+            'VALUES (?,?,?,?,?,?,?)',
+            (digest(state_value), digest(browser_token), nonce, code_verifier,
+             clean_team_name, return_hash, now_ts + 600),
+        )
+    response = RedirectResponse(auth_url, status_code=302)
+    response.headers['Cache-Control'] = 'no-store'
+    secure, samesite = _cookie_policy(oidc_flow=True)
+    response.set_cookie(
+        'ledger_oidc_flow', browser_token, httponly=True, samesite=samesite,
+        max_age=600, secure=secure, path='/api/auth/oidc',
+    )
+    return response
 
 
-@app.post('/api/login')
-def login(body: dict, request: Request, response: Response):
-    limited(request, 'login')
-    username = str(body.get('username', ''))[:32]
+@app.get('/api/auth/oidc/callback')
+def oidc_callback(request: Request, code: str = '', state: str = '', error: str = ''):
+    limited(request, 'oidc-callback', 30)
+    cfg = oidc.load_config()
+    if not cfg.configured:
+        return _auth_redirect('/?auth_error=oidc_unconfigured')
+    if error:
+        return _auth_redirect('/?auth_error=cancelled')
+    browser_token = request.cookies.get('ledger_oidc_flow', '')
+    if not code or not state or not browser_token:
+        return _auth_redirect('/?auth_error=invalid_state')
+    now_ts = int(time.time())
     with db(write=True) as conn:
-        user = conn.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
-        valid = verify_password(body.get('password', ''), user['password_hash'] if user else DUMMY_HASH)
-        if not user or not valid or not user['active']:
-            fail('用户名或密码不正确', 401)
-        csrf = new_session(conn, user['id'], response)
-        return {'user': public_user(user), 'csrf': csrf}
+        flow = conn.execute('SELECT * FROM oidc_flows WHERE state_hash=?', (digest(state),)).fetchone()
+        conn.execute('DELETE FROM oidc_flows WHERE state_hash=? OR expires<?', (digest(state), now_ts))
+    if not flow or flow['expires'] <= now_ts or not secrets.compare_digest(flow['browser_hash'], digest(browser_token)):
+        return _auth_redirect('/?auth_error=invalid_state')
+    try:
+        tokens = oidc.exchange_code(
+            cfg,
+            code=code,
+            redirect_uri=oidc.callback_url(request),
+            code_verifier=flow['code_verifier'],
+        )
+        id_token = tokens.get('id_token', '')
+        identity = oidc.verify_id_token(id_token, cfg, expected_nonce=flow['nonce'])
+    except oidc.OidcError as exc:
+        err_code = 'invalid_token' if exc.code == 'invalid_token' else 'exchange_failed'
+        return _auth_redirect(f'/?auth_error={err_code}')
+
+    effective_role = identity['role']
+    remote_disabled = False
+    with db() as conn:
+        existing_row = conn.execute(
+            'SELECT active FROM users WHERE oidc_issuer=? AND oidc_sub=?',
+            (identity['issuer'], identity['sub']),
+        ).fetchone()
+    locally_inactive = bool(existing_row and not existing_row['active'])
+    if (effective_role is None and not identity['has_roles_claim']) or locally_inactive:
+        # Verify authoritative status & role with Vanora OAuth when the ID token omitted roles
+        # or when the local projection is currently disabled (guards against stale tokens while
+        # still allowing re-enabled Vanora accounts to log back in).
+        try:
+            remote = oidc.fetch_member(cfg, identity['sub'])
+            if not remote['exists']:
+                effective_role = None
+            elif not remote['enabled']:
+                remote_disabled = True
+                effective_role = None
+            elif remote['authorized']:
+                effective_role = remote['role']
+            else:
+                effective_role = None
+        except oidc.OidcError:
+            if locally_inactive:
+                remote_disabled = True
+            if not identity['has_roles_claim']:
+                effective_role = None
+
+    with db(write=True) as conn:
+        had_users = bool(conn.execute('SELECT id FROM users LIMIT 1').fetchone())
+        if remote_disabled:
+            permissions_sync.deactivate_member_by_sub(conn, identity['issuer'], identity['sub'])
+            return _auth_redirect('/?auth_error=disabled')
+        if not effective_role:
+            permissions_sync.deactivate_member_by_sub(conn, identity['issuer'], identity['sub'])
+            return _auth_redirect('/?auth_error=not_member')
+        user, _ = permissions_sync.upsert_synced_member(
+            conn,
+            issuer=identity['issuer'],
+            sub=identity['sub'],
+            preferred_username=identity['preferred_username'],
+            name=identity['name'],
+            email=identity['email'],
+            role=effective_role,
+            enabled=True,
+        )
+        if not had_users and flow['team_name'] and user['role'] == 'owner':
+            save_settings(conn, dict(user), {'team_name': flow['team_name']})
+        destination = '/' + (flow['return_hash'] or '')
+        response = _auth_redirect(destination)
+        new_session(conn, user['id'], response, oidc_sid=identity['sid'])
+    permissions_sync.mark_member_synced(cfg, identity['sub'])
+    return response
+
+
+@app.post('/api/auth/oidc/backchannel-logout')
+def oidc_backchannel_logout(request: Request):
+    limited(request, 'oidc-logout', 60)
+    cfg = oidc.require_config()
+    raw_body = getattr(request.state, 'raw_body', None)
+    if raw_body is None:
+        raw_body = getattr(request, '_body', b'') or b''
+    try:
+        form = parse_qs(raw_body.decode('utf-8'), keep_blank_values=False, strict_parsing=False)
+    except UnicodeDecodeError:
+        fail('注销请求编码无效', 400)
+    tokens = form.get('logout_token') or []
+    if len(tokens) != 1 or not tokens[0].strip():
+        fail('缺少有效的 logout_token', 400)
+    claims = oidc.verify_logout_token(tokens[0].strip(), cfg)
+    now_ts = int(time.time())
+    jti_hash = digest(claims['jti'])
+    events = set(claims.get('events') or ())
+    should_sync_member = False
+    with db(write=True) as conn:
+        conn.execute('DELETE FROM oidc_revoked_jti WHERE expires<?', (now_ts,))
+        if conn.execute('SELECT 1 FROM oidc_revoked_jti WHERE jti_hash=?', (jti_hash,)).fetchone():
+            fail('Logout Token 已被使用', 400)
+        conn.execute('INSERT INTO oidc_revoked_jti(jti_hash,expires) VALUES (?,?)', (jti_hash, max(claims['exp'], now_ts + 300)))
+        if claims['sid'] and claims['sub']:
+            conn.execute(
+                'DELETE FROM sessions WHERE oidc_sid=? AND user_id IN (SELECT id FROM users WHERE oidc_issuer=? AND oidc_sub=?)',
+                (claims['sid'], claims['issuer'], claims['sub']),
+            )
+        elif claims['sid']:
+            conn.execute('DELETE FROM sessions WHERE oidc_sid=?', (claims['sid'],))
+        else:
+            conn.execute(
+                'DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE oidc_issuer=? AND oidc_sub=?)',
+                (claims['issuer'], claims['sub']),
+            )
+        if claims['sub']:
+            if oidc.ACCOUNT_DELETED_EVENT in events:
+                permissions_sync.deactivate_member_by_sub(conn, claims['issuer'], claims['sub'])
+            elif oidc.PERMISSIONS_CHANGED_EVENT in events or not claims['sid']:
+                target = conn.execute(
+                    'SELECT id FROM users WHERE oidc_issuer=? AND oidc_sub=?',
+                    (claims['issuer'], claims['sub']),
+                ).fetchone()
+                if target:
+                    permissions_sync.purge_member_ephemeral_state(conn, target['id'])
+                should_sync_member = True
+    if should_sync_member and claims['sub']:
+        permissions_sync.sync_member(claims['sub'], force=True)
+    return {'ok': True}
 
 
 @app.get('/api/session')
 def session(request: Request):
     user = current(request)
-    return {'user': public_user(user), 'csrf': user['csrf'], 'today': config.today()}
+    cfg = oidc.load_config()
+    return {
+        'user': public_user(user),
+        'csrf': user['csrf'],
+        'today': config.today(),
+        'account_url': cfg.account_url,
+        'admin_url': cfg.admin_url if user['role'] == 'owner' else '',
+    }
+
+
+@app.patch('/api/me')
+def update_me(body: dict, request: Request):
+    user = current(request)
+    name = text_value(body.get('name', ''), '成员姓名', 30)
+    with db(write=True) as conn:
+        if name != user['name']:
+            conn.execute('UPDATE users SET name=? WHERE id=?', (name, user['id']))
+        updated = conn.execute('SELECT * FROM users WHERE id=?', (user['id'],)).fetchone()
+    return {'user': public_user(updated)}
 
 
 @app.post('/api/logout')
@@ -234,21 +427,11 @@ def logout(request: Request, response: Response):
     with db(write=True) as conn:
         conn.execute('DELETE FROM sessions WHERE token_hash=?', (digest(request.cookies.get('ledger_session', '')),))
     response.delete_cookie('ledger_session', path='/')
-    return {'ok': True}
-
-
-@app.post('/api/password')
-def password(body: dict, request: Request, response: Response):
-    user = current(request)
-    limited(request, 'password')
-    if not verify_password(body.get('old_password', ''), user['password_hash']):
-        fail('原密码不正确')
-    encoded = hash_password(body.get('password', ''))
-    with db(write=True) as conn:
-        conn.execute('UPDATE users SET password_hash=? WHERE id=?', (encoded, user['id']))
-        conn.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
-        csrf = new_session(conn, user['id'], response)
-    return {'ok': True, 'csrf': csrf}
+    logout_url = oidc.build_end_session_url(oidc.load_config(), post_logout_redirect_uri=oidc.public_base_url(request))
+    result = {'ok': True}
+    if logout_url:
+        result['logout_url'] = logout_url
+    return result
 
 
 @app.get('/api/settings')
@@ -268,78 +451,41 @@ def put_settings(body: dict, request: Request):
 
 @app.get('/api/members')
 def members(request: Request):
-    current(request)
+    caller = current(request)
+    caller_is_owner = caller['role'] == 'owner'
+    permissions_sync.sync_all_members(force=False)
     with db() as conn:
-        return [dict(r) for r in conn.execute(
-            'SELECT u.id,u.username,u.name,u.role,u.active,'
+        rows = conn.execute(
+            'SELECT u.id,u.username,u.name,u.role,u.active,u.oidc_sub,u.oidc_email,'
             'CASE WHEN t.telegram_id IS NULL THEN 0 ELSE 1 END telegram_linked,'
             'CASE WHEN f.open_id IS NULL THEN 0 ELSE 1 END feishu_linked '
             'FROM users u LEFT JOIN tg_links t ON t.user_id=u.id '
             'LEFT JOIN feishu_links f ON f.user_id=u.id ORDER BY u.id'
-        )]
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = {
+            'id': row['id'], 'username': row['username'], 'name': row['name'],
+            'role': row['role'], 'active': row['active'],
+            'oidc_linked': bool(row['oidc_sub']),
+            'oidc_email': row['oidc_email'] or '',
+            'telegram_linked': row['telegram_linked'],
+            'feishu_linked': row['feishu_linked'],
+        }
+        if caller_is_owner:
+            item['oidc_sub'] = row['oidc_sub'] or ''
+        result.append(item)
+    return result
 
 
-@app.post('/api/members')
-def add_member(body: dict, request: Request):
+@app.post('/api/members/sync')
+def sync_members(request: Request):
     user = current(request)
-    owner(user)
-    with db(write=True) as conn:
-        role = member_role(body.get('role', 'member'))
-        target = make_user(conn, body, role)
-        member_event(conn, user['id'], target['id'], 'created', new_role=role)
-        return public_user(target)
-
-
-@app.get('/api/member-events')
-def member_events(request: Request):
-    owner(current(request))
-    with db() as conn:
-        return [dict(row) for row in conn.execute(
-            'SELECT e.*,a.name actor_name,m.name member_name FROM member_events e '
-            'JOIN users a ON a.id=e.actor_id JOIN users m ON m.id=e.member_id ORDER BY e.id DESC LIMIT 50'
-        )]
-
-
-@app.patch('/api/members/{member_id}')
-def update_member(member_id: int, body: dict, request: Request):
-    user = current(request)
-    owner(user)
-    with db(write=True) as conn:
-        target = conn.execute('SELECT * FROM users WHERE id=?', (member_id,)).fetchone()
-        if not target:
-            fail('成员不存在', 404)
-        active = body.get('active', target['active'])
-        if type(active) not in (int, bool) or active not in (0, 1):
-            fail('成员状态不正确')
-        role = member_role(body.get('role', target['role']))
-        role_changed = role != target['role']
-        if target['role'] == 'owner' and target['active'] and (role_changed or not active):
-            if not conn.execute("SELECT 1 FROM users WHERE role='owner' AND active=1 AND id<>?", (member_id,)).fetchone():
-                fail('必须保留至少一位启用的账本所有者')
-        conn.execute('UPDATE users SET active=?,role=? WHERE id=?', (int(active), role, member_id))
-        if role_changed:
-            member_event(conn, user['id'], member_id, 'role_changed', target['role'], role)
-        if active != target['active']:
-            member_event(conn, user['id'], member_id, 'enabled' if active else 'disabled')
-        if 'password' in body:
-            conn.execute('UPDATE users SET password_hash=? WHERE id=?', (hash_password(body['password']), member_id))
-            member_event(conn, user['id'], member_id, 'password_reset')
-        if role_changed or not active or 'password' in body:
-            conn.execute('DELETE FROM sessions WHERE user_id=?', (member_id,))
-        if role_changed or not active:
-            virtual_ids = [row['telegram_id'] for row in conn.execute('SELECT telegram_id FROM fsui_links WHERE user_id=?', (member_id,))]
-            for virtual_id in virtual_ids:
-                conn.execute('DELETE FROM fsui_actions WHERE telegram_id=?', (virtual_id,))
-                conn.execute('DELETE FROM fsui_prompts WHERE telegram_id=?', (virtual_id,))
-            conn.execute('DELETE FROM fsui_drafts WHERE user_id=?', (member_id,))
-            conn.execute('DELETE FROM tg_prompts WHERE token IN (SELECT token FROM tg_drafts WHERE user_id=?)', (member_id,))
-            conn.execute('DELETE FROM tg_drafts WHERE user_id=?', (member_id,))
-            conn.execute('DELETE FROM feishu_pending WHERE user_id=?', (member_id,))
-            conn.execute('DELETE FROM feishu_link_codes WHERE user_id=?', (member_id,))
-            conn.execute('DELETE FROM link_codes WHERE user_id=?', (member_id,))
-            conn.execute('DELETE FROM payment_quotes WHERE user_id=?', (member_id,))
-            conn.execute('DELETE FROM ai_plans WHERE user_id=? AND executed_at IS NULL', (member_id,))
-        return {'ok': True}
+    admin(user)
+    limited(request, 'members-sync', 10)
+    oidc.require_config()
+    synced = permissions_sync.sync_all_members(force=True, raise_on_error=True)
+    return {'ok': True, 'synced': synced}
 
 
 @app.get('/api/entries')

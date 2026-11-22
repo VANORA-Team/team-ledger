@@ -924,9 +924,8 @@ class AiWebConfigTest(unittest.TestCase):
             # Non-owner member cannot view/change/test AI config or see private base_url.
             self.assertEqual(self.put_ai(valid).status_code, 200)
             self.new_member()
-            login = self.client.post('/api/login', json={'username': 'bob', 'password': 'test-password-456'})
-            self.assertEqual(login.status_code, 200)
-            member_headers = {'X-CSRF-Token': login.json()['csrf']}
+            login = self.oidc.login(self.client, sub='vanora-member-bob', preferred_username='bob', name='小周')
+            member_headers = {'X-CSRF-Token': login['csrf']}
             self.assertEqual(self.client.get('/api/ai/config').status_code, 403)
             self.assertEqual(self.client.put('/api/ai/config', json={'enabled': False}, headers=member_headers).status_code, 403)
             self.assertEqual(self.client.delete('/api/ai/config', headers=member_headers).status_code, 403)

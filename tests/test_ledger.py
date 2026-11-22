@@ -12,10 +12,11 @@ from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from app import config, fx, bot, ai
+from app import config, fx, bot, ai, oidc
 from app.db import db, settings, init_db
 from app.domain import minor_amount, add_entry
 from app.main import app, attempts
+from tests.oidc_helper import FakeVanoraOidc
 
 
 class LedgerTest(unittest.TestCase):
@@ -28,21 +29,40 @@ class LedgerTest(unittest.TestCase):
         self.fx_patch.start()
         self.env_patch = patch.dict(os.environ, {'AI_API_KEY':'', 'AI_MODEL':'', 'TELEGRAM_BOT_TOKEN':''})
         self.env_patch.start()
+        self.oidc = FakeVanoraOidc().start()
         attempts.clear()
         self.client = TestClient(app)
         self.client.__enter__()
-        response = self.client.post('/api/bootstrap', json={'username':'alice','name':'小林','password':'test-password-123','team_name':'测试团队'})
-        self.assertEqual(response.status_code, 200, response.text)
-        self.user = response.json()['user']
-        self.csrf = response.json()['csrf']
+        session = self.oidc.login(
+            self.client,
+            sub='vanora-owner-alice',
+            preferred_username='alice',
+            name='小林',
+            email='alice@example.test',
+            roles=('owner',),
+            team_name='测试团队',
+        )
+        self.user = session['user']
+        self.csrf = session['csrf']
         self.headers = {'X-CSRF-Token': self.csrf}
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        self.oidc.stop()
         self.fx_patch.stop()
         self.env_patch.stop()
         config.DATA, config.DB_PATH = self.old_data, self.old_db
         self.temp.cleanup()
+
+    def login_as(self, client, sub, *, preferred_username='', name='', email='', **kwargs):
+        return self.oidc.login(
+            client,
+            sub=sub,
+            preferred_username=preferred_username,
+            name=name,
+            email=email,
+            **kwargs,
+        )
 
     def post(self, path, body=None, **kwargs):
         return self.client.post('/api'+path, json=body or {}, headers=self.headers, **kwargs)
@@ -65,20 +85,29 @@ class LedgerTest(unittest.TestCase):
                 headers={**self.headers,'Idempotency-Key':secrets.token_hex(16)})
         return self.post('/entries/action', {'ids':[entry['id']], 'action':action, 'note':note})
 
-    def new_member(self):
-        response = self.post('/members', {'name':'小周','username':'bob','password':'test-password-456','role':'member'})
+    def new_member(self, sub='vanora-member-bob', username='bob', name='小周', role='member', email=''):
+        self.oidc.set_user(sub, username=username, name=name, email=email, roles=(role,), enabled=True)
+        response = self.post('/members/sync')
         self.assertEqual(response.status_code, 200, response.text)
-        return response.json()
+        members = self.client.get('/api/members').json()
+        return next(m for m in members if m.get('oidc_sub') == sub)
 
     def test_setup_closed_and_session(self):
-        self.assertFalse(self.client.get('/api/bootstrap').json()['needs_setup'])
-        self.assertEqual(self.post('/bootstrap', {'username':'xxx'}).status_code, 409)
+        boot = self.client.get('/api/bootstrap').json()
+        self.assertFalse(boot['needs_setup'])
+        self.assertTrue(boot['oidc_configured'])
+        self.assertEqual(boot['permissions_managed_by'], 'vanora-oauth')
+        self.assertEqual(boot['required_roles'], ['owner', 'finance', 'member'])
+        self.assertEqual(self.post('/bootstrap', {'username':'xxx'}).status_code, 405)
         data = self.client.get('/api/session').json()
         self.assertEqual(data['user']['name'], '小林')
+        self.assertTrue(data['user']['oidc_linked'])
         self.assertEqual(data['csrf'], self.csrf)
+        self.assertEqual(data['account_url'], f'{self.oidc.issuer}/account/')
         with db() as conn:
             user = conn.execute('SELECT * FROM users').fetchone()
-            self.assertNotIn('test-password', user['password_hash'])
+            self.assertEqual(user['password_hash'], '')
+            self.assertEqual(user['oidc_sub'], 'vanora-owner-alice')
 
     def test_asset_urls_refresh_when_frontend_content_changes(self):
         public=Path(self.temp.name)/'public'
@@ -98,18 +127,17 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(second.headers['cache-control'],'no-store')
 
     def test_member_and_finance_permissions(self):
-        credentials = {'username': 'bookkeeper', 'password': 'role-test-password'}
-        member = self.post('/members', {**credentials, 'name': '记账成员'}).json()
+        member_sub = 'vanora-bookkeeper'
+        member = self.new_member(sub=member_sub, username='bookkeeper', name='记账成员', role='member')
         self.assertEqual(member['role'], 'member')
-        member_path = f'/api/members/{member["id"]}'
         other_entry = self.entry()
         public_draft = self.entry(expense_type='public', payer_id=member['id'], status='draft')
         body = {'amount': '10', 'currency': 'CNY', 'date': config.today()}
         receipt = {'name': '凭证.pdf', 'data': base64.b64encode(b'%PDF-1.4').decode()}
 
         with TestClient(app) as client:
-            login = client.post('/api/login', json=credentials)
-            headers = {'X-CSRF-Token': login.json()['csrf']}
+            login = self.login_as(client, member_sub, preferred_username='bookkeeper', name='记账成员')
+            headers = {'X-CSRF-Token': login['csrf']}
 
             def create(**overrides):
                 return client.post('/api/entries', json={**body, **overrides},
@@ -136,15 +164,19 @@ class LedgerTest(unittest.TestCase):
             self.assertEqual(client.post('/api/entries/payment-quotes',
                                          json={'ids': [other_entry['id']]}, headers=headers).status_code, 403)
             self.assertEqual(client.get('/api/export').status_code, 403)
-            self.assertEqual(client.patch(member_path, json={'role': 'owner'}, headers=headers).status_code, 403)
+            self.assertEqual(client.post('/api/members/sync', headers=headers).status_code, 403)
 
-            change = self.client.patch(member_path, json={'role': 'finance'}, headers=self.headers)
-            self.assertEqual(change.status_code, 200, change.text)
+            # Promote to finance in Vanora-oauth -> backchannel logout revokes old session and syncs role
+            self.oidc.set_user(member_sub, roles=('finance',))
+            bc = self.oidc.send_backchannel_logout(
+                self.client, sub=member_sub, extra_events=[oidc.PERMISSIONS_CHANGED_EVENT]
+            )
+            self.assertEqual(bc.status_code, 200, bc.text)
             self.assertEqual(client.get('/api/session').status_code, 401)
             init_db()
-            login = client.post('/api/login', json=credentials)
-            self.assertEqual(login.json()['user']['role'], 'finance')
-            headers = {'X-CSRF-Token': login.json()['csrf']}
+            login = self.login_as(client, member_sub, preferred_username='bookkeeper', name='记账成员')
+            self.assertEqual(login['user']['role'], 'finance')
+            headers = {'X-CSRF-Token': login['csrf']}
             self.assertEqual(create(kind='income', amount='50').status_code, 200)
             self.assertEqual(create(expense_type='public').status_code, 200)
             self.assertEqual(client.put(f'/api/entries/{other_entry["id"]}',
@@ -157,24 +189,19 @@ class LedgerTest(unittest.TestCase):
             }, headers={**headers, 'Idempotency-Key': secrets.token_hex(16)})
             self.assertEqual(payment.status_code, 200, payment.text)
             self.assertEqual(client.get('/api/export').status_code, 200)
+            self.assertEqual(client.post('/api/members/sync', headers=headers).status_code, 200)
             self.assertEqual(client.get('/api/backups/config').status_code, 403)
-            self.assertEqual(client.get('/api/member-events').status_code, 403)
             self.assertEqual(client.put('/api/settings', json={'team_name': '禁止修改'}, headers=headers).status_code, 403)
             self.assertEqual(client.post('/api/feishu/config', json={}, headers=headers).status_code, 403)
-            self.assertEqual(client.patch(member_path, json={'role': 'owner'}, headers=headers).status_code, 403)
 
-            change = self.client.patch(member_path, json={'role': 'member'}, headers=self.headers)
-            self.assertEqual(change.status_code, 200, change.text)
+            # Demote back to member in Vanora-oauth -> sync revokes finance session immediately
+            self.oidc.set_user(member_sub, roles=('member',))
+            self.assertEqual(self.post('/members/sync').status_code, 200)
             self.assertEqual(client.get('/api/export').status_code, 401)
 
-        changes = [event for event in self.client.get('/api/member-events').json() if event['action'] == 'role_changed']
-        self.assertEqual([(event['previous_role'], event['new_role']) for event in changes],
-                         [('finance', 'member'), ('member', 'finance')])
-        self.assertTrue(all(event['actor_id'] == self.user['id'] and event['member_id'] == member['id'] for event in changes))
-
     def test_ai_plan_only_offers_actions_allowed_for_member(self):
-        credentials = {'username': 'ai-member', 'password': 'role-test-password'}
-        self.assertEqual(self.post('/members', {**credentials, 'name': '成员'}).status_code, 200)
+        member_sub = 'vanora-ai-member'
+        self.new_member(sub=member_sub, username='ai-member', name='成员', role='member')
         void_target = self.entry()
         pay_target = self.entry()
         advance = {'type': 'create_entry', 'kind': 'expense', 'amount': '12',
@@ -186,8 +213,8 @@ class LedgerTest(unittest.TestCase):
             {'type': 'pay_entry', 'id': pay_target['id']},
         ]}
         with TestClient(app) as client:
-            login = client.post('/api/login', json=credentials)
-            headers = {'X-CSRF-Token': login.json()['csrf']}
+            login = self.login_as(client, member_sub, preferred_username='ai-member', name='成员')
+            headers = {'X-CSRF-Token': login['csrf']}
             with patch('app.ai.plan', return_value=raw):
                 response = client.post('/api/ai/plan', json={'text': '新增与修改账目'}, headers=headers)
             self.assertEqual(response.status_code, 200, response.text)
@@ -199,84 +226,35 @@ class LedgerTest(unittest.TestCase):
                                     headers={**headers, 'Idempotency-Key': secrets.token_hex(16)})
             self.assertEqual(execution.status_code, 200, execution.text)
             mine = client.get('/api/entries').json()[0]
-            self.assertEqual((mine['expense_type'], mine['payer_id']), ('advance', login.json()['user']['id']))
+            self.assertEqual((mine['expense_type'], mine['payer_id']), ('advance', login['user']['id']))
 
     def test_auth_csrf_origin_and_logout(self):
         self.assertEqual(self.client.post('/api/entries',json={}).status_code,403)
-        result=self.client.post('/api/login',json={'username':'alice','password':'test-password-123'},headers={'Origin':'https://evil.example'})
+        result=self.client.post('/api/logout',json={},headers={**self.headers,'Origin':'https://evil.example'})
         self.assertEqual(result.status_code,403)
         self.assertEqual(self.post('/logout').status_code,200)
         self.assertEqual(self.client.get('/api/entries').status_code,401)
 
-    def test_setup_and_login_accept_short_and_long_passwords(self):
-        for index, password in enumerate(('a', '密' * 256)):
-            with self.subTest(length=len(password)), patch.object(config, 'DB_PATH', config.DATA / f'setup-{index}.sqlite3'):
-                with TestClient(app) as client:
-                    invalid = client.post('/api/bootstrap', json={'username':'owner','name':'Owner','password':''})
-                    self.assertEqual(invalid.status_code, 400, invalid.text)
-                    response = client.post('/api/bootstrap', json={'username':'owner','name':'Owner','password':password})
-                    self.assertEqual(response.status_code, 200, response.text)
-                    wrong = client.post('/api/login', json={'username':'owner','password':password + 'x'})
-                    self.assertEqual(wrong.status_code, 401, wrong.text)
-                    login = client.post('/api/login', json={'username':'owner','password':password})
-                    self.assertEqual(login.status_code, 200, login.text)
-
-    def test_member_password_creation_reset_and_change_accept_any_length(self):
-        for index, (initial, replacement) in enumerate((('a', '密' * 256), ('密' * 256, 'b'))):
-            with self.subTest(initial_length=len(initial), replacement_length=len(replacement)):
-                username = f'member{index}'
-                created = self.post('/members', {'name':'Member','username':username,'password':initial})
-                self.assertEqual(created.status_code, 200, created.text)
-                member_id = created.json()['id']
-                with TestClient(app) as client:
-                    login = client.post('/api/login', json={'username':username,'password':initial})
-                    self.assertEqual(login.status_code, 200, login.text)
-                    reset = self.client.patch(f'/api/members/{member_id}', json={'password':replacement}, headers=self.headers)
-                    self.assertEqual(reset.status_code, 200, reset.text)
-                    self.assertEqual(client.get('/api/session').status_code, 401)
-                    self.assertEqual(client.post('/api/login', json={'username':username,'password':initial}).status_code, 401)
-                    login = client.post('/api/login', json={'username':username,'password':replacement})
-                    self.assertEqual(login.status_code, 200, login.text)
-                    changed = client.post('/api/password', json={'old_password':replacement,'password':initial},
-                                          headers={'X-CSRF-Token':login.json()['csrf']})
-                    self.assertEqual(changed.status_code, 200, changed.text)
-                    self.assertEqual(client.get('/api/session').json()['csrf'], changed.json()['csrf'])
-                    self.assertEqual(client.post('/api/login', json={'username':username,'password':replacement}).status_code, 401)
-                    login = client.post('/api/login', json={'username':username,'password':initial})
-                    self.assertEqual(login.status_code, 200, login.text)
-
-    def test_empty_and_non_string_passwords_remain_invalid(self):
-        member = self.new_member()
-        for password in ('', None, 123, False, [], {}):
-            with self.subTest(password=password):
-                created = self.post('/members', {'name':'Member','username':'invalid','password':password})
-                self.assertEqual(created.status_code, 400, created.text)
-                reset = self.client.patch(f'/api/members/{member["id"]}', json={'password':password}, headers=self.headers)
-                self.assertEqual(reset.status_code, 400, reset.text)
-                changed = self.post('/password', {'old_password':'test-password-123','password':password})
-                self.assertEqual(changed.status_code, 400, changed.text)
-                login = self.client.post('/api/login', json={'username':'alice','password':password})
-                self.assertEqual(login.status_code, 401, login.text)
-        self.assertEqual(self.client.get('/api/session').status_code, 200)
-
-    def test_last_owner_cannot_be_disabled_or_demoted(self):
-        path = f'/api/members/{self.user["id"]}'
-        self.assertEqual(self.client.patch(path, json={'active': False}, headers=self.headers).status_code, 400)
-        self.assertEqual(self.client.patch(path, json={'role': 'finance'}, headers=self.headers).status_code, 400)
-        self.assertEqual(self.client.patch(path, json={'role': ['owner']}, headers=self.headers).status_code, 400)
-        other_owner = self.post('/members', {'username': 'second-owner', 'name': '所有者',
-                                             'password': 'role-test-password', 'role': 'owner'})
-        self.assertEqual(other_owner.status_code, 200, other_owner.text)
-        self.assertEqual(self.client.patch(path, json={'role': 'finance'}, headers=self.headers).status_code, 200)
-        self.assertEqual(self.client.get('/api/session').status_code, 401)
+    def test_local_member_management_routes_removed(self):
+        self.assertEqual(self.client.post('/api/members', json={'name': '本地添加'}, headers=self.headers).status_code, 405)
+        self.assertEqual(self.client.patch(f'/api/members/{self.user["id"]}', json={'role': 'finance'}, headers=self.headers).status_code, 404)
+        self.assertEqual(self.client.get('/api/invites').status_code, 404)
+        self.assertEqual(self.client.post('/api/invites', json={'role': 'member'}, headers=self.headers).status_code, 404)
+        self.assertEqual(self.client.get('/api/auth/invite', params={'token': 'x'}).status_code, 404)
+        self.assertEqual(self.client.get('/api/member-events').status_code, 404)
 
     def test_disabled_account_loses_session_and_bot_access(self):
         member=self.new_member()
         with db(write=True) as conn:
             conn.execute('INSERT INTO tg_links VALUES (?,?)',('777',member['id']))
-        self.assertEqual(self.client.patch('/api/members/'+str(member['id']),json={'active':0},headers=self.headers).status_code,200)
-        response=self.client.post('/api/login',json={'username':'bob','password':'test-password-456'})
-        self.assertEqual(response.status_code,401)
+        self.oidc.set_user('vanora-member-bob', roles=('member',), enabled=False)
+        bc = self.oidc.send_backchannel_logout(
+            self.client, sub='vanora-member-bob', extra_events=[oidc.PERMISSIONS_CHANGED_EVENT]
+        )
+        self.assertEqual(bc.status_code, 200, bc.text)
+        with TestClient(app) as client:
+            self.oidc.login(client, sub='vanora-member-bob', preferred_username='bob', name='小周', register=False, expect_error='disabled')
+            self.assertEqual(client.get('/api/session').status_code, 401)
         bot.process_update(self.message(100,'/book',sender=777))
         with db() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM tg_drafts').fetchone()[0],0)
