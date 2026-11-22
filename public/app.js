@@ -104,7 +104,7 @@ const state = {
   conf: null, members: [], entries: [], integrations: {}, report: null, page: 'overview',
   pendingEntryId: null,
   filter: {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''},
-  reimburseTab: 'pending', selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
+  reimburseTab: 'pending', settingsTab: 'general', selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
   action: null, base: null, loadId: 0,
   exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
@@ -131,7 +131,7 @@ const options = (items, value, label, selected) =>
 const currencyOptions = selected => options(state.conf.currencies, c => c.code, c => `${c.code} · ${c.name}`, selected);
 
 function copyButtonHtml(text, label = '复制') {
-  return `<button type="button" class="copy-label" data-copy-text="${esc(text)}" data-copied="false"><span class="copy-icon-stack"><svg class="copy-icon copy-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths.copy}"/></svg><svg class="copy-icon copy-icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths.check}"/></svg></span><span class="copy-text">${esc(label)}</span></button>`;
+  return `<button type="button" class="copy-label" data-copy-text="${esc(text)}" data-copied="false" aria-label="${esc(label)}"><span class="copy-icon-stack" aria-hidden="true"><svg class="copy-icon copy-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="${paths.copy}"/></svg><svg class="copy-icon copy-icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="${paths.check}"/></svg></span><span class="copy-label-text"><span class="copy-label-default">${esc(label)}</span><span class="copy-label-done" aria-hidden="true">已复制</span></span></button>`;
 }
 
 async function copyText(text, button) {
@@ -172,16 +172,21 @@ async function copyText(text, button) {
     return;
   }
   if (button) {
-    const labelEl = $('.copy-text', button);
-    const original = button.dataset.copyOrigLabel || (labelEl ? labelEl.textContent : '复制');
-    button.dataset.copyOrigLabel = original;
+    const defEl = $('.copy-label-default', button);
+    const doneEl = $('.copy-label-done', button);
+    const origLabel = button.dataset.copyOrigLabel || button.getAttribute('aria-label') || '复制';
+    button.dataset.copyOrigLabel = origLabel;
     button.dataset.copied = 'true';
-    if (labelEl) labelEl.textContent = '已复制';
+    button.setAttribute('aria-label', '已复制');
+    if (defEl) defEl.setAttribute('aria-hidden', 'true');
+    if (doneEl) doneEl.removeAttribute('aria-hidden');
     clearTimeout(button._copyTimer);
     button._copyTimer = setTimeout(() => {
       button.dataset.copied = 'false';
-      if (labelEl) labelEl.textContent = original;
-    }, 2000);
+      button.setAttribute('aria-label', origLabel);
+      if (defEl) defEl.removeAttribute('aria-hidden');
+      if (doneEl) doneEl.setAttribute('aria-hidden', 'true');
+    }, 2200);
   }
   toast('已复制到剪贴板');
 }
@@ -241,7 +246,7 @@ function uiConfirm({title = '请确认', message = '', confirmLabel = '确认', 
     $('#confirm-message').textContent = message;
     $('#confirm-error').textContent = '';
     okBtn.textContent = confirmLabel;
-    okBtn.className = `button ${danger ? 'button-danger-solid' : 'button-primary'}`;
+    okBtn.className = `button ${danger ? 'button-danger' : 'button-primary'}`;
     if (inputLabel) {
       $('#confirm-input-label').textContent = inputLabel;
       inputEl.type = inputType;
@@ -316,11 +321,14 @@ async function api(path, method = 'GET', body, extraHeaders = {}) {
 let toastTimer;
 function toast(message, error = false) {
   const element = $('#toast');
-  element.textContent = message;
+  const textEl = $('#toast-text');
+  if (!element) return;
+  if (textEl) textEl.textContent = message;
+  else element.textContent = message;
   element.classList.toggle('error', error);
-  element.hidden = false;
+  element.classList.add('visible');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { element.hidden = true; }, error ? 6500 : 3800);
+  toastTimer = setTimeout(() => { element.classList.remove('visible'); }, error ? 6500 : 3500);
 }
 
 async function busy(button, fn) {
@@ -334,7 +342,7 @@ async function busy(button, fn) {
 }
 
 function empty(title = '暂无记录', description = '开始记下团队的第一笔收支吧。', action = '') {
-  return `<div class="empty">${icon('book')}<h3>${esc(title)}</h3><p>${esc(description)}</p>${action}</div>`;
+  return `<div class="empty"><div class="empty-message" role="status">${icon('book')}<h3>${esc(title)}</h3><p>${esc(description)}</p></div>${action}</div>`;
 }
 
 function heading(title, subtitle, actions = '') {
@@ -387,9 +395,12 @@ function sourceLabel(source) {
   return ({web: 'Web', telegram: 'Telegram', feishu: '飞书', ai: 'AI', migration: '迁移'})[source] || source;
 }
 
-function table(entries, {checkbox = false} = {}) {
-  if (!entries.length) return empty('还没有符合条件的账目', '调整筛选条件，或记下新的一笔。', newButton());
-  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap"><table class="data-table"><thead><tr>${checkbox ? '<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>' : ''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e => `<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox ? `<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id) ? 'checked' : ''} aria-label="选择 ${esc(entryDescription(e))}"></td>` : ''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(entryDescription(e))}</strong><span class="subline">${entryType(e)}${e.receipt ? ' · ' + receiptLink(e) : ''}</span></div></div></td><td>${esc(e.payer_name)}</td><td class="mono">${esc(e.date)}</td><td class="money ${e.kind === 'income' ? 'income' : ''}"><strong>${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency, false)}</strong><span class="subline mono">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${esc(sourceLabel(e.source))}</span></td><td class="row-chevron">${icon('chevronRight', 'icon-sm')}</td></tr>`).join('')}</tbody></table></div>`;
+function table(entries, {checkbox = false, label = '账目列表'} = {}) {
+  if (!entries.length) {
+    const cta = `<button type="button" class="empty-action-btn" data-new="expense">记一笔 ${icon('arrow', 'icon-sm')}</button>`;
+    return empty('还没有符合条件的账目', '调整筛选条件，或记下新的一笔。', cta);
+  }
+  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="${esc(label)}" tabindex="0"><table class="data-table"><thead><tr>${checkbox ? '<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>' : ''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e => `<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox ? `<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id) ? 'checked' : ''} aria-label="选择 ${esc(entryDescription(e))}"></td>` : ''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(entryDescription(e))}</strong><span class="subline">${entryType(e)}${e.receipt ? ' · ' + receiptLink(e) : ''}</span></div></div></td><td>${esc(e.payer_name)}</td><td class="mono">${esc(e.date)}</td><td class="money ${e.kind === 'income' ? 'income' : ''}"><strong>${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency, false)}</strong><span class="subline mono">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${esc(sourceLabel(e.source))}</span></td><td class="row-chevron">${icon('chevronRight', 'icon-sm')}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function reportWarning(report = state.report) {
@@ -461,7 +472,7 @@ function aiActionCard(action, position) {
   const batch = action.type === 'batch_pay' && action.resolved?.items?.length
     ? `<div class="ai-batch-items">${action.resolved.items.slice(0, 12).map(item => `<div>#${esc(item.id)} ${esc(entryDescription(item))} · 实际付款 ${esc(item.amount)} ${esc(item.currency)} · 抵扣 ${esc(item.credited)} ${esc(item.entry_currency)}</div>`).join('')}${action.resolved.items.length > 12 ? `<div>另有 ${action.resolved.items.length - 12} 笔，确认后一次登记。</div>` : ''}</div>`
     : '';
-  return `<article class="ai-action-card ${disabled ? 'has-error' : ''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${icon(AI_ICON_NAMES[action.type] || 'receipt')}</span><strong>${esc(action.label || AI_LABELS[action.type] || action.type)}</strong></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length ? `<div class="ai-action-error">${errors.map(esc).join('<br>')}</div>` : ''}${warnings.length ? `<div class="ai-action-warning">${warnings.map(esc).join('<br>')}</div>` : ''}${aiFieldRows(action)}${batch}${action.type === 'create_entry' && !disabled ? `<button type="button" class="btn small" data-ai-edit-form="${action.index}">在表单中修改（可传凭证）</button>` : ''}</div></article>`;
+  return `<article class="ai-action-card ${disabled ? 'has-error' : ''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${icon(AI_ICON_NAMES[action.type] || 'receipt')}</span><strong>${esc(action.label || AI_LABELS[action.type] || action.type)}</strong></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length ? `<div class="ai-action-error">${errors.map(esc).join('<br>')}</div>` : ''}${warnings.length ? `<div class="ai-action-warning">${warnings.map(esc).join('<br>')}</div>` : ''}${aiFieldRows(action)}${batch}${action.type === 'create_entry' && !disabled ? `<button type="button" class="button button-outline button-small" data-ai-edit-form="${action.index}">在表单中修改（可传凭证）</button>` : ''}</div></article>`;
 }
 
 function aiQueryText(card) {
@@ -705,16 +716,94 @@ function chart() {
     const income = state.entries.filter(e => e.kind === 'income' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0);
     const paid = state.entries.filter(e => e.kind === 'expense' && e.expense_type === 'public' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0)
       + state.entries.reduce((s, e) => s + (e.payments || []).filter(p => p.created_at.slice(0, 10) === date).reduce((sum, p) => sum + converted(p), 0), 0);
-    days.push({date, income, paid});
+    days.push({date, income, paid, net: income - paid});
   }
   const rawMax = Math.max(0, ...days.flatMap(d => [d.income, d.paid]));
   const max = rawMax > 0 ? rawMax : 100;
-  return `<div class="chart-container"><svg class="chart" viewBox="0 0 760 186" role="img" aria-label="最近七天团队收入与公账付款，单位 ${esc(r.base)}">${[0, 1, 2].map(i => `<line x1="50" x2="744" y1="${24 + i * 54}" y2="${24 + i * 54}" class="gridline"/><text x="42" y="${28 + i * 54}" text-anchor="end">${rawMax > 0 ? (max * (1 - i / 2)).toLocaleString('zh-CN', {notation: 'compact', maximumFractionDigits: 1}) : (i === 2 ? '0' : '')}</text>`).join('')}${days.map((d, i) => {
-    const x = 76 + i * 96;
-    const ih = rawMax > 0 && d.income > 0 ? Math.max(3, d.income / max * 108) : 0;
-    const ph = rawMax > 0 && d.paid > 0 ? Math.max(3, d.paid / max * 108) : 0;
-    return `<g class="bar-group"><rect class="income-bar" x="${x}" y="${132 - ih}" width="18" height="${ih}" rx="2"><title>${d.date} 收入 ${d.income.toFixed(cur(r.base).decimals)} ${r.base}</title></rect><rect class="paid-bar" x="${x + 22}" y="${132 - ph}" width="18" height="${ph}" rx="2"><title>${d.date} 公账付款 ${d.paid.toFixed(cur(r.base).decimals)} ${r.base}</title></rect><text x="${x + 20}" y="160" text-anchor="middle">${d.date.slice(5).replace('-', '/')}</text></g>`;
-  }).join('')}</svg></div>`;
+  const fmtTick = v => v.toLocaleString('zh-CN', {notation: 'compact', maximumFractionDigits: 1});
+  const ticks = rawMax > 0 ? [fmtTick(max), fmtTick(max / 2), '0'] : ['—', '—', '0'];
+  const c = cur(r.base);
+  const fmtMoney = v => `${c.symbol}${v.toLocaleString('zh-CN', {minimumFractionDigits: c.decimals, maximumFractionDigits: c.decimals})} ${r.base}`;
+  return `
+    <div class="chart-container" id="cashflow-chart" role="group" aria-label="最近七天团队收入与公账付款，单位 ${esc(r.base)}">
+      <div class="trend-chart-layout">
+        <div class="trend-chart-axis" aria-hidden="true">
+          ${ticks.map(t => `<span>${esc(t)}</span>`).join('')}
+        </div>
+        <div class="trend-chart-plot">
+          <div class="trend-chart-bars">
+            ${days.map((d, idx) => {
+              const ip = rawMax > 0 && d.income > 0 ? Math.max(4, Math.round(d.income / max * 1000) / 10) : 0;
+              const pp = rawMax > 0 && d.paid > 0 ? Math.max(4, Math.round(d.paid / max * 1000) / 10) : 0;
+              const shortDate = d.date.slice(5).replace('-', '/');
+              const netSign = d.net > 0 ? '+' : d.net < 0 ? '−' : '';
+              return `<button type="button" class="trend-chart-col" data-chart-col="${idx}" data-date="${esc(d.date)}" data-income="${esc(fmtMoney(d.income))}" data-paid="${esc(fmtMoney(d.paid))}" data-net="${esc(netSign + fmtMoney(Math.abs(d.net)))}" aria-label="${esc(d.date)} 收入 ${esc(fmtMoney(d.income))}，支出 ${esc(fmtMoney(d.paid))}">
+                <span class="trend-chart-track">
+                  <i class="trend-bar income-bar" data-bar-h="${ip}"></i>
+                  <i class="trend-bar paid-bar" data-bar-h="${pp}"></i>
+                </span>
+                <small>${esc(shortDate)}</small>
+              </button>`;
+            }).join('')}
+          </div>
+          <div class="activity-chart-tooltip chart-tooltip" id="cashflow-tooltip" hidden aria-live="polite">
+            <strong id="ct-date"></strong>
+            <dl>
+              <div><dt>团队收入</dt><dd id="ct-income"></dd></div>
+              <div><dt>公账与报销</dt><dd id="ct-paid"></dd></div>
+              <div><dt>当日净变化</dt><dd id="ct-net"></dd></div>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function hydrateChart() {
+  const root = $('#cashflow-chart');
+  if (!root) return;
+  $$('[data-bar-h]', root).forEach(bar => {
+    bar.style.height = `${bar.dataset.barH || 0}%`;
+  });
+  const cols = $$('[data-chart-col]', root);
+  const tooltip = $('#cashflow-tooltip');
+  if (!tooltip || !cols.length) return;
+  const showCol = col => {
+    cols.forEach(c => c.classList.toggle('is-active', c === col));
+    $('#ct-date').textContent = col.dataset.date || '';
+    $('#ct-income').textContent = col.dataset.income || '';
+    $('#ct-paid').textContent = col.dataset.paid || '';
+    $('#ct-net').textContent = col.dataset.net || '';
+    const idx = Number(col.dataset.chartCol || 0);
+    tooltip.classList.toggle('is-right', idx < 4);
+    tooltip.classList.toggle('is-left', idx >= 4);
+    tooltip.hidden = false;
+  };
+  const hideTip = () => {
+    cols.forEach(c => c.classList.remove('is-active'));
+    tooltip.hidden = true;
+  };
+  cols.forEach((col, index) => {
+    col.addEventListener('pointerenter', e => {
+      if (e.pointerType !== 'touch') showCol(col);
+    });
+    col.addEventListener('focus', () => showCol(col));
+    col.addEventListener('click', () => {
+      if (col.classList.contains('is-active') && !tooltip.hidden) hideTip();
+      else showCol(col);
+    });
+    col.addEventListener('keydown', e => {
+      if (e.key === 'ArrowRight' && index < cols.length - 1) { e.preventDefault(); cols[index + 1].focus(); }
+      else if (e.key === 'ArrowLeft' && index > 0) { e.preventDefault(); cols[index - 1].focus(); }
+      else if (e.key === 'Escape') { hideTip(); }
+    });
+  });
+  root.addEventListener('pointerleave', e => {
+    if (e.pointerType !== 'touch') hideTip();
+  });
+  root.addEventListener('focusout', e => {
+    if (!root.contains(e.relatedTarget)) hideTip();
+  });
 }
 
 function renderOverview() {
@@ -734,7 +823,7 @@ function renderOverview() {
       <div class="console-activity-main">
         ${aiQuickBar()}
         <div class="activity-summary-grid">
-          <section class="summary-card is-primary">
+          <section class="summary-card">
             <div class="summary-card-head">
               <h2>团队可用余额</h2>
               <span class="mono muted">${esc(base)}</span>
@@ -806,6 +895,7 @@ function renderOverview() {
             : empty(ok ? '暂时没有待报销' : '等待汇率换算', ok ? '所有成员垫付均已结清。' : '可前往收支明细查看原始币种记录。')}
         </section>
         <section class="activity-agent-note">
+          <span class="activity-note-kicker">VANORA / SYNC</span>
           <h2>多端协同状态</h2>
           <p>在 Web 管理全局，在飞书或 Telegram 里随手记账并实时同步。</p>
           <div class="channel-status-list">
@@ -822,7 +912,7 @@ function renderOverview() {
               <span>${i.ai_configured ? '已就绪' : (i.ai && !i.ai.enabled && i.ai.has_api_key ? '已停用' : '未配置')}</span>
             </div>
           </div>
-          <a class="console-inline-link" href="#integrations">管理接入与绑定 ${icon('arrowUpRight', 'icon-sm')}</a>
+          <a class="activity-note-link" href="#integrations">管理接入与绑定 ${icon('arrowUpRight', 'icon-sm')}</a>
         </section>
       </aside>
     </div>`;
@@ -880,7 +970,7 @@ function renderLedger() {
         <select data-filter="status" aria-label="筛选状态"><option value="all">全部（不含作废）</option>${options(Object.entries(STATUS), x => x[0], x => x[1], f.status)}</select>
         <label class="filter-date-field"><span>从</span><input type="date" data-filter="from" value="${esc(f.from)}" aria-label="开始日期"></label>
         <label class="filter-date-field"><span>至</span><input type="date" data-filter="to" value="${esc(f.to)}" aria-label="结束日期"></label>
-        ${hasFilter ? '<button type="button" class="button button-quiet btn small" id="reset-filters">重置</button>' : ''}
+        ${hasFilter ? '<button type="button" class="button button-quiet button-small" id="reset-filters">重置</button>' : ''}
       </div>
       <div id="ledger-results">${ledgerResults()}</div>
     </section>`;
@@ -892,7 +982,7 @@ function reimbursementRows() {
 
 function batchToolbar() {
   const n = state.selected.size;
-  return `<span>已选 ${n} 笔${n ? ' · 不同币种会分别列示' : ''}</span>${canManage() ? `<button type="button" class="btn small button-outline" data-export-selected ${n ? '' : 'disabled'}>${icon('download', 'ico-download')}导出已选 Excel</button>` : ''}${state.reimburseTab === 'pending' ? '<button type="button" class="btn small primary" data-batch="pay">登记已付款</button>' : ''}${state.reimburseTab === 'draft' ? '<button type="button" class="btn small primary" data-batch="submit">记入账本</button>' : ''}`;
+  return `<span>已选 ${n} 笔${n ? ' · 不同币种会分别列示' : ''}</span>${canManage() ? `<button type="button" class="button button-outline button-small" data-export-selected ${n ? '' : 'disabled'}>${icon('download', 'ico-download')}导出已选 Excel</button>` : ''}${state.reimburseTab === 'pending' ? '<button type="button" class="button button-primary button-small" data-batch="pay">登记已付款</button>' : ''}${state.reimburseTab === 'draft' ? '<button type="button" class="button button-primary button-small" data-batch="submit">记入账本</button>' : ''}`;
 }
 
 function renderReimbursements() {
@@ -955,7 +1045,7 @@ function planTable(report, selectable = false) {
     const convertedText = entry.currency === report.base ? '' : ` · 结算参考 ${money(entry.settlement, report.base, false)}`;
     return `<div class="plan-entry ${hasSuggestion ? 'is-selected' : 'is-waiting'}">${selectable ? `<input class="plan-checkbox" type="checkbox" data-calc-select="${entry.id}" ${state.calculator.ids.has(entry.id) ? 'checked' : ''} aria-label="选择报销项目 #${entry.id} ${esc(entryDescription(entry))}">` : ''}<div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entryDescription(entry))}</strong><small>#${entry.id} · ${esc(entry.date)} · 剩余待报 ${original}${convertedText}${Number(entry.reimbursed_amount) > 0 ? ` · 原金额 ${money(entry.original_amount, entry.currency, false)} · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small></div><div class="plan-entry-suggested">${hasSuggestion ? `建议 ${money(entry.suggested, report.base, false)}` : '—'}</div></div>`;
   };
-  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap"><table class="data-table plan-table"><thead><tr><th>成员 / 具体项目</th><th class="money">全部待报销</th><th class="money">建议安排付款</th></tr></thead><tbody>${report.members.map(m => `<tr><td><strong>${esc(m.name)}</strong><div class="plan-entry-list">${m.entries.map(entryLabel).join('')}</div></td><td class="money">${money(m.due, report.base, false)}</td><td class="money"><strong>${money(m.suggested, report.base, false)}</strong><small class="subline">按项目明细安排</small></td></tr>`).join('')}</tbody></table></div>`;
+  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="成员报销安排" tabindex="0"><table class="data-table plan-table"><thead><tr><th>成员 / 具体项目</th><th class="money">全部待报销</th><th class="money">建议安排付款</th></tr></thead><tbody>${report.members.map(m => `<tr><td><strong>${esc(m.name)}</strong><div class="plan-entry-list">${m.entries.map(entryLabel).join('')}</div></td><td class="money">${money(m.due, report.base, false)}</td><td class="money"><strong>${money(m.suggested, report.base, false)}</strong><small class="subline">按项目明细安排</small></td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function renderCalculator() {
@@ -989,7 +1079,7 @@ function renderCalculator() {
       <div class="panel-heading">
         <div><h3>成员报销安排</h3><p>统一按 ${esc(base)} 参考换算 · 手动模式可直接勾选项目</p></div>
         <div class="panel-heading-actions">
-          ${canManage() ? `<button type="button" class="button button-outline btn small" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}
+          ${canManage() ? `<button type="button" class="button button-outline button-small" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}
           <a class="console-inline-link" href="#reimbursements">前往报销管理 ${icon('arrowUpRight', 'icon-sm')}</a>
         </div>
       </div>
@@ -998,7 +1088,7 @@ function renderCalculator() {
     <section class="panel recent-panel">
       <div class="panel-heading">
         <div><h3>参考汇率</h3><p>每日公开参考汇率 · 用于资金规划与跨币种报销确认</p></div>
-        <button type="button" class="button button-outline btn small" id="refresh-fx">${icon('refresh', 'ico-refresh')}刷新汇率</button>
+        <button type="button" class="button button-outline button-small" id="refresh-fx">${icon('refresh', 'ico-refresh')}刷新汇率</button>
       </div>
       <div class="panel-inner" id="fx-details">${rateDetails(r)}${reportWarning(r)}</div>
     </section>`;
@@ -1126,7 +1216,7 @@ function renderIntegrations() {
         </form>` : ''}
         <div class="integration-actions">
           <button type="button" class="button button-primary" id="generate-feishu-link">${i.feishu_linked ? '重新生成绑定码' : '生成绑定码'}</button>
-          ${i.feishu_linked ? '<button type="button" class="button button-danger" id="unlink-feishu">解除绑定</button>' : ''}
+          ${i.feishu_linked ? '<button type="button" class="button button-outline button-danger-outline" id="unlink-feishu">解除绑定</button>' : ''}
         </div>
         <div id="feishu-link-code-result"></div>
       </section>
@@ -1153,7 +1243,7 @@ function renderIntegrations() {
         <div class="notice">机器人配置：${i.bot_configured ? '已配置' : '尚未配置'} · 进程：${i.bot_online ? '在线' : '尚未检测到在线'}${i.bot_username ? `<p>机器人：<a class="console-inline-link" href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ${icon('arrowUpRight', 'icon-sm')}</a></p>` : ''}</div>
         <div class="integration-actions">
           <button type="button" class="button button-primary" id="generate-link">${i.telegram_linked ? '重新生成绑定码' : '生成绑定码'}</button>
-          ${i.telegram_linked ? '<button type="button" class="button button-danger" id="unlink-telegram">解除绑定</button>' : ''}
+          ${i.telegram_linked ? '<button type="button" class="button button-outline button-danger-outline" id="unlink-telegram">解除绑定</button>' : ''}
         </div>
         <div id="link-code-result"></div>
       </section>
@@ -1242,7 +1332,7 @@ function renderIntegrations() {
               <div class="integration-actions">
                 <button type="submit" class="button button-primary" id="save-ai-config">保存 AI 配置</button>
                 <button type="button" class="button button-outline" id="test-ai-config">保存并测试连接</button>
-                ${aiCfg.has_api_key || aiCfg.source === 'db' ? '<button type="button" class="button button-danger" id="clear-ai-config">清除配置</button>' : ''}
+                ${aiCfg.has_api_key || aiCfg.source === 'db' ? '<button type="button" class="button button-outline button-danger-outline" id="clear-ai-config">清除配置</button>' : ''}
               </div>
             </form>
           </div>` : ''}
@@ -1266,33 +1356,70 @@ function currencyEditorRow(c) {
 
 function renderSettings() {
   const c = state.conf;
+  const tab = ['general', 'bots', 'backups'].includes(state.settingsTab) ? state.settingsTab : 'general';
+  const tabs = [
+    ['general', '常规与币种'],
+    ['bots', '群组白名单'],
+    ['backups', '备份与恢复'],
+  ];
   return heading('团队设置', '管理团队名称、常用币种、机器人群组允许名单以及数据备份策略。') + `
-    <form id="settings-form">
-      <div class="settings-grid">
-        <section class="panel"><div class="panel-inner">
-          <h3>团队与币种偏好</h3>
-          <label><span>团队名称</span><input name="team_name" value="${esc(c.team_name)}" maxlength="40" required></label>
-          <label><span>默认记账币种</span><select name="default_currency" id="default-currency">${currencyOptions(c.default_currency)}</select></label>
-          <label><span>资金汇总参考币种</span><select name="reference_currency" id="reference-currency">${currencyOptions(c.reference_currency)}</select></label>
-          <p class="fx-caption">当前账目日期按 <span class="mono">${esc(c.timezone)}</span> 计算。可在服务器环境变量 <code>TEAM_TIMEZONE</code> 中调整时区。</p>
-          <label><span>飞书允许使用的群组 ID <small class="optional">一行一个</small></span><textarea name="feishu_allowed_chats" rows="3" placeholder="例如：oc_123456789">${esc((c.feishu_allowed_chats || []).join('\n'))}</textarea></label>
-          <p class="fx-caption">在飞书群里 @机器人并发送 <code>/groupid</code> 获取群组 ID。群成员须先私聊绑定，填写内容时请回复机器人提示并 @机器人。</p>
-          <label><span>Telegram 允许使用的群组 ID <small class="optional">一行一个</small></span><textarea name="telegram_allowed_chats" rows="3" placeholder="例如：-1001234567890">${esc(c.telegram_allowed_chats.join('\n'))}</textarea></label>
-          <p class="fx-caption">未在允许名单中的群组不会收到机器人的记账回复。</p>
-        </div></section>
-        <section class="panel"><div class="panel-inner">
-          <h3>可用币种</h3>
-          <p class="fx-caption">可添加 3 位大写字母币种代码。已有账目或付款记录的币种不能移除或修改小数位。</p>
-          <div class="currencies-editor">
-            <div class="currency-edit-head"><span>代码</span><span>名称</span><span>符号</span><span>小数位</span><span></span></div>
-            <div id="currency-rows">${c.currencies.map(currencyEditorRow).join('')}</div>
-            <button type="button" class="btn small wide" id="add-currency">${icon('plus', 'ico-plus')}添加币种</button>
+    <nav class="settings-categories" aria-label="团队设置分类">
+      ${tabs.map(([id, label]) => `<button type="button" data-settings-tab="${id}" ${tab === id ? 'aria-current="page"' : ''}>${label}</button>`).join('')}
+    </nav>
+    <div class="settings-main">
+      <form id="settings-form" ${tab === 'backups' ? 'hidden' : ''}>
+        <div class="settings-tab-panel" data-settings-panel="general" ${tab === 'general' ? '' : 'hidden'}>
+          <div class="settings-grid">
+            <section class="panel"><div class="panel-inner">
+              <h3>团队与币种偏好</h3>
+              <label><span>团队名称</span><input name="team_name" value="${esc(c.team_name)}" maxlength="40" required></label>
+              <label><span>默认记账币种</span><select name="default_currency" id="default-currency">${currencyOptions(c.default_currency)}</select></label>
+              <label><span>资金汇总参考币种</span><select name="reference_currency" id="reference-currency">${currencyOptions(c.reference_currency)}</select></label>
+              <p class="fx-caption">当前账目日期按 <span class="mono">${esc(c.timezone)}</span> 计算。可在服务器环境变量 <code>TEAM_TIMEZONE</code> 中调整时区。</p>
+            </div>
+            <div class="panel-footer-actions">
+              <button class="button button-primary" type="submit">保存团队设置</button>
+            </div></section>
+            <section class="panel"><div class="panel-inner">
+              <h3>可用币种</h3>
+              <p class="fx-caption">可添加 3 位大写字母币种代码。已有账目或付款记录的币种不能移除或修改小数位。</p>
+              <div class="currencies-editor">
+                <div class="currency-edit-head"><span>代码</span><span>名称</span><span>符号</span><span>小数位</span><span></span></div>
+                <div id="currency-rows">${c.currencies.map(currencyEditorRow).join('')}</div>
+                <button type="button" class="button button-outline button-small full-width" id="add-currency">${icon('plus', 'ico-plus')}添加币种</button>
+              </div>
+            </div>
+            <div class="panel-footer-actions">
+              <button class="button button-primary" type="submit">保存团队设置</button>
+            </div></section>
           </div>
-        </div></section>
+        </div>
+        <div class="settings-tab-panel" data-settings-panel="bots" ${tab === 'bots' ? '' : 'hidden'}>
+          <div class="settings-grid">
+            <section class="panel"><div class="panel-inner">
+              <h3>飞书群组允许名单</h3>
+              <label><span>允许使用的飞书群组 ID <small class="optional">一行一个</small></span><textarea name="feishu_allowed_chats" rows="4" placeholder="例如：oc_123456789">${esc((c.feishu_allowed_chats || []).join('\n'))}</textarea></label>
+              <p class="fx-caption">在飞书群里 @机器人并发送 <code>/groupid</code> 获取群组 ID。群成员须先私聊绑定，填写内容时请回复机器人提示并 @机器人。</p>
+            </div>
+            <div class="panel-footer-actions">
+              <button class="button button-primary" type="submit">保存群组白名单</button>
+            </div></section>
+            <section class="panel"><div class="panel-inner">
+              <h3>Telegram 群组允许名单</h3>
+              <label><span>允许使用的 Telegram 群组 ID <small class="optional">一行一个</small></span><textarea name="telegram_allowed_chats" rows="4" placeholder="例如：-1001234567890">${esc(c.telegram_allowed_chats.join('\n'))}</textarea></label>
+              <p class="fx-caption">未在允许名单中的群组不会收到机器人的记账回复。</p>
+            </div>
+            <div class="panel-footer-actions">
+              <button class="button button-primary" type="submit">保存群组白名单</button>
+            </div></section>
+          </div>
+        </div>
+        <div class="form-error" id="settings-error" role="alert"></div>
+      </form>
+      <div class="settings-tab-panel" data-settings-panel="backups" ${tab === 'backups' ? '' : 'hidden'}>
+        <div id="backup-settings-slot"></div>
       </div>
-      <div class="form-error" id="settings-error" role="alert"></div>
-      <div class="setting-save"><button class="button button-primary" type="submit">保存团队设置</button></div>
-    </form>`;
+    </div>`;
 }
 
 const renderers = {
@@ -1416,6 +1543,7 @@ function render() {
   const main = $('#main');
   if (main) main.classList.toggle('is-overview', state.page === 'overview');
   $('#content').innerHTML = renderers[state.page]();
+  if (state.page === 'overview') hydrateChart();
   if (state.page === 'settings') mountBackups();
   renderNav();
   const teamName = state.conf.team_name || 'Vanora 财务管理';
@@ -1644,7 +1772,12 @@ async function start() {
       await showAuth(boot);
     }
   } catch (e) {
-    $('#loading').innerHTML = `<h1>无法连接到账本服务</h1><p>${esc(e.message)}</p><button type="button" class="button button-outline" data-reload>重新连接</button>`;
+    const loading = $('#loading');
+    if (loading) {
+      loading.className = 'console-access';
+      loading.removeAttribute('aria-busy');
+      loading.innerHTML = `<h1>无法连接到账本服务</h1><p>${esc(e.message)}</p><button type="button" class="button button-outline" data-reload>重新连接</button>`;
+    }
   }
 }
 
@@ -1740,10 +1873,10 @@ async function openDetail(id) {
       actions.push(`<button type="button" class="button button-outline" data-edit-entry="${id}">修改账目</button>`);
     }
     if (!e.reimbursed_minor && !['reimbursed', 'voided'].includes(e.status) && manageable) {
-      actions.push(`<button type="button" class="button button-danger" data-action="void" data-id="${id}">作废账目</button>`);
+      actions.push(`<button type="button" class="button button-outline button-danger-outline" data-action="void" data-id="${id}">作废账目</button>`);
     }
     if (e.status === 'voided' && canManage()) {
-      actions.push(`<button type="button" class="button button-danger-solid" data-delete-entry="${id}">永久删除</button>`);
+      actions.push(`<button type="button" class="button button-danger" data-delete-entry="${id}">永久删除</button>`);
     }
     if (manageable && e.status === 'draft') {
       actions.push(`<button type="button" class="button button-primary" data-action="submit" data-id="${id}">记入账本</button>`);
@@ -1877,7 +2010,7 @@ async function openAction(action, ids) {
   $('#action-title').textContent = labels[action];
   const confirmBtn = $('#action-confirm');
   confirmBtn.textContent = `确认${labels[action]}`;
-  confirmBtn.className = `button ${action === 'void' ? 'button-danger-solid' : 'button-primary'}`;
+  confirmBtn.className = `button ${action === 'void' ? 'button-danger' : 'button-primary'}`;
   $('#action-description').textContent = action === 'pay'
     ? '逐笔填写本次实际已转账的金额，支持部分报销。可按记账货币或团队结算货币登记，系统不会发起真实转账。'
     : `即将对 ${ids.length} 笔账目执行${labels[action]}。`;
@@ -1951,15 +2084,19 @@ $('#action-payment-amounts').addEventListener('change', event => {
  * Global Event Listeners
  * ========================================================================== */
 
-// Close native dialogs when clicking on backdrop (crucial for mobile & Feishu touch UX)
+// Match Vanora Modal: only drawers & receipt preview allow backdrop click-to-close,
+// and require both pointerdown & click on the backdrop to prevent text-selection misclicks.
 $$('dialog.modal').forEach(dialog => {
+  const allowBackdropClose = dialog.classList.contains('modal-drawer') || dialog.id === 'receipt-dialog';
+  let backdropDown = false;
+  dialog.addEventListener('pointerdown', event => {
+    backdropDown = allowBackdropClose && event.target === dialog;
+  });
   dialog.addEventListener('click', event => {
-    if (event.target !== dialog) return;
-    if (dialog.id === 'confirm-dialog') {
-      resolveConfirm(confirmResolver?.hasInput ? null : false);
-    } else {
+    if (allowBackdropClose && backdropDown && event.target === dialog) {
       dialog.close();
     }
+    backdropDown = false;
   });
 });
 
@@ -2360,6 +2497,22 @@ document.addEventListener('click', async event => {
     state.reimburseTab = b.dataset.reimburseTab;
     state.selected.clear();
     render();
+    return;
+  }
+  if (b.hasAttribute('data-settings-tab')) {
+    const nextTab = b.dataset.settingsTab;
+    if (['general', 'bots', 'backups'].includes(nextTab)) {
+      state.settingsTab = nextTab;
+      $$('[data-settings-tab]').forEach(btn => {
+        if (btn.dataset.settingsTab === nextTab) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
+      });
+      const form = $('#settings-form');
+      if (form) form.hidden = nextTab === 'backups';
+      $$('[data-settings-panel]').forEach(panel => {
+        panel.hidden = panel.dataset.settingsPanel !== nextTab;
+      });
+    }
     return;
   }
   if (b.hasAttribute('data-batch')) {
@@ -2888,8 +3041,10 @@ document.addEventListener('submit', async event => {
   }
   if (form.id === 'settings-form') {
     event.preventDefault();
-    await busy($('button[type=submit]', form), async () => {
+    const submitBtn = event.submitter || $('button[type=submit]', form);
+    await busy(submitBtn, async () => {
       try {
+        $('#settings-error').textContent = '';
         const body = Object.fromEntries(new FormData(form));
         body.telegram_allowed_chats = body.telegram_allowed_chats.split('\n').map(s => s.trim()).filter(Boolean);
         body.feishu_allowed_chats = body.feishu_allowed_chats.split('\n').map(s => s.trim()).filter(Boolean);
@@ -2909,6 +3064,23 @@ document.addEventListener('submit', async event => {
     });
   }
 });
+
+document.addEventListener('invalid', event => {
+  const panel = event.target?.closest?.('#settings-form [data-settings-panel]');
+  if (panel && panel.hidden) {
+    const targetTab = panel.dataset.settingsPanel;
+    state.settingsTab = targetTab;
+    $$('[data-settings-tab]').forEach(btn => {
+      if (btn.dataset.settingsTab === targetTab) btn.setAttribute('aria-current', 'page');
+      else btn.removeAttribute('aria-current');
+    });
+    const form = $('#settings-form');
+    if (form) form.hidden = false;
+    $$('[data-settings-panel]').forEach(p => {
+      p.hidden = p.dataset.settingsPanel !== targetTab;
+    });
+  }
+}, true);
 
 window.addEventListener('hashchange', () => {
   parseHashRoute();

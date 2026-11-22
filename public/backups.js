@@ -12,7 +12,13 @@ function backupDate(value) {
 
 async function mountBackups() {
   const request = ++backupUI.request;
-  $('#content').insertAdjacentHTML('beforeend', '<section id="backup-settings" class="backup-section" aria-live="polite"><div class="skeleton">正在读取备份设置…</div></section>');
+  const host = $('#backup-settings-slot') || $('#content');
+  if (!host) return;
+  if (host.id === 'backup-settings-slot') {
+    host.innerHTML = '<section id="backup-settings" class="backup-section" aria-live="polite"><div class="skeleton">正在读取备份设置…</div></section>';
+  } else {
+    host.insertAdjacentHTML('beforeend', '<section id="backup-settings" class="backup-section" aria-live="polite"><div class="skeleton">正在读取备份设置…</div></section>');
+  }
   const root = $('#backup-settings');
   try {
     const conf = await api('/backups/config');
@@ -23,7 +29,7 @@ async function mountBackups() {
     if (request === backupUI.request && root.isConnected) renderBackupSettings();
   } catch (error) {
     if (root.isConnected) {
-      root.innerHTML = `<div class="callout error"><span class="callout-body">${esc(error.message)}</span><button class="btn small" data-backup-refresh>重新读取</button></div>`;
+      root.innerHTML = `<div class="callout error"><span class="callout-body">${esc(error.message)}</span><button type="button" class="button button-outline button-small" data-backup-refresh>重新读取</button></div>`;
     }
   }
 }
@@ -62,7 +68,7 @@ function renderBackupSettings() {
           <label><span>用户名</span><input name="webdav_username" value="${esc(c.webdav.username)}" autocomplete="off"></label>
           <label><span>密码 / 应用密码</span><input name="webdav_password" type="password" autocomplete="new-password" placeholder="${c.webdav.has_password ? '已保存，留空保留原密码' : '填写密码或应用密码'}"></label>
           <label><span>备份目录</span><input name="webdav_prefix" value="${esc(c.webdav.prefix)}" placeholder="team-ledger"></label>
-          <div class="integration-actions"><button type="button" class="btn" data-backup-test="webdav">保存并测试 WebDAV</button></div>
+          <div class="integration-actions"><button type="button" class="button button-outline" data-backup-test="webdav">保存并测试 WebDAV</button></div>
         </div></section>
         <section class="panel"><div class="panel-inner">
           <h3>S3 兼容存储桶</h3>
@@ -75,7 +81,7 @@ function renderBackupSettings() {
           <label><span>Secret Access Key</span><input name="s3_secret_access_key" type="password" autocomplete="new-password" placeholder="${c.s3.has_secret_access_key ? '已保存，留空保留原密钥' : '填写访问密钥'}"></label>
           <label><span>备份目录</span><input name="s3_prefix" value="${esc(c.s3.prefix)}" placeholder="team-ledger"></label>
           <label class="backup-check"><input class="settings-switch" name="s3_path_style" type="checkbox" ${c.s3.path_style ? 'checked' : ''}><span>使用路径风格访问（Path style）</span></label>
-          <div class="integration-actions"><button type="button" class="btn" data-backup-test="s3">保存并测试 S3</button></div>
+          <div class="integration-actions"><button type="button" class="button button-outline" data-backup-test="s3">保存并测试 S3</button></div>
         </div></section>
         <section class="panel backup-schedule"><div class="panel-inner">
           <h3>定时自动备份</h3>
@@ -96,22 +102,24 @@ function renderBackupSettings() {
             ${status.last_error ? `<p class="form-error" role="alert">${esc(status.last_error)}</p>` : ''}
             ${status.last_restore ? `<p>最近恢复：${esc(backupDate(status.last_restore))}</p>` : ''}
           </div>
+        </div>
+        <div class="panel-footer-actions">
+          <button class="button button-primary" type="submit">保存备份设置</button>
         </div></section>
       </div>
       <div class="form-error" id="backup-error" role="alert">${esc(backupUI.error)}</div>
-      <div class="setting-save"><button class="btn primary" type="submit">保存备份设置</button></div>
     </form>
     <section class="panel backup-files">
       <div class="backup-toolbar">
         <h3>备份文件</h3>
         <label><span>存储位置</span><select id="backup-target">${Object.entries(BACKUP_TARGETS).map(([key, label]) => `<option value="${key}" ${key === backupUI.target ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-        <button class="btn" type="button" data-backup-refresh>${icon('refresh', 'ico-refresh')}刷新列表</button>
-        <button class="btn primary" type="button" data-backup-create>${icon('plus', 'ico-plus')}立即备份</button>
+        <button class="button button-outline" type="button" data-backup-refresh>${icon('refresh', 'ico-refresh')}刷新列表</button>
+        <button class="button button-primary" type="button" data-backup-create>${icon('plus', 'ico-plus')}立即备份</button>
       </div>
       ${backupUI.listError
         ? `<div class="backup-panel-body"><div class="callout error" role="alert">${esc(backupUI.listError)}</div></div>`
         : backupUI.items.length
-          ? `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap"><table class="data-table"><thead><tr><th>备份文件</th><th>大小</th><th>保存时间</th><th>操作</th></tr></thead><tbody>${backupUI.items.map(item => `<tr><td><strong class="backup-filename">${esc(item.name)}</strong>${item.name.startsWith('before-restore-') ? '<span class="subline">恢复前自动保存的账本</span>' : ''}</td><td class="mono">${backupSize(item.size)}</td><td class="mono">${esc(backupDate(item.modified_at))}</td><td><div class="backup-row-actions"><button class="btn small" type="button" data-backup-download="${esc(item.name)}">下载</button><button class="btn small danger" type="button" data-backup-restore="${esc(item.name)}">恢复</button></div></td></tr>`).join('')}</tbody></table></div>`
+          ? `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="备份文件列表" tabindex="0"><table class="data-table"><thead><tr><th>备份文件</th><th>大小</th><th>保存时间</th><th>操作</th></tr></thead><tbody>${backupUI.items.map(item => `<tr><td><strong class="backup-filename">${esc(item.name)}</strong>${item.name.startsWith('before-restore-') ? '<span class="subline">恢复前自动保存的账本</span>' : ''}</td><td class="mono">${backupSize(item.size)}</td><td class="mono">${esc(backupDate(item.modified_at))}</td><td><div class="backup-row-actions"><button class="button button-outline button-small" type="button" data-backup-download="${esc(item.name)}">下载</button><button class="button button-outline button-danger-outline button-small" type="button" data-backup-restore="${esc(item.name)}">恢复</button></div></td></tr>`).join('')}</tbody></table></div>`
           : '<div class="backup-panel-body"><div class="notice">此位置还没有备份。点击「立即备份」保存第一份完整账本。</div></div>'}
       <div class="backup-panel-body">
         <div class="backup-upload">
@@ -120,7 +128,7 @@ function renderBackupSettings() {
             <p class="fx-caption">选择本系统导出的 ZIP 备份文件，最大 ${backupSize(c.max_upload_bytes)}。恢复会覆盖当前账本与凭证，并退出所有登录会话。</p>
           </div>
           <label><span>选择备份文件</span><input type="file" id="backup-upload-file" accept=".zip,application/zip,application/x-zip-compressed"></label>
-          <button class="btn danger" type="button" data-backup-upload>上传并恢复</button>
+          <button class="button button-outline button-danger-outline" type="button" data-backup-upload>上传并恢复</button>
         </div>
         <p class="fx-caption">恢复前会校验完整性并自动保存当前账本，失败时回退。备份包含历史账目、成员投影以及数据库中的机器人与 AI 密钥，请妥善保管；成员角色与启用状态由 Vanora OAuth 统一管理，恢复后重新登录时将自动同步。远程存储凭据和定时设置单独保存在服务器，不包含在 ZIP 中。</p>
       </div>

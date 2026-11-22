@@ -13,33 +13,51 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <div id="loading" class="console-access" role="status">
-    <span class="boot-spinner" aria-hidden="true"></span>
-    <h1>正在打开团队账本</h1>
-    <p>请稍候，正在确认登录状态。</p>
+  <a class="skip-link" href="#main">跳转到主要内容</a>
+
+  <div id="loading" class="vanora-boot" role="status" aria-busy="true" aria-label="团队账本加载中">
+    <div class="vanora-boot-bar" aria-hidden="true"></div>
+    <div class="vanora-boot-workspace" aria-hidden="true">
+      <div class="vanora-boot-header">
+        <div class="vanora-boot-brand">
+          <span class="brand-symbol"><img src="/static/vanora-logo.png" alt=""></span>
+          <span>vanora<span class="vanora-boot-dot">.</span></span>
+        </div>
+        <div class="vanora-boot-pills">
+          <span class="vanora-boot-pill"></span>
+          <span class="vanora-boot-pill"></span>
+        </div>
+      </div>
+      <div class="vanora-boot-frame">
+        <div class="vanora-boot-tabs">
+          <span class="vanora-boot-tab"></span>
+          <span class="vanora-boot-tab"></span>
+          <span class="vanora-boot-tab"></span>
+          <span class="vanora-boot-tab"></span>
+          <span class="vanora-boot-tab"></span>
+        </div>
+        <div class="vanora-boot-content">
+          <div class="vanora-boot-line vanora-boot-title"></div>
+          <div class="vanora-boot-line vanora-boot-subtitle"></div>
+          <div class="vanora-boot-card"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <section id="auth" class="auth-site" hidden>
-    <header class="auth-topbar">
-      <div class="auth-topbar-left">
-        <span class="brand">
-          <span class="brand-symbol"><img src="/static/vanora-logo.png" alt=""></span>
-          <span class="brand-word">vanora<span class="brand-period">.</span></span>
-        </span>
-        <span class="workspace-divider" aria-hidden="true"></span>
-        <span class="auth-topbar-tag">财务管理</span>
-      </div>
-    </header>
-    <div class="auth-workspace-frame">
-      <main class="auth-page" id="auth-page">
-        <header class="auth-heading">
-          <div class="auth-brand" aria-hidden="true">
-            <span class="auth-brand-symbol"><img src="/static/vanora-logo.png" alt=""></span>
-            <span class="auth-brand-word">vanora<span class="brand-period">.</span></span>
-          </div>
+    <main class="auth-page" id="auth-page">
+      <header class="auth-heading">
+        <div class="auth-brand" aria-label="vanora. 财务管理">
+          <span class="auth-brand-symbol"><img src="/static/vanora-logo.png" alt=""></span>
+          <span class="auth-brand-word">vanora<span class="brand-period">.</span></span>
+        </div>
+        <div class="auth-welcome">
           <h1 id="auth-title">欢迎回来</h1>
           <p id="auth-subtitle">使用 Vanora 账号登录，继续管理团队的每一笔收支与报销。</p>
-        </header>
+        </div>
+      </header>
+      <section class="auth-form-panel">
         <div id="auth-context" class="auth-context" hidden></div>
         <form id="auth-form" class="auth-form">
           <label id="auth-team-wrap" hidden>
@@ -52,12 +70,12 @@
           <p class="auth-embed-hint" id="auth-embed-hint" hidden>若嵌入窗口未自动跳转，请点击 <a id="auth-external-link" class="console-inline-link" href="/api/auth/oidc/login" target="_blank" rel="noreferrer">在新窗口中打开登录</a>。</p>
           <p class="auth-note" id="auth-note">成员与权限由 Vanora OAuth 集中管理，授权成员使用 Vanora 账号登录后即可进入团队账本。</p>
         </form>
-      </main>
-      <footer class="console-footer auth-footer">
-        <span>Vanora 财务管理</span>
-        <span>每一笔，都算数。</span>
-      </footer>
-    </div>
+      </section>
+    </main>
+    <footer class="console-footer auth-footer">
+      <span>© Vanora 财务管理</span>
+      <span>每一笔，都算数。</span>
+    </footer>
   </section>
 
   <div id="app" class="console-site" hidden>
@@ -80,7 +98,6 @@
           <button type="button" class="icon-button console-search-trigger" id="ai-launcher" aria-label="打开 AI 记账助手" aria-haspopup="dialog" title="AI 记账助手 (Ctrl K)">
             <span class="trigger-icon" id="ai-launcher-icon" aria-hidden="true"></span>
             <span class="trigger-label">AI 助手</span>
-            <kbd>Ctrl K</kbd>
           </button>
           <button type="button" class="icon-button" id="refresh-ledger" aria-label="刷新团队账本" title="刷新团队账本"></button>
           <div class="console-dropdown account-dropdown" id="account-dropdown" data-open="false">
@@ -282,7 +299,7 @@
       <div class="export-presets" id="export-presets" role="group" aria-label="快捷导出范围"></div>
       <div class="export-selection-banner" id="export-selection-banner" hidden>
         <span id="export-selection-text"></span>
-        <button type="button" class="button button-quiet btn small" id="export-clear-ids">切换为按条件筛选</button>
+        <button type="button" class="button button-quiet button-small" id="export-clear-ids">切换为按条件筛选</button>
       </div>
       <div id="export-filter-fields" class="export-filter-fields">
         <div class="form-grid">
@@ -369,6 +386,6 @@
     </form>
   </dialog>
 
-  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="toast-text"></span></div>
 </body>
 </html>
