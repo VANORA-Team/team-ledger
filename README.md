@@ -1,6 +1,6 @@
 # 一起记 · 小团队共同账本
 
-[![Docker build](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml)
+[![Docker build](https://github.com/VANORA-Team/team-ledger/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/VANORA-Team/team-ledger/actions/workflows/docker-publish.yml)
 
 供扁平化小团队使用的 Web + Telegram / 飞书记账系统。每位成员都有独立账号，拥有相同的管理权限。公账支出直接扣款，成员垫付记账后待报销、实际付款后登记报销，无需审核，没有分类功能。
 
@@ -245,7 +245,7 @@ AI_MAX_ACTIONS=20          # 单次最多生成的操作数
 推荐直接使用 GitHub Actions 构建的 GHCR 镜像：
 
 ```sh
-docker pull ghcr.io/meowapi/team-ledger:latest
+docker pull ghcr.io/vanora-team/team-ledger:latest
 cp .env.example .env
 # 编辑 .env
 docker compose pull
@@ -254,7 +254,7 @@ docker compose up -d --no-build
 docker compose --profile telegram up -d --no-build
 ```
 
-Web 和 bot 使用同一镜像，数据通过命名卷持久化。要固定到某个版本，在 `.env` 中设置 `LEDGER_IMAGE=ghcr.io/meowapi/team-ledger:版本号`，再执行 `docker compose pull` 和 `docker compose up -d --no-build`。
+Web 和 bot 使用同一镜像，数据通过命名卷持久化。要固定到某个版本，在 `.env` 中设置 `LEDGER_IMAGE=ghcr.io/vanora-team/team-ledger:版本号`，再执行 `docker compose pull` 和 `docker compose up -d --no-build`。
 
 也可从源码自行构建：
 
@@ -287,7 +287,7 @@ GitHub Actions 自动运行账务测试、构建并启动 AMD64 容器、检查�
 - 可在 Actions 的「Test and publish Docker image」中手动运行。
 - 使用仓库自带的 `GITHUB_TOKEN` 发布 GHCR，无需额外填写 Docker Hub 密钥。
 
-镜像地址：`ghcr.io/meowapi/team-ledger`。构建状态和镜像摘要见 [GitHub Actions](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml)。
+镜像地址：`ghcr.io/vanora-team/team-ledger`。构建状态和镜像摘要见 [GitHub Actions](https://github.com/VANORA-Team/team-ledger/actions/workflows/docker-publish.yml)。
 
 ## 保存与备份
 

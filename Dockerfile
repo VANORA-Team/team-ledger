@@ -6,7 +6,7 @@ COPY app ./app
 COPY public ./public
 COPY run.py ./run.py
 RUN mkdir -p /app/data && chown ledger:ledger /app/data
-LABEL org.opencontainers.image.source="https://github.com/MeowAPI/team-ledger"
+LABEL org.opencontainers.image.source="https://github.com/VANORA-Team/team-ledger"
 USER ledger
 ENV HOST=0.0.0.0 PORT=8765 DATA_DIR=/app/data
 EXPOSE 8765

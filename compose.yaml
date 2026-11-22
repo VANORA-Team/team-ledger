@@ -1,6 +1,6 @@
 services:
   web:
-    image: ${LEDGER_IMAGE:-ghcr.io/meowapi/team-ledger:latest}
+    image: ${LEDGER_IMAGE:-ghcr.io/vanora-team/team-ledger:latest}
     build: .
     restart: unless-stopped
     env_file: .env
@@ -13,7 +13,7 @@ services:
     volumes:
       - ledger-data:/app/data
   bot:
-    image: ${LEDGER_IMAGE:-ghcr.io/meowapi/team-ledger:latest}
+    image: ${LEDGER_IMAGE:-ghcr.io/vanora-team/team-ledger:latest}
     build: .
     restart: unless-stopped
     profiles: [telegram]
@@ -26,7 +26,7 @@ services:
     volumes:
       - ledger-data:/app/data
   feishu:
-    image: ${LEDGER_IMAGE:-ghcr.io/meowapi/team-ledger:latest}
+    image: ${LEDGER_IMAGE:-ghcr.io/vanora-team/team-ledger:latest}
     build: .
     restart: unless-stopped
     profiles: [feishu]
