@@ -1,5 +1,4 @@
 import base64
-import csv
 import hashlib
 import io
 import json
@@ -12,10 +11,10 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi import FastAPI, Query, Request, Response, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from . import config, ai, ai_context, ai_plan, backups, fx, oidc, permissions_sync
+from . import config, ai, ai_context, ai_plan, backups, excel_export, fx, oidc, permissions_sync
 from .backup_api import router as backup_router
 from .db import USER_ROLES, db, init_db, settings, remove_receipt_file, authenticated_session
 from .domain import (fail, admin, owner, is_finance, require_entry_access, public_user,
@@ -861,28 +860,45 @@ def unlink(request: Request):
 
 
 @app.get('/api/export')
-def export(request: Request):
+@app.get('/api/export.xlsx')
+def export_excel(
+    request: Request,
+    kind: str = 'all',
+    status: str | None = None,
+    currency: str = 'all',
+    payer: str | None = None,
+    date_from: str = Query(default='', alias='from'),
+    date_to: str = Query(default='', alias='to'),
+    q: str = '',
+    ids: str = '',
+    base: str | None = None,
+    include_voided: str | None = None,
+    include_receipts: str = '1',
+):
     admin(current(request))
-    with db() as conn:
-        rows = [entry_view(conn, r['id']) for r in conn.execute('SELECT id FROM entries ORDER BY date,id').fetchall()]
-    output = io.StringIO()
-    output.write('\ufeff')
-    writer = csv.writer(output)
-    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '处理/付款备注', '最近付款时间', '累计已报销（原币种）', '剩余待报销（原币种）', '逐次付款明细', '支出方式'])
-    from decimal import Decimal
-    def safe(value):
-        value = str(value or '')
-        return "'" + value if value.lstrip().startswith(('=', '+', '-', '@', '\t', '\r')) else value
-    for row in rows:
-        amount = format(Decimal(row['amount_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f')
-        paid = format(Decimal(row['reimbursed_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f')
-        due = format(Decimal(row['amount_minor'] - row['reimbursed_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f') if row['kind'] == 'expense' and row['status'] == 'pending' else ''
-        writer.writerow([row['id'], row['kind'], row['date'], safe(row['description']), safe(row['payer_name']),
-                         amount, row['currency'], '部分报销' if row['status'] == 'pending' and row['reimbursed_minor'] else row['status'], row['source'], safe(row['note']), safe(row['review_note']), row['paid_at'], paid, due,
-                         safe(json.dumps(row['payments'], ensure_ascii=False)) if row['payments'] else '',
-                         {'public': '公账支出', 'advance': '成员垫付'}.get(row['expense_type'], '')])
-    return StreamingResponse(iter([output.getvalue()]), media_type='text/csv; charset=utf-8',
-                             headers={'Content-Disposition': 'attachment; filename="team-ledger.csv"'})
+    result = excel_export.build_excel_export(
+        kind=kind,
+        status=status,
+        currency_code=currency,
+        payer_id=payer,
+        date_from=date_from,
+        date_to=date_to,
+        text=q,
+        ids=ids,
+        base=base,
+        include_voided=include_voided,
+        include_receipts=include_receipts,
+    )
+    return Response(
+        content=result['content'],
+        media_type=excel_export.EXCEL_MEDIA_TYPE,
+        headers={
+            'Content-Disposition': excel_export.content_disposition_header(
+                result['filename'],
+                result['ascii_filename'],
+            ),
+        },
+    )
 
 
 @app.get('/')

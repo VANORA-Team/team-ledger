@@ -27,7 +27,7 @@ DOMAIN_ALIASES = {
 HELP = (
     '发送「绑定 绑定码」绑定账号。绑定后发送 /start 或「菜单」打开按钮菜单；'
     '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「收入 100 CNY 收款」'
-    '或「最近账目」「余额」「待报销」。配置 AI 后支持自然语言多笔记账与查询，确认后才会入账。'
+    '或「最近账目」「余额」「待报销」「导出Excel」。配置 AI 后支持自然语言多笔记账与查询，确认后才会入账。'
     '群聊中 @机器人发送 /groupid 获取群 ID 并加入 Web 允许名单即可使用。'
 )
 
@@ -269,6 +269,9 @@ def process_one():
             ).fetchone()
         if text in ('菜单', '主菜单'):
             ui_event = {'text': '/start', 'group': False}
+        elif re.fullmatch(r'导出(?:\s*(?:excel|xlsx|表格|账单|报表))?(?:\s+.+)?', text, flags=re.IGNORECASE):
+            rest = re.sub(r'^导出(?:\s*(?:excel|xlsx|表格|账单|报表))?', '', text, flags=re.IGNORECASE).strip()
+            ui_event = {'text': ('/export ' + rest).strip(), 'group': False}
         elif text.startswith('/') or active_draft:
             ui_event = {'text': text, 'group': False}
     if ui_event is not None:

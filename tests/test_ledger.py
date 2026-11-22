@@ -561,13 +561,20 @@ class LedgerTest(unittest.TestCase):
         conf['currencies']=[c for c in conf['currencies'] if c['code']!='JPY']
         self.assertEqual(self.client.put('/api/settings',json=conf,headers=self.headers).status_code,400)
 
-    def test_csv_is_formula_safe_and_has_original_currency(self):
+    def test_excel_is_formula_safe_and_has_original_currency(self):
+        import io
+        from openpyxl import load_workbook
         self.entry(description='=SUM(1,2)',currency='USD')
         response=self.client.get('/api/export')
         self.assertEqual(response.status_code,200)
-        self.assertIn("'=SUM",response.text)
-        self.assertIn('USD',response.text)
-        self.assertIn('原币种',response.text)
+        self.assertIn('spreadsheetml.sheet',response.headers.get('content-type',''))
+        wb=load_workbook(io.BytesIO(response.content))
+        ws=wb['收支明细']
+        headers=[cell.value for cell in ws[1]]
+        row=dict(zip(headers,[cell.value for cell in ws[2]]))
+        self.assertEqual(row['用途 / 说明'],"'=SUM(1,2)")
+        self.assertEqual(row['币种'],'USD')
+        self.assertIn('金额（原币种）',headers)
 
     def test_receipt_is_private_and_validated(self):
         e=self.entry()

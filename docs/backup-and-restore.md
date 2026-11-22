@@ -64,4 +64,4 @@
 
 - **密钥保管**：备份 ZIP 内包含成员身份绑定、数据库里的飞书应用密钥与 AI API Key（旧版兼容库中可能残留历史 `password_hash`），请妥善加密保存；`.env`（含 `VANORA_OIDC_CLIENT_SECRET`、Telegram Token 等）及 `DATA_DIR/backup-control.json`（含 WebDAV / S3 凭据，密码不通过 API 返回，网页留空表示保留原值）需另行安全保管。
 - **大小上限**：上传与远程下载默认上限为 `256 MiB`，可通过 `.env` 的 `BACKUP_MAX_BYTES=268435456` 调整；解压总量限制为该值的 4 倍且最多 50,000 个文件。反向代理需相应放宽请求体大小与超时时间。
-- **离线冷备份**：也可在停止 Web 与机器人进程后直接复制整个 `DATA_DIR` 或 Docker `ledger-data` 命名卷（恢复时务必将数据库与 `receipts/` 一并恢复）。**CSV 导出仅含账目摘要，不能替代完整备份**。
+- **离线冷备份**：也可在停止 Web 与机器人进程后直接复制整个 `DATA_DIR` 或 Docker `ledger-data` 命名卷（恢复时务必将数据库与 `receipts/` 一并恢复）。**Excel 导出仅含账目报表与压缩预览图，不能替代完整备份**。

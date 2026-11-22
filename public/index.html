@@ -272,6 +272,84 @@
     </form>
   </dialog>
 
+  <dialog id="export-dialog" class="modal export-dialog" aria-labelledby="export-title">
+    <form id="export-form" class="modal-form">
+      <div class="modal-heading">
+        <h2 id="export-title">导出 Excel 报表</h2>
+        <button type="button" class="icon-button" data-close aria-label="关闭"></button>
+      </div>
+      <p class="modal-description">导出多工作表 Excel（.xlsx），包含资金汇总、收支明细、逐次报销付款、成员待报销及收据凭证。</p>
+      <div class="export-presets" id="export-presets" role="group" aria-label="快捷导出范围"></div>
+      <div class="export-selection-banner" id="export-selection-banner" hidden>
+        <span id="export-selection-text"></span>
+        <button type="button" class="button button-quiet btn small" id="export-clear-ids">切换为按条件筛选</button>
+      </div>
+      <div id="export-filter-fields" class="export-filter-fields">
+        <div class="form-grid">
+          <label>
+            <span>开始日期 <small class="optional">选填</small></span>
+            <input type="date" name="from">
+          </label>
+          <label>
+            <span>结束日期 <small class="optional">选填</small></span>
+            <input type="date" name="to">
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span>业务类型</span>
+            <select name="kind">
+              <option value="all">全部类型</option>
+              <option value="public">公账支出</option>
+              <option value="advance">成员垫付</option>
+              <option value="income">团队收入</option>
+            </select>
+          </label>
+          <label>
+            <span>账目状态</span>
+            <select name="status"></select>
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span>币种</span>
+            <select name="currency"></select>
+          </label>
+          <label>
+            <span>成员 / 经手人</span>
+            <select name="payer"></select>
+          </label>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span>关键词 <small class="optional">选填</small></span>
+            <input name="q" maxlength="120" placeholder="按用途、备注或成员筛选">
+          </label>
+          <label>
+            <span>汇总参考币种</span>
+            <select name="base"></select>
+          </label>
+        </div>
+      </div>
+      <label class="export-check-row">
+        <input type="checkbox" name="include_receipts" checked>
+        <span>
+          <strong>内嵌收据凭证</strong>
+          <small>在「收支明细」显示收据缩略图，并附带「收据凭证」大图工作表（PDF 凭证保留文件名与链接）</small>
+        </span>
+      </label>
+      <div class="export-preview-box" id="export-preview" aria-live="polite"></div>
+      <div class="form-error" id="export-error" role="alert"></div>
+      <div class="modal-actions modal-actions-split">
+        <button type="button" class="button button-quiet" id="export-reset">重置范围</button>
+        <div class="modal-actions-group">
+          <button type="button" class="button button-outline" data-close>取消</button>
+          <button type="submit" class="button button-primary" id="export-submit">导出 Excel</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="confirm-dialog" class="modal small" aria-labelledby="confirm-title">
     <form id="confirm-form" class="modal-form">
       <div class="modal-heading">

@@ -1,12 +1,14 @@
 """Telegram long-polling worker with durable replies. One worker per database."""
 import json
 import os
+import secrets
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from fastapi import HTTPException
-from . import ai, ai_context, ai_plan, config, fx, permissions_sync
+from . import ai, ai_context, ai_plan, config, excel_export, fx, permissions_sync
 from .db import db, init_db, settings, set_setting
 from .bot_ui import (COMMANDS, DELIVERY, PLATFORM, accepts_text, command_text, draft_for, handle,
                      queue, say, nav)
@@ -164,13 +166,17 @@ class TelegramError(RuntimeError):
         self.code, self.description = code, description
 
 
-def api(method, payload):
-    token = os.environ['TELEGRAM_BOT_TOKEN']
+def _tg_opener():
     proxy = os.getenv('TELEGRAM_PROXY_URL')
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({'https': proxy}) if proxy else urllib.request.ProxyHandler())
-    request = urllib.request.Request(f'https://api.telegram.org/bot{token}/{method}', data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({'https': proxy}) if proxy else urllib.request.ProxyHandler()
+    )
+
+
+def _tg_execute(request, timeout=40):
+    opener = _tg_opener()
     try:
-        with opener.open(request, timeout=40) as response:
+        with opener.open(request, timeout=timeout) as response:
             body = json.loads(response.read(4_000_000))
         if not body.get('ok'):
             raise TelegramError(body.get('error_code', 0), body.get('description', ''))
@@ -186,6 +192,64 @@ def api(method, payload):
     except Exception:
         # Request URLs contain the token. Never log the original urllib exception.
         raise TelegramError() from None
+
+
+def api(method, payload):
+    token = os.environ['TELEGRAM_BOT_TOKEN']
+    request = urllib.request.Request(
+        f'https://api.telegram.org/bot{token}/{method}',
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json'},
+    )
+    return _tg_execute(request, timeout=40)
+
+
+def _encode_multipart(fields, file_field, filename, data, content_type):
+    boundary = '----VanoraLedger' + secrets.token_hex(12)
+    chunks = []
+    for key, value in fields.items():
+        if value is None or value == '':
+            continue
+        chunks.append(
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+            f'{value}\r\n'.encode('utf-8')
+        )
+    safe_name = str(filename or 'team-ledger.xlsx').replace('"', '_').replace('\r', '').replace('\n', '')
+    encoded_name = urllib.parse.quote(safe_name, safe='')
+    chunks.append(
+        (
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{safe_name}"; filename*=UTF-8\'\'{encoded_name}\r\n'
+            f'Content-Type: {content_type}\r\n\r\n'
+        ).encode('utf-8')
+    )
+    chunks.append(data)
+    chunks.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+    return b''.join(chunks), f'multipart/form-data; boundary={boundary}'
+
+
+def send_document(chat_id, filename, content, caption='', thread_id=None):
+    token = os.environ['TELEGRAM_BOT_TOKEN']
+    fields = {'chat_id': str(chat_id)}
+    if caption:
+        fields['caption'] = str(caption)[:1024]
+    if thread_id:
+        fields['message_thread_id'] = str(thread_id)
+    body, content_type = _encode_multipart(
+        fields,
+        'document',
+        filename,
+        content,
+        excel_export.EXCEL_MEDIA_TYPE,
+    )
+    request = urllib.request.Request(
+        f'https://api.telegram.org/bot{token}/sendDocument',
+        data=body,
+        headers={'Content-Type': content_type},
+    )
+    return _tg_execute(request, timeout=60)
 
 
 def progress_start(chat_id, thread_id=None):
@@ -227,6 +291,43 @@ def progress_start(chat_id, thread_id=None):
     return stop, message_id
 
 
+def _deliver_excel_document(row, payload):
+    user_id = payload.get('user_id')
+    with db() as conn:
+        user_row = conn.execute('SELECT oidc_sub FROM users WHERE id=?', (user_id,)).fetchone() if user_id else None
+        linked_sub = user_row['oidc_sub'] if user_row else None
+    if linked_sub:
+        permissions_sync.sync_member(linked_sub, force=False)
+    with db() as conn:
+        authorized = bool(user_id and conn.execute(
+            "SELECT 1 FROM tg_links l JOIN users u ON u.id=l.user_id "
+            "WHERE l.user_id=? AND u.active=1 AND u.role IN ('owner','finance')",
+            (user_id,),
+        ).fetchone())
+        conf = settings(conn)
+        chat_str = str(payload.get('chat_id', ''))
+        if authorized and chat_str.startswith('-') and chat_str not in conf['telegram_allowed_chats']:
+            authorized = False
+    if not authorized:
+        with db(write=True) as conn:
+            conn.execute('UPDATE tg_outbox SET sent=1 WHERE id=?', (row['id'],))
+        return True, None
+    try:
+        exported = excel_export.build_excel_export(**(payload.get('filters') or {}))
+    except HTTPException:
+        with db(write=True) as conn:
+            conn.execute('UPDATE tg_outbox SET attempts=8 WHERE id=?', (row['id'],))
+        return True, None
+    caption = excel_export.format_export_caption(exported, conf.get('team_name', ''))
+    return False, send_document(
+        payload['chat_id'],
+        exported['filename'],
+        exported['content'],
+        caption=caption,
+        thread_id=payload.get('message_thread_id'),
+    )
+
+
 def drain_outbox():
     with db() as conn:
         pending = [dict(r) for r in conn.execute('SELECT * FROM tg_outbox WHERE sent=0 AND attempts<8 ORDER BY id LIMIT 30')]
@@ -236,7 +337,12 @@ def drain_outbox():
         method = row['method']
         try:
             try:
-                result = api(method, payload)
+                if method == 'sendDocument' and payload.get('export') == 'excel':
+                    already_finalized, result = _deliver_excel_document(row, payload)
+                    if already_finalized:
+                        continue
+                else:
+                    result = api(method, payload)
             except TelegramError as exc:
                 if method == 'editMessageText' and exc.code == 400 and 'message is not modified' in exc.description.lower():
                     result = None

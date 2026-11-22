@@ -106,6 +106,7 @@ const state = {
   filter: {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''},
   reimburseTab: 'pending', selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
   action: null, base: null, loadId: 0,
+  exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
   ai: {busy: false, conversation: [], plan: null, selected: new Set(), error: ''},
 };
@@ -192,7 +193,9 @@ function triggerDownload(url, filename = '') {
       url: fullUrl,
       success: res => {
         if (res?.tempFilePath && typeof window.tt.openDocument === 'function') {
-          window.tt.openDocument({filePath: res.tempFilePath, showMenu: true});
+          const openOpts = {filePath: res.tempFilePath, showMenu: true};
+          if (String(filename).toLowerCase().endsWith('.xlsx')) openOpts.fileType = 'xlsx';
+          window.tt.openDocument(openOpts);
         } else {
           toast('文件已下载');
         }
@@ -725,7 +728,7 @@ function renderOverview() {
   return heading(
     '团队总览',
     '可用资金、待报销与最近动态，均按团队结算参考币种汇总。',
-    `${canManage() ? `<button type="button" class="button button-outline" data-export>${icon('download', 'ico-download')}导出 CSV</button>` : ''}${newButton()}`,
+    `${canManage() ? `<button type="button" class="button button-outline" data-export-open="overview">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`,
   ) + `
     <div class="console-activity-grid">
       <div class="console-activity-main">
@@ -844,13 +847,24 @@ function ledgerResults() {
   return table(rows) + `<div class="table-footer"><span>已显示 ${rows.length} / ${total} 笔 · 原始币种金额</span><span>点击账目查看详情与凭证</span></div>`;
 }
 
+function ledgerHasFilter() {
+  const f = state.filter;
+  return Boolean(f.text || f.kind !== 'all' || f.currency !== 'all' || f.payer !== 'all' || f.status !== 'all' || f.from || f.to);
+}
+
+function syncLedgerExportButton() {
+  const btn = $('#ledger-export-btn');
+  if (!btn) return;
+  btn.innerHTML = `${icon('download', 'ico-download')}${ledgerHasFilter() ? '导出筛选 Excel' : '导出 Excel'}`;
+}
+
 function renderLedger() {
   const f = state.filter;
-  const hasFilter = Boolean(f.text || f.kind !== 'all' || f.currency !== 'all' || f.payer !== 'all' || f.status !== 'all' || f.from || f.to);
+  const hasFilter = ledgerHasFilter();
   return heading(
     '收支明细',
-    '公账支出、成员垫付、团队进账统一归档，支持多维筛选与导出。',
-    `${canManage() ? `<button type="button" class="button button-outline" data-export>${icon('download', 'ico-download')}导出 CSV</button><button type="button" class="button button-outline" data-new="income">登记收入</button>` : ''}${newButton()}`,
+    '公账支出、成员垫付、团队进账统一归档，支持多维筛选与 Excel 导出。',
+    `${canManage() ? `<button type="button" class="button button-outline" id="ledger-export-btn" data-export-open="ledger">${icon('download', 'ico-download')}${hasFilter ? '导出筛选 Excel' : '导出 Excel'}</button><button type="button" class="button button-outline" data-new="income">登记收入</button>` : ''}${newButton()}`,
   ) + aiQuickBar() + `
     <section class="panel">
       <div class="filter-tabs" role="tablist" aria-label="收支类型筛选">
@@ -878,7 +892,7 @@ function reimbursementRows() {
 
 function batchToolbar() {
   const n = state.selected.size;
-  return `<span>已选 ${n} 笔${n ? ' · 不同币种会分别列示' : ''}</span>${state.reimburseTab === 'pending' ? '<button type="button" class="btn small primary" data-batch="pay">登记已付款</button>' : ''}${state.reimburseTab === 'draft' ? '<button type="button" class="btn small primary" data-batch="submit">记入账本</button>' : ''}`;
+  return `<span>已选 ${n} 笔${n ? ' · 不同币种会分别列示' : ''}</span>${canManage() ? `<button type="button" class="btn small button-outline" data-export-selected ${n ? '' : 'disabled'}>${icon('download', 'ico-download')}导出已选 Excel</button>` : ''}${state.reimburseTab === 'pending' ? '<button type="button" class="btn small primary" data-batch="pay">登记已付款</button>' : ''}${state.reimburseTab === 'draft' ? '<button type="button" class="btn small primary" data-batch="submit">记入账本</button>' : ''}`;
 }
 
 function renderReimbursements() {
@@ -886,7 +900,11 @@ function renderReimbursements() {
   const metric = k => r?.complete ? money(r[k], base) : '—';
   const rows = reimbursementRows();
   const selectable = canManage() && ['pending', 'draft'].includes(state.reimburseTab);
-  return heading('报销管理', '成员垫付记账后直接进入待报销，支持分次、跨币种登记已付款。', newButton()) + `
+  return heading(
+    '报销管理',
+    '成员垫付记账后直接进入待报销，支持分次、跨币种登记已付款。',
+    `${canManage() ? `<button type="button" class="button button-outline" data-export-open="reimbursements">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`,
+  ) + `
     <div class="reimbursement-summary">
       <div class="mini-stat"><small>全部待报销 · 参考换算</small><strong>${metric('due')}</strong></div>
       <div class="mini-stat"><small>当前可安排报销资金</small><strong>${metric('payable')}</strong></div>
@@ -970,7 +988,10 @@ function renderCalculator() {
     <section class="panel recent-panel">
       <div class="panel-heading">
         <div><h3>成员报销安排</h3><p>统一按 ${esc(base)} 参考换算 · 手动模式可直接勾选项目</p></div>
-        <a class="console-inline-link" href="#reimbursements">前往报销管理 ${icon('arrowUpRight', 'icon-sm')}</a>
+        <div class="panel-heading-actions">
+          ${canManage() ? `<button type="button" class="button button-outline btn small" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}
+          <a class="console-inline-link" href="#reimbursements">前往报销管理 ${icon('arrowUpRight', 'icon-sm')}</a>
+        </div>
       </div>
       <div id="plan-table">${planTable(r, c.mode === 'manual')}</div>
     </section>
@@ -1949,6 +1970,277 @@ document.addEventListener('pointerdown', event => {
   }
 });
 
+/* ============================================================================
+ * Excel Export Dialog (Range Filter + Receipt Embedding)
+ * ========================================================================== */
+
+function localIsoDate(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function exportSpecFromForm() {
+  const form = $('#export-form');
+  const ids = state.exportState.ids || [];
+  return {
+    ids,
+    from: form.elements.from.value.trim(),
+    to: form.elements.to.value.trim(),
+    kind: form.elements.kind.value || 'all',
+    status: form.elements.status.value || 'all',
+    currency: form.elements.currency.value || 'all',
+    payer: form.elements.payer.value || 'all',
+    q: form.elements.q.value.trim(),
+    base: form.elements.base.value || state.base || state.conf.reference_currency,
+    include_receipts: Boolean(form.elements.include_receipts.checked),
+  };
+}
+
+function exportMatchingEntries(spec) {
+  const idSet = spec.ids?.length ? new Set(spec.ids.map(Number)) : null;
+  const needle = (spec.q || '').toLowerCase();
+  return state.entries.filter(e => {
+    if (idSet) return idSet.has(e.id);
+    if (spec.kind === 'income' && e.kind !== 'income') return false;
+    if (spec.kind === 'public' && !(e.kind === 'expense' && e.expense_type === 'public')) return false;
+    if (spec.kind === 'advance' && !(e.kind === 'expense' && e.expense_type === 'advance')) return false;
+    if (spec.currency !== 'all' && e.currency !== spec.currency) return false;
+    if (spec.payer !== 'all' && e.payer_id !== Number(spec.payer)) return false;
+    if (spec.status === 'all') {
+      if (e.status === 'voided') return false;
+    } else if (spec.status === 'all_with_voided') {
+      // Include voided entries.
+    } else if (spec.status === 'partial') {
+      if (entryStatus(e) !== 'partial') return false;
+    } else if (e.status !== spec.status) {
+      return false;
+    }
+    if (spec.from && e.date < spec.from) return false;
+    if (spec.to && e.date > spec.to) return false;
+    if (needle) {
+      const hay = [`#${e.id}`, e.description, e.note, e.payer_name, e.review_note].join(' ').toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
+    return true;
+  });
+}
+
+function renderExportPresets() {
+  const wrap = $('#export-presets');
+  if (!wrap) return;
+  const presets = [];
+  if (state.exportState.source === 'ledger' && ledgerHasFilter()) {
+    presets.push(['current_filter', '当前筛选']);
+  }
+  if (state.exportState.ids.length) {
+    presets.push(['selected', `已勾选 ${state.exportState.ids.length} 笔`]);
+  }
+  presets.push(
+    ['all', '全部有效'],
+    ['month', '本月'],
+    ['last_month', '上月'],
+    ['last30', '近 30 天'],
+    ['pending', '待报销项目'],
+    ['all_with_voided', '全部（含作废）'],
+  );
+  wrap.innerHTML = presets.map(([key, label]) =>
+    `<button type="button" class="export-preset${state.exportState.activePreset === key ? ' active' : ''}" data-export-preset="${key}">${esc(label)}</button>`
+  ).join('');
+}
+
+function updateExportPreview() {
+  const form = $('#export-form');
+  if (!form) return;
+  const errEl = $('#export-error');
+  const previewEl = $('#export-preview');
+  const bannerEl = $('#export-selection-banner');
+  const fieldsEl = $('#export-filter-fields');
+  const submitEl = $('#export-submit');
+  const spec = exportSpecFromForm();
+  const hasIds = spec.ids.length > 0;
+
+  bannerEl.hidden = !hasIds;
+  fieldsEl.hidden = hasIds;
+  if (hasIds) {
+    $('#export-selection-text').textContent = `当前将仅导出已勾选的 ${spec.ids.length} 笔项目及其关联付款与收据。`;
+  }
+
+  errEl.textContent = '';
+  if (!hasIds && spec.from && spec.to && spec.from > spec.to) {
+    errEl.textContent = '开始日期不能晚于结束日期';
+    previewEl.innerHTML = '<strong>范围无效</strong><span>请调整开始日期与结束日期。</span>';
+    previewEl.classList.add('is-empty');
+    if (submitEl) submitEl.disabled = true;
+    return;
+  }
+  if (submitEl) submitEl.disabled = false;
+
+  const matched = exportMatchingEntries(spec);
+  const imgReceipts = matched.filter(e => e.receipt && e.receipt_type !== 'application/pdf').length;
+  const pdfReceipts = matched.filter(e => e.receipt && e.receipt_type === 'application/pdf').length;
+  const totalReceipts = imgReceipts + pdfReceipts;
+  const currencies = [...new Set(matched.map(e => e.currency))];
+  const receiptText = totalReceipts
+    ? (spec.include_receipts
+      ? `含 ${totalReceipts} 份收据（内嵌图片 ${imgReceipts} 张${pdfReceipts ? ` · PDF ${pdfReceipts} 份` : ''}）`
+      : `含 ${totalReceipts} 份收据（本次不内嵌图片）`)
+    : '无收据凭证';
+  previewEl.classList.toggle('is-empty', matched.length === 0);
+  if (matched.length === 0) {
+    previewEl.innerHTML = '<strong>当前范围暂无匹配账目（0 笔）</strong><span>仍可导出空报表，或调整上方筛选条件。</span>';
+  } else {
+    previewEl.innerHTML = `<strong>预计导出 ${matched.length} 笔账目</strong><span>${esc(receiptText)}${currencies.length ? ` · 币种 ${esc(currencies.join(' / '))}` : ''}</span>`;
+  }
+}
+
+function applyExportPreset(preset) {
+  const form = $('#export-form');
+  if (!form) return;
+  const now = new Date();
+  state.exportState.activePreset = preset;
+  if (preset !== 'selected') state.exportState.ids = [];
+
+  if (preset === 'current_filter') {
+    const f = state.filter;
+    form.elements.from.value = f.from || '';
+    form.elements.to.value = f.to || '';
+    form.elements.kind.value = f.kind || 'all';
+    form.elements.status.value = f.status || 'all';
+    form.elements.currency.value = f.currency || 'all';
+    form.elements.payer.value = f.payer || 'all';
+    form.elements.q.value = f.text || '';
+  } else if (preset === 'all') {
+    form.elements.from.value = '';
+    form.elements.to.value = '';
+    form.elements.kind.value = 'all';
+    form.elements.status.value = 'all';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  } else if (preset === 'all_with_voided') {
+    form.elements.from.value = '';
+    form.elements.to.value = '';
+    form.elements.kind.value = 'all';
+    form.elements.status.value = 'all_with_voided';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  } else if (preset === 'month') {
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    form.elements.from.value = localIsoDate(first);
+    form.elements.to.value = localIsoDate(now);
+    form.elements.kind.value = 'all';
+    form.elements.status.value = 'all';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  } else if (preset === 'last_month') {
+    const first = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const last = new Date(now.getFullYear(), now.getMonth(), 0);
+    form.elements.from.value = localIsoDate(first);
+    form.elements.to.value = localIsoDate(last);
+    form.elements.kind.value = 'all';
+    form.elements.status.value = 'all';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  } else if (preset === 'last30') {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
+    form.elements.from.value = localIsoDate(start);
+    form.elements.to.value = localIsoDate(now);
+    form.elements.kind.value = 'all';
+    form.elements.status.value = 'all';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  } else if (preset === 'pending') {
+    form.elements.from.value = '';
+    form.elements.to.value = '';
+    form.elements.kind.value = 'advance';
+    form.elements.status.value = 'pending';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  }
+  renderExportPresets();
+  updateExportPreview();
+}
+
+function openExportDialog(source = 'overview', explicitIds = null) {
+  if (!canManage()) {
+    toast('此操作需要财务管理员权限', true);
+    return;
+  }
+  const form = $('#export-form');
+  const statusOptions = [
+    ['all', '全部（不含已作废）'],
+    ['all_with_voided', '全部（含已作废）'],
+    ...Object.entries(STATUS),
+  ];
+  form.elements.status.innerHTML = options(statusOptions, x => x[0], x => x[1], 'all');
+  form.elements.currency.innerHTML = `<option value="all">全部币种</option>${options(state.conf.currencies, c => c.code, c => `${c.code} · ${c.name}`, 'all')}`;
+  form.elements.payer.innerHTML = `<option value="all">全部成员</option>${options(state.members, m => m.id, m => m.name, 'all')}`;
+  form.elements.base.innerHTML = currencyOptions(state.base || state.conf.reference_currency);
+  form.elements.include_receipts.checked = true;
+
+  state.exportState.source = source;
+  state.exportState.ids = Array.isArray(explicitIds) && explicitIds.length ? explicitIds.map(Number) : [];
+
+  if (state.exportState.ids.length) {
+    state.exportState.activePreset = 'selected';
+    renderExportPresets();
+    updateExportPreview();
+  } else if (source === 'ledger' && ledgerHasFilter()) {
+    applyExportPreset('current_filter');
+  } else if (source === 'reimbursements') {
+    state.exportState.activePreset = state.reimburseTab === 'pending' ? 'pending' : '';
+    form.elements.from.value = '';
+    form.elements.to.value = '';
+    form.elements.kind.value = 'advance';
+    form.elements.status.value = state.reimburseTab || 'pending';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+    renderExportPresets();
+    updateExportPreview();
+  } else if (source === 'calculator') {
+    if (state.calculator.mode === 'manual' && state.calculator.ids.size) {
+      state.exportState.ids = [...state.calculator.ids];
+      state.exportState.activePreset = 'selected';
+      renderExportPresets();
+      updateExportPreview();
+    } else {
+      applyExportPreset('pending');
+    }
+  } else {
+    applyExportPreset('all');
+  }
+  $('#export-dialog').showModal();
+}
+
+function buildExportUrl(spec) {
+  const params = new URLSearchParams();
+  if (spec.ids?.length) {
+    params.set('ids', spec.ids.join(','));
+  } else {
+    if (spec.kind && spec.kind !== 'all') params.set('kind', spec.kind);
+    if (spec.status && spec.status !== 'all') params.set('status', spec.status);
+    if (spec.currency && spec.currency !== 'all') params.set('currency', spec.currency);
+    if (spec.payer && spec.payer !== 'all') params.set('payer', spec.payer);
+    if (spec.from) params.set('from', spec.from);
+    if (spec.to) params.set('to', spec.to);
+    if (spec.q) params.set('q', spec.q);
+  }
+  if (spec.base) params.set('base', spec.base);
+  params.set('include_receipts', spec.include_receipts ? '1' : '0');
+  const query = params.toString();
+  const datePart = spec.from && spec.to ? `${spec.from}_${spec.to}` : (spec.from || spec.to || localIsoDate());
+  const filename = `team-ledger-${datePart}.xlsx`;
+  return {url: `/api/export.xlsx${query ? '?' + query : ''}`, filename};
+}
+
 document.addEventListener('click', async event => {
   const b = event.target.closest('button,a,tr');
   if (!b) return;
@@ -2013,9 +2305,35 @@ document.addEventListener('click', async event => {
     openEntry(b.dataset.new);
     return;
   }
-  if (b.hasAttribute('data-export')) {
+  if (b.hasAttribute('data-export-open')) {
     event.preventDefault();
-    triggerDownload('/api/export', 'team-ledger.csv');
+    openExportDialog(b.dataset.exportOpen || 'overview');
+    return;
+  }
+  if (b.hasAttribute('data-export-selected')) {
+    event.preventDefault();
+    const ids = [...state.selected];
+    if (!ids.length) {
+      toast('请先勾选要导出的项目', true);
+      return;
+    }
+    openExportDialog('reimbursements', ids);
+    return;
+  }
+  if (b.hasAttribute('data-export-preset')) {
+    event.preventDefault();
+    applyExportPreset(b.dataset.exportPreset);
+    return;
+  }
+  if (b.id === 'export-clear-ids') {
+    event.preventDefault();
+    state.exportState.ids = [];
+    applyExportPreset('all');
+    return;
+  }
+  if (b.id === 'export-reset') {
+    event.preventDefault();
+    applyExportPreset('all');
     return;
   }
   if (b.hasAttribute('data-income-link')) {
@@ -2301,6 +2619,14 @@ document.addEventListener('input', event => {
   if (el.id === 'search-entries') {
     state.filter.text = el.value;
     $('#ledger-results').innerHTML = ledgerResults();
+    syncLedgerExportButton();
+  }
+  if (el.closest('#export-form')) {
+    if (el.name !== 'include_receipts' && el.name !== 'base') {
+      state.exportState.activePreset = '';
+      renderExportPresets();
+    }
+    updateExportPreview();
   }
   if (el.id === 'auth-team-name') {
     syncAuthExternalLink();
@@ -2351,9 +2677,18 @@ document.addEventListener('change', async event => {
     }
     return;
   }
+  if (el.closest('#export-form')) {
+    if (el.name !== 'include_receipts' && el.name !== 'base') {
+      state.exportState.activePreset = '';
+      renderExportPresets();
+    }
+    updateExportPreview();
+    return;
+  }
   if (el.dataset.filter) {
     state.filter[el.dataset.filter] = el.value;
     $('#ledger-results').innerHTML = ledgerResults();
+    syncLedgerExportButton();
   }
   if (el.dataset.select) {
     const id = Number(el.dataset.select);
@@ -2425,6 +2760,19 @@ $('#auth-form').addEventListener('submit', event => {
   event.preventDefault();
   if (!state.boot?.oidc_configured) return;
   navigateExternal(buildOidcLoginUrl());
+});
+
+$('#export-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const spec = exportSpecFromForm();
+  if (!spec.ids.length && spec.from && spec.to && spec.from > spec.to) {
+    $('#export-error').textContent = '开始日期不能晚于结束日期';
+    return;
+  }
+  const {url, filename} = buildExportUrl(spec);
+  $('#export-dialog').close();
+  triggerDownload(url, filename);
+  toast('正在生成并下载 Excel 报表…');
 });
 
 $('#entry-form').addEventListener('submit', async event => {

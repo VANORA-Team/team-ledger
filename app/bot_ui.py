@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
-from . import ai_plan, config
+from . import ai_plan, config, excel_export
 from .db import settings
 from .domain import (add_entry, admin, can_manage_entry, currency, delete_entry, edit_entry, entry_view, fail,
                      is_finance, minor_amount, normalized_entry, require_entry_access, text_value,
@@ -21,7 +21,7 @@ STATUS = {'pending': '待报销', 'reimbursed': '已报销', 'draft': '草稿', 
 COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'), ('expense', '记录公账支出'), ('income', '记录团队收入'),
             ('ai', '自然语言记账'), ('recent', '最近账目与详情'), ('summary', '我的待报销明细'),
             ('team', '团队待报销明细'), ('funds', '资金计算、模拟进账与一键报销'), ('today', '今日收支'),
-            ('month', '本月收支'), ('cancel', '取消当前填写'), ('help', '使用帮助')]
+            ('month', '本月收支'), ('export', '导出 Excel 账本报表'), ('cancel', '取消当前填写'), ('help', '使用帮助')]
 
 
 def queue(conn, method, payload):
@@ -105,11 +105,12 @@ def reference(value, code, conf, rates):
 def menu(conn, user, chat_id):
     conf = settings(conn)
     count = conn.execute("SELECT COUNT(*) FROM entries WHERE payer_id=? AND status='pending'", (user['id'],)).fetchone()[0]
+    bottom_row = [button('📥 导出 Excel', 'export'), button('使用帮助', 'help')] if is_finance(user) else [button('使用帮助', 'help')]
     rows = [[button('💸 成员垫付', 'new'), button('本月收支', 'period:month')],
             [button('✨ AI 记账', 'ai'), button('📋 最近账目', 'list:recent:0')],
             [button(f'🙋 我的待报销 · {count}', 'list:mine:0'), button('👥 团队待报销', 'list:team:0')],
             [button('📊 资金与付款项目', 'funds'), button('📅 今日收支', 'period:today')],
-            [button('使用帮助', 'help')]]
+            bottom_row]
     if is_finance(user):
         rows.insert(0, [button('🏦 公账支出', 'newpublic'), button('💰 团队收入', 'newincome')])
     draft = conn.execute("SELECT token FROM tg_drafts WHERE user_id=? AND chat_id=? AND expires>? AND step<>'funds_receipt'",
@@ -131,10 +132,75 @@ def help_menu(conn, chat_id):
         '记账：点公账支出 / 成员垫付 / 团队收入，选币种、输入金额即可预览；用途、备注选填。预览可修改金额、币种、日期、用途、备注和成员，编辑用途或备注时发送 - 清空。\n'
         '🤖 AI：私聊直接说「昨天打车花了35元」，群里使用 /ai 记账内容；也可以一次说一段话，核对清单后才入账。\n'
         '查账：最近账目、个人与团队待报销均可翻页，点项目查看详情。\n'
-        '账本所有者和财务管理员可登记公账支出、收入与报销。/funds 可模拟进账、查看具体项目。\n'
+        '账本所有者和财务管理员可登记公账支出、收入与报销，并使用 /export 导出含收据的 Excel（.xlsx）报表（支持按月、待报销或自定义日期范围）。/funds 可模拟进账、查看具体项目。\n'
         '一键报销：选择记账 / 结算货币，核对全部项目后确认已转账。模拟收入不会自动入账，也不会用于实际付款。\n'
         + group_help +
         '取消：/cancel；返回菜单：/start。凭证文件请到 Web 上传。', [nav()], edit=True)
+
+
+def show_export_menu(conn, user, chat_id):
+    admin(user)
+    say(
+        conn,
+        chat_id,
+        '📥 导出 Excel 报表（.xlsx）\n\n'
+        '报表包含：资金汇总、收支明细（含收据预览）、逐次报销付款、成员待报销及收据大图工作表。\n'
+        '选择下方导出范围，或直接发送：\n'
+        '/export 2026-11\n'
+        '/export 2026-11-01 2026-11-22',
+        [
+            [button('📅 本月账目', 'x:month'), button('📆 上月账目', 'x:last_month')],
+            [button('📋 全部有效账目', 'x:all'), button('🧾 全部待报销', 'x:pending')],
+            [button('🗂️ 全部（含已作废）', 'x:all_voided'), button('🔍 自定义日期范围', 'x:range')],
+            [button('🏠 主菜单', 'home')],
+        ],
+        edit=True,
+    )
+
+
+def queue_excel_export(conn, user, chat_id, filters_spec):
+    admin(user)
+    validated = excel_export.parse_export_filters(conn, **filters_spec)
+    scope_label = excel_export._build_scope_label(validated)
+    ctx = DELIVERY.get()
+    say(
+        conn,
+        chat_id,
+        f'📊 正在生成并发送 Excel 报表\n范围：{scope_label}\n\n'
+        '包含资金汇总、收支明细、逐次报销付款、成员待报销及收据凭证，文件将随后发送到当前会话。',
+        [[button('📥 导出其他范围', 'export'), button('🏠 主菜单', 'home')]],
+        edit=True,
+    )
+    payload = {
+        'chat_id': chat_id,
+        'user_id': user['id'],
+        'export': 'excel',
+        'filters': filters_spec,
+    }
+    if ctx.get('thread_id'):
+        payload['message_thread_id'] = ctx['thread_id']
+    queue(conn, 'sendDocument', payload)
+
+
+def export_callback(conn, user, telegram_id, chat_id, data):
+    admin(user)
+    parts = data.split(':', 1)
+    preset = parts[1] if len(parts) == 2 else ''
+    if preset == 'range':
+        new_draft(conn, user, telegram_id, chat_id, payload={'_flow': 'export'}, step='export_range')
+        ask(
+            conn,
+            chat_id,
+            draft_for(conn, telegram_id, chat_id),
+            'export_range',
+            '请输入导出日期范围：\n• 单月：2026-11\n• 区间：2026-11-01 2026-11-22\n• 单日：2026-11-22',
+        )
+        return
+    if preset in ('month', 'last_month', 'all', 'pending', 'all_voided'):
+        filters_spec = excel_export.parse_export_shortcut(preset)
+        queue_excel_export(conn, user, chat_id, filters_spec)
+        return
+    fail('导出选项无效，请重新选择')
 
 
 def new_draft(conn, user, telegram_id, chat_id, payload=None, step=None):
@@ -387,7 +453,8 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
                      'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'edit_description': '用途 / 收入说明选填，发送 - 跳过 / 清空。',
                      'edit_note': '请输入备注，发送 - 清空。', 'pay_note': '请输入付款方式 / 付款参考号。',
                      'pay_amount': f'请输入本次实际已报销金额（{payload.get("_quote",{}).get("currency","")}），发送 全额 报销剩余全部。',
-                     'void_note': '请输入作废原因。', 'ai_text': '🤖 请描述收支，可以一次说一段话。'}
+                     'void_note': '请输入作废原因。', 'ai_text': '🤖 请描述收支，可以一次说一段话。',
+                     'export_range': '请输入导出日期范围（如 2026-11 或 2026-11-01 2026-11-22）。'}
             ask(conn, chat_id, draft, step, hints.get(step, '请继续填写。'))
     elif action == 'paycur' and len(parts) == 4 and step == 'pay_currency':
         payload['_quote'] = make_payment_quote(conn, user, payload['_entry_id'], parts[3], rates)
@@ -547,6 +614,15 @@ def handle(conn, update, ai_result=None, ai_error=None, rates=None, ai_context=N
     elif command == '/funds' or data == 'funds':
         from . import bot_funds
         bot_funds.start(conn, user, telegram_id, chat_id, rates)
+    elif command == '/export' or data == 'export':
+        admin(user)
+        if command == '/export' and argument:
+            filters_spec = excel_export.parse_export_shortcut(argument)
+            queue_excel_export(conn, user, chat_id, filters_spec)
+        else:
+            show_export_menu(conn, user, chat_id)
+    elif data.startswith('x:'):
+        export_callback(conn, user, telegram_id, chat_id, data)
     elif command in ('/book', '/income', '/expense') or data in ('new', 'newincome', 'newpublic'):
         if command in ('/income', '/expense') or data in ('newincome', 'newpublic'):
             admin(user)
@@ -662,6 +738,12 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
             return
         if step == 'ai_text':
             pass
+        elif step == 'export_range':
+            admin(user)
+            filters_spec = excel_export.parse_export_shortcut(text)
+            conn.execute('DELETE FROM tg_drafts WHERE token=?', (draft['token'],))
+            queue_excel_export(conn, user, chat_id, filters_spec)
+            return
         elif step == 'pay_amount':
             amount = payload['_quote']['maximum_amount'] if text == '全额' else text
             payment_preview(conn, user, payload['_entry_id'], amount, payload['_quote']['id'])

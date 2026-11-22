@@ -1,10 +1,10 @@
 """Public expenses affect cash immediately; member advances require reimbursement."""
-import csv
 import io
 import json
 import secrets
 import unittest
 from unittest.mock import patch
+from openpyxl import load_workbook
 
 from app import bot, config, fx
 from app.db import db, init_db
@@ -135,16 +135,19 @@ class ExpenseTypesTest(unittest.TestCase):
         self.assertNotEqual(plan['items'][0]['id'], public['id'])
         self.assertEqual(plan['items'][0]['amount'], '30.00')
 
-    def test_csv_distinguishes_expense_types_without_dividend_rows(self):
+    def test_excel_distinguishes_expense_types_without_dividend_rows(self):
         self.entry(kind='income', amount='100')
         self.entry(expense_type='public', amount='20', description='公账服务器')
         self.entry(amount='10', description='个人打车')
-        rows = list(csv.DictReader(io.StringIO(self.client.get('/api/export').text.lstrip('\ufeff'))))
-        by_name = {row['用途']: row for row in rows}
-        self.assertEqual(by_name['公账服务器']['支出方式'], '公账支出')
-        self.assertEqual(by_name['个人打车']['支出方式'], '成员垫付')
-        self.assertEqual(by_name['公账服务器']['剩余待报销（原币种）'], '')
-        self.assertTrue(all(row['类型'] != 'dividend' for row in rows))
+        wb = load_workbook(io.BytesIO(self.client.get('/api/export').content))
+        ws = wb['收支明细']
+        headers = [cell.value for cell in ws[1]]
+        rows = [dict(zip(headers, [cell.value for cell in r])) for r in ws.iter_rows(min_row=2)]
+        by_name = {row['用途 / 说明']: row for row in rows}
+        self.assertEqual(by_name['公账服务器']['业务类型'], '公账支出')
+        self.assertEqual(by_name['个人打车']['业务类型'], '成员垫付')
+        self.assertIsNone(by_name['公账服务器']['剩余待报销（原币种）'])
+        self.assertTrue(all(row['业务类型'] != 'dividend' for row in rows))
 
     def test_removed_dividend_endpoints_and_report_fields(self):
         self.assertEqual(self.client.get('/api/dividends').status_code, 404)

@@ -1,4 +1,3 @@
-import csv
 import io
 import secrets
 import time
@@ -6,6 +5,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from fastapi import HTTPException
+from openpyxl import load_workbook
 from tests import test_ledger as base
 from app.db import db, init_db, set_setting
 from app.domain import transition
@@ -183,10 +183,18 @@ class PartialPaymentTest(unittest.TestCase):
     def test_export_includes_paid_and_remaining_in_original_currency(self):
         entry = self.entry(amount='100',currency='USD')
         self.pay(self.quote(entry,'CNY'),'280')
-        rows = list(csv.reader(io.StringIO(self.client.get('/api/export').text.lstrip('\ufeff'))))
-        record = dict(zip(rows[0],rows[1]))
-        self.assertEqual(record['累计已报销（原币种）'],'40.00')
-        self.assertEqual(record['剩余待报销（原币种）'],'60.00')
+        wb = load_workbook(io.BytesIO(self.client.get('/api/export').content))
+        ws = wb['收支明细']
+        headers = [cell.value for cell in ws[1]]
+        record = dict(zip(headers,[cell.value for cell in ws[2]]))
+        self.assertEqual(float(record['累计已报销（原币种）']),40.0)
+        self.assertEqual(float(record['剩余待报销（原币种）']),60.0)
+        ws_pay = wb['逐次报销付款']
+        p_headers = [cell.value for cell in ws_pay[1]]
+        p_record = dict(zip(p_headers,[cell.value for cell in ws_pay[2]]))
+        self.assertEqual(float(p_record['实付金额']),280.0)
+        self.assertEqual(p_record['实付币种'],'CNY')
+        self.assertEqual(float(p_record['抵扣原币金额']),40.0)
 
 
 if __name__ == '__main__':

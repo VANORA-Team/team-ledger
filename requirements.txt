@@ -4,3 +4,5 @@ tzdata>=2024.1
 lark-oapi>=1.7.5,<1.8
 boto3>=1.36,<2
 PyJWT[crypto]>=2.10,<3
+openpyxl>=3.1,<4
+Pillow>=10,<13

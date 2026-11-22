@@ -1,5 +1,6 @@
 """Isolated Feishu adapter for the shared interactive ledger flows."""
 import contextlib
+import io
 import json
 import logging
 import re
@@ -7,7 +8,8 @@ import secrets
 import time
 import uuid
 
-from . import bot, config
+from fastapi import HTTPException
+from . import bot, config, excel_export, permissions_sync
 from .db import db, settings
 
 LOG = logging.getLogger(__name__)
@@ -115,7 +117,7 @@ def _card_template(text, is_callback_error=False):
         return 'orange'
     if first.startswith('✅'):
         return 'green'
-    if first.startswith(('🧮', '📊', '🤖')):
+    if first.startswith(('🧮', '📊', '🤖', '📥')):
         return 'wathet'
     return 'grey'
 
@@ -228,12 +230,120 @@ def _try_patch(client, message_id, card_json):
         return False
 
 
+def _record_outbox_failure(row, code, kind_label):
+    with db(write=True) as conn:
+        if code in PERMANENT_FEISHU_CODES:
+            conn.execute("UPDATE fsui_outbox SET attempts=?,payload='{}' WHERE id=?", (MAX_ATTEMPTS, row['id']))
+            LOG.warning('Dropping permanent Feishu %s failure (code %s, row %s)', kind_label, code, row['id'])
+            return True
+        next_attempts = int(row.get('attempts', 0)) + 1
+        if next_attempts >= MAX_ATTEMPTS:
+            conn.execute("UPDATE fsui_outbox SET attempts=?,payload='{}' WHERE id=?", (next_attempts, row['id']))
+        else:
+            conn.execute('UPDATE fsui_outbox SET attempts=? WHERE id=?', (next_attempts, row['id']))
+    raise RuntimeError(f'Feishu {kind_label} send failed (code {code})')
+
+
+def _send_document_one(client, row):
+    from lark_oapi.api.im.v1 import (
+        CreateFileRequest,
+        CreateFileRequestBody,
+        CreateMessageRequest,
+        CreateMessageRequestBody,
+    )
+    payload = json.loads(row['payload'])
+    payload.setdefault('chat_id', payload.get('_fs_chat'))
+    actor = str(payload.get('_fs_actor') or '')
+    with db() as conn:
+        identity = conn.execute(
+            'SELECT i.open_id, l.user_id, u.oidc_sub FROM fsui_identities i '
+            'JOIN fsui_links l ON l.telegram_id=CAST(i.id AS TEXT) '
+            'JOIN feishu_links f ON f.open_id=i.open_id AND f.user_id=l.user_id '
+            'JOIN users u ON u.id=l.user_id WHERE i.id=?',
+            (actor,),
+        ).fetchone()
+        linked_sub = identity['oidc_sub'] if identity else None
+    if linked_sub:
+        permissions_sync.sync_member(linked_sub, force=False)
+    with db() as conn:
+        authorized_row = conn.execute(
+            "SELECT l.user_id FROM fsui_identities i "
+            "JOIN fsui_links l ON l.telegram_id=CAST(i.id AS TEXT) "
+            "JOIN feishu_links f ON f.open_id=i.open_id AND f.user_id=l.user_id "
+            "JOIN users u ON u.id=l.user_id AND u.active=1 AND u.role IN ('owner','finance') "
+            "WHERE i.id=?",
+            (actor,),
+        ).fetchone()
+        allowed_chat = (not payload.get('_fs_group')) or str(payload.get('chat_id')) in settings(conn)['feishu_allowed_chats']
+    if not authorized_row or not allowed_chat:
+        with db(write=True) as conn:
+            conn.execute("UPDATE fsui_outbox SET sent=1,payload='{}' WHERE id=?", (row['id'],))
+        return True
+
+    file_key = payload.get('_fs_file_key')
+    msg_uuid = payload.get('_fs_uuid')
+    if not file_key:
+        try:
+            exported = excel_export.build_excel_export(**(payload.get('filters') or {}))
+        except HTTPException:
+            with db(write=True) as conn:
+                conn.execute("UPDATE fsui_outbox SET attempts=?,payload='{}' WHERE id=?", (MAX_ATTEMPTS, row['id']))
+            return True
+        upload_body = (
+            CreateFileRequestBody.builder()
+            .file_type('xls')
+            .file_name(exported['filename'])
+            .file(io.BytesIO(exported['content']))
+            .build()
+        )
+        upload_req = CreateFileRequest.builder().request_body(upload_body).build()
+        upload_resp = client.im.v1.file.create(upload_req)
+        if not upload_resp or not upload_resp.success():
+            code = getattr(upload_resp, 'code', None)
+            return _record_outbox_failure(row, code, 'file upload')
+        file_key = getattr(getattr(upload_resp, 'data', None), 'file_key', None)
+        if not file_key:
+            return _record_outbox_failure(row, None, 'file upload')
+        msg_uuid = str(uuid.uuid4())
+        payload['_fs_file_key'] = file_key
+        payload['_fs_uuid'] = msg_uuid
+        with db(write=True) as conn:
+            conn.execute('UPDATE fsui_outbox SET payload=? WHERE id=?', (json.dumps(payload, ensure_ascii=False), row['id']))
+
+    body = (
+        CreateMessageRequestBody.builder()
+        .receive_id(str(payload['chat_id']))
+        .msg_type('file')
+        .content(json.dumps({'file_key': file_key}, ensure_ascii=False))
+        .uuid(msg_uuid or str(uuid.uuid4()))
+        .build()
+    )
+    req = CreateMessageRequest.builder().receive_id_type('chat_id').request_body(body).build()
+    response = client.im.v1.message.create(req)
+    if not response.success():
+        code = getattr(response, 'code', None)
+        return _record_outbox_failure(row, code, 'file message')
+    with db(write=True) as conn:
+        conn.execute("UPDATE fsui_outbox SET sent=1,payload='{}' WHERE id=?", (row['id'],))
+    return True
+
+
 def send_one(client):
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
-    with db(write=True) as conn:
-        row = conn.execute(
+    with db() as conn:
+        peek = conn.execute(
             'SELECT * FROM fsui_outbox WHERE sent=0 AND attempts<? ORDER BY id LIMIT 1',
             (MAX_ATTEMPTS,),
+        ).fetchone()
+    if not peek:
+        return False
+    peek = dict(peek)
+    if peek['method'] == 'sendDocument':
+        return _send_document_one(client, peek)
+    with db(write=True) as conn:
+        row = conn.execute(
+            'SELECT * FROM fsui_outbox WHERE id=? AND sent=0 AND attempts<?',
+            (peek['id'], MAX_ATTEMPTS),
         ).fetchone()
         if not row:
             return False
@@ -264,17 +374,7 @@ def send_one(client):
         response = client.im.v1.message.create(req)
         if not response.success():
             code = getattr(response, 'code', None)
-            with db(write=True) as conn:
-                if code in PERMANENT_FEISHU_CODES:
-                    conn.execute("UPDATE fsui_outbox SET attempts=?,payload='{}' WHERE id=?", (MAX_ATTEMPTS, row['id']))
-                    LOG.warning('Dropping permanent Feishu card failure (code %s, row %s)', code, row['id'])
-                    return True
-                next_attempts = int(row.get('attempts', 0)) + 1
-                if next_attempts >= MAX_ATTEMPTS:
-                    conn.execute("UPDATE fsui_outbox SET attempts=?,payload='{}' WHERE id=?", (next_attempts, row['id']))
-                else:
-                    conn.execute('UPDATE fsui_outbox SET attempts=? WHERE id=?', (next_attempts, row['id']))
-            raise RuntimeError(f'Feishu card send failed (code {code})')
+            return _record_outbox_failure(row, code, 'card')
         fs_message_id = getattr(response.data, 'message_id', None)
     with db(write=True) as conn:
         if fs_message_id:

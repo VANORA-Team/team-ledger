@@ -15,7 +15,7 @@ run.py                               Web 服务启动入口（加载 .env 并启
 compose.yaml                         Docker Compose 编排（web / telegram / feishu 三服务）
 Dockerfile                           Python 3.12-slim 非 root（UID 10001）镜像与健康检查
 .env.example                         环境变量配置模板
-requirements.txt                     运行期依赖（fastapi / uvicorn / tzdata / lark-oapi / boto3 / PyJWT[crypto]）
+requirements.txt                     运行期依赖（fastapi / uvicorn / tzdata / lark-oapi / boto3 / PyJWT[crypto] / openpyxl / Pillow）
 requirements-dev.txt                 测试附加依赖（httpx）
 .github/workflows/docker-publish.yml CI 测试、JS 语法检查、AMD64 冒烟与双架构 GHCR 发布
 docs/                                分主题详细文档
@@ -30,7 +30,8 @@ app/db.py                   SQLite WAL 连接、表结构定义、会话事务�
 app/oidc.py                 Vanora OAuth（OIDC）客户端：Discovery/JWKS 缓存、PKCE S256、RS256 验签、客户端角色提取、vanora-permissions 客户端认证查询与后端注销
 app/permissions_sync.py     Vanora OAuth 只读成员投影同步、TTL 缓存校验与降级/停用即时会话及待确认状态清理
 app/domain.py               三角色权限校验、成员视图、账目与部分报销核心规则
-app/main.py                 FastAPI 应用、安全响应头、限流、OIDC 认证 / 后端注销、只读成员同步、账目 / 导出 / 集成 API 与 SPA 壳层
+app/excel_export.py         多工作表 Excel（.xlsx）报表构建、范围筛选、EXIF/缩放内嵌收据与公式注入防护
+app/main.py                 FastAPI 应用、安全响应头、限流、OIDC 认证 / 后端注销、只读成员同步、账目 / Excel 导出 / 集成 API 与 SPA 壳层
 
 app/fx.py                   Frankfurter v1/v2 汇率拉取、SQLite 缓存与跨币种资金汇总
 app/reimbursement_plan.py   报销计划模式（自动 / 预算 / 手动勾选）校验与计算
@@ -56,8 +57,8 @@ app/backup_api.py           账本所有者专属的 /api/backups/* 备份恢复
 ### 前端零构建静态资源（`public/`）
 
 ```text
-public/index.html           SPA 入口页面、Vanora OAuth 登录壳与 7 个原生 <dialog> 弹窗 / 抽屉
-public/app.js               7 个哈希路由视图、OIDC 登录与只读成员名录同步、权限显隐、AI 助手抽屉、凭证预览与飞书 WebView 适配
+public/index.html           SPA 入口页面、Vanora OAuth 登录壳与 8 个原生 <dialog> 弹窗 / 抽屉
+public/app.js               7 个哈希路由视图、OIDC 登录与只读成员名录同步、权限显隐、范围筛选 Excel 导出、AI 助手抽屉、凭证预览与飞书 WebView 适配
 public/style.css            浅色 Vanora 建筑工作区主题、响应式布局与安全区样式
 public/backups.js           团队设置内嵌的数据备份、测试连接、自动计划与恢复前端逻辑
 public/backups.css          备份与恢复面板样式
@@ -67,12 +68,13 @@ public/fonts/               自托管 Space Grotesk Variable 与 IBM Plex Mono �
 
 ### 自动化测试（`tests/`）
 
-共 **11 个测试模块、248 项测试用例**（搭配公共测试辅助 `tests/oidc_helper.py`）：
+共 **12 个测试模块、255 项测试用例**（搭配公共测试辅助 `tests/oidc_helper.py`）：
 
 ```text
 tests/oidc_helper.py              RS256 OIDC 内存测试桩（PKCE S256、JWKS 轮换、客户端角色、vanora-permissions 接口与 Logout Token 签发）
 tests/test_oidc.py                Vanora OAuth 全流程、客户端角色映射、权限同步、Back-channel Logout 撤销、TTL 实时同步与深链保留
-tests/test_ledger.py              会话、CSRF、三角色 RBAC、移除本地成员管理端点校验、凭证预览/下载、嵌入安全头与导出
+tests/test_ledger.py              会话、CSRF、三角色 RBAC、移除本地成员管理端点校验、凭证预览/下载、嵌入安全头与导出权限
+tests/test_excel_export.py        多工作表 Excel 导出、范围筛选、图片/PDF 收据内嵌、Telegram 与飞书机器人文件发送及权限撤销
 tests/test_ai_agent.py            Web AI 配置与测试、多动作规划、原子执行、权限过滤与机器人共享配置
 tests/test_bot_ui.py              Telegram 菜单、分步草稿、角色限制、降级失效与防重确认
 tests/test_backups.py             本地 / WebDAV / S3 备份、校验、自动调度、旧版（含切换 OIDC 前）备份恢复与回滚
