@@ -33,7 +33,6 @@ if (feishuEnv.isFeishu) {
 }
 
 const paths = {
-  grid: 'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
   book: 'M5 3h14v18H5z M9 7h6 M9 11h6 M9 15h3 M3 7h4 M3 12h4 M3 17h4',
   wallet: 'M3 6h17v14H3z M3 6l14-3v3 M15 11h6v5h-6z M17 13.5h1',
   calc: 'M5 3h14v18H5z M8 6h8v4H8z M8 14h1 M12 14h1 M16 14h1 M8 18h1 M12 18h1 M16 18h1',
@@ -43,7 +42,6 @@ const paths = {
   settings: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z',
   plus: 'M12 5v14 M5 12h14',
   down: 'M12 3v17 M5 13l7 7 7-7',
-  up: 'M12 21V4 M5 11l7-7 7 7',
   arrow: 'M5 12h14 M13 6l6 6-6 6',
   arrowUpRight: 'M7 17 17 7 M8 7h9v9',
   chevronDown: 'm6 9 6 6 6-6',
@@ -56,15 +54,16 @@ const paths = {
   check: 'm5 13 4 4L19 7',
   copy: 'M9 9h10v10H9z M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1',
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14 M21 21l-4.35-4.35',
+  filter: 'M3 5h18 M6 12h12 M10 19h4',
   receipt: 'M5 2h14v20l-3-2-4 2-4-2-3 2z M8 7h8 M8 11h8 M8 15h5',
   edit: 'M12 20h9 M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z',
   trash: 'M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6',
   card: 'M3 6h18v12H3z M3 10h18',
   move: 'M8 7 4 11l4 4 M16 7l4 4-4 4 M4 11h16',
-  key: 'M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4',
   logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9',
   user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8',
-  link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+  shield: 'M12 2 4 5v6c0 5.25 3.4 10.1 8 11 4.6-.9 8-5.75 8-11V5l-8-3z',
+  database: 'M12 3c4.97 0 9 1.34 9 3s-4.03 3-9 3-9-1.34-9-3 4.03-3 9-3z M3 6v6c0 1.66 4.03 3 9 3s9-1.34 9-3V6 M3 12v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6',
 };
 
 const icon = (name, cls = '') =>
@@ -73,11 +72,8 @@ const icon = (name, cls = '') =>
 const PAGES = {
   overview: ['总览', 'overview'],
   ledger: ['收支明细', 'ledger'],
-  reimbursements: ['报销管理', 'reimbursements'],
-  calculator: ['资金计算', 'calculator'],
-  members: ['团队成员', 'members'],
-  integrations: ['机器人与 AI', 'integrations'],
-  settings: ['团队设置', 'settings'],
+  reimbursements: ['报销与资金', 'reimbursements'],
+  settings: ['设置', 'settings'],
 };
 
 const STATUS = {draft: '草稿', pending: '待报销', partial: '部分报销', reimbursed: '已报销', posted: '已入账', voided: '已作废'};
@@ -97,14 +93,18 @@ const AUTH_ERRORS = {
   disabled: '你的 Vanora 账号已被停用，请联系管理员在 Vanora 管理后台检查账号状态。',
   not_member: '当前 Vanora 账号尚未被分配本团队账本的客户端角色（owner / finance / member），请联系管理员在 Vanora 管理后台授权后再登录。',
 };
-const RETURN_HASH_RE = /^#[a-z]{1,30}(?:\/\d{1,12})?$/;
+const RETURN_HASH_RE = /^#[a-z]{1,30}(?:\/[a-z0-9-]{1,30})?$/;
 
 const state = {
   user: null, csrf: '', accountUrl: '', adminUrl: '', boot: null, authError: '',
   conf: null, members: [], entries: [], integrations: {}, report: null, page: 'overview',
   pendingEntryId: null,
   filter: {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''},
-  reimburseTab: 'pending', settingsTab: 'general', selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
+  filterOpen: false,
+  reimburseMode: 'queue',
+  reimburseTab: 'pending',
+  settingsTab: 'members',
+  selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
   action: null, base: null, loadId: 0,
   exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
@@ -332,7 +332,7 @@ function toast(message, error = false) {
 }
 
 async function busy(button, fn) {
-  if (button.disabled) return;
+  if (!button || button.disabled) return;
   button.disabled = true;
   try {
     return await fn();
@@ -345,8 +345,8 @@ function empty(title = '暂无记录', description = '开始记下团队的第�
   return `<div class="empty"><div class="empty-message" role="status">${icon('book')}<h3>${esc(title)}</h3><p>${esc(description)}</p></div>${action}</div>`;
 }
 
-function heading(title, subtitle, actions = '') {
-  return `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="heading-actions">${actions}</div></div>`;
+function heading(title, actions = '', extra = '') {
+  return `<div class="page-heading"><div class="page-heading-lead"><h1>${esc(title)}</h1>${extra}</div>${actions ? `<div class="heading-actions">${actions}</div>` : ''}</div>`;
 }
 
 function newButton(kind = 'expense', text = '记一笔') {
@@ -355,11 +355,6 @@ function newButton(kind = 'expense', text = '记一笔') {
 
 function baseSelect() {
   return `<select id="report-base" aria-label="汇总参考币种">${currencyOptions(state.base || state.conf.reference_currency)}</select>`;
-}
-
-function entryIcon(entry) {
-  const cls = entry.kind === 'income' ? 'income' : entry.expense_type === 'public' ? 'public' : '';
-  return `<span class="entry-type-icon ${cls}">${icon(entry.kind === 'income' ? 'down' : 'receipt')}</span>`;
 }
 
 function groupedTotals(entries, field = 'amount') {
@@ -375,19 +370,27 @@ function paymentSummary(e) {
 
 function paymentHistory(e) {
   if (!e.payments?.length) return '';
-  return `<div class="detail-section"><h4>逐次报销记录</h4><div class="timeline">${e.payments.map(p => `<div class="timeline-item"><strong>实际付款 ${money(p.amount, p.currency)}</strong> · 抵扣 ${money(p.entry_amount, e.currency)}${p.currency !== e.currency ? `<br>汇率：1 ${esc(e.currency)} = ${esc(p.fx_rate)} ${esc(p.currency)} · ${esc(p.fx_date)}` : ''}<br>${esc(p.name)} · ${esc(p.note)}<small>${esc(p.created_at.replace('T', ' ').slice(0, 19))}</small></div>`).join('')}</div></div>`;
+  return `<section class="drawer-card"><h4>报销付款记录</h4><div class="timeline">${e.payments.map(p => `<div class="timeline-item"><strong>实际付款 ${money(p.amount, p.currency)}</strong> · 抵扣 ${money(p.entry_amount, e.currency)}${p.currency !== e.currency ? `<br>汇率 1 ${esc(e.currency)} = ${esc(p.fx_rate)} ${esc(p.currency)} · ${esc(p.fx_date)}` : ''}<br>${esc(p.name)} · ${esc(p.note)}<small>${esc(p.created_at.replace('T', ' ').slice(0, 19))}</small></div>`).join('')}</div></section>`;
 }
 
-function settlementDisplay(entry, report = state.report) {
+function settlementDisplay(entry, report = state.report, compact = false) {
   const base = report?.base;
   const rate = report?.fx?.rates?.[entry.currency];
   if (!base || entry.currency === base || !rate) return '';
   const convertedAmount = Number(entry.amount) * Number(rate.rate);
   if (!Number.isFinite(convertedAmount)) return '';
+  if (compact) return `<span class="settlement-line">≈ ${money(convertedAmount, base)}</span>`;
   return `<span class="settlement-line">≈ ${money(convertedAmount, base)} <small>参考${rate.date ? ` · ${esc(rate.date)}` : ''}</small></span>`;
 }
 
-function receiptLink(entry, label = '查看凭证') {
+function compactAmountSubline(e) {
+  if (e.kind === 'expense' && e.reimbursed_minor > 0) {
+    return `<span class="payment-progress">剩余 ${money(e.remaining_amount, e.currency, false)} ${esc(e.currency)}</span>`;
+  }
+  return settlementDisplay(e, state.report, true);
+}
+
+function receiptLink(entry, label = '凭证') {
   return `<a class="tiny-link" href="/api/entries/${entry.id}/receipt" data-receipt="${entry.id}">${esc(label)}</a>`;
 }
 
@@ -395,26 +398,27 @@ function sourceLabel(source) {
   return ({web: 'Web', telegram: 'Telegram', feishu: '飞书', ai: 'AI', migration: '迁移'})[source] || source;
 }
 
-function table(entries, {checkbox = false, label = '账目列表'} = {}) {
+function entryKindDot(entry) {
+  const cls = entry.kind === 'income' ? 'income' : entry.expense_type === 'public' ? 'public' : 'advance';
+  return `<span class="kind-dot ${cls}" aria-hidden="true"></span>`;
+}
+
+function table(entries, {checkbox = false, label = '账目列表', emptyCta = true} = {}) {
   if (!entries.length) {
-    const cta = `<button type="button" class="empty-action-btn" data-new="expense">记一笔 ${icon('arrow', 'icon-sm')}</button>`;
-    return empty('还没有符合条件的账目', '调整筛选条件，或记下新的一笔。', cta);
+    const cta = emptyCta ? `<button type="button" class="empty-action-btn" data-new="expense">记一笔 ${icon('arrow', 'icon-sm')}</button>` : '';
+    return empty('暂无符合条件的账目', '调整筛选条件，或记下新的一笔。', cta);
   }
-  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="${esc(label)}" tabindex="0"><table class="data-table"><thead><tr>${checkbox ? '<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>' : ''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e => `<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox ? `<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id) ? 'checked' : ''} aria-label="选择 ${esc(entryDescription(e))}"></td>` : ''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(entryDescription(e))}</strong><span class="subline">${entryType(e)}${e.receipt ? ' · ' + receiptLink(e) : ''}</span></div></div></td><td>${esc(e.payer_name)}</td><td class="mono">${esc(e.date)}</td><td class="money ${e.kind === 'income' ? 'income' : ''}"><strong>${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency, false)}</strong><span class="subline mono">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${esc(sourceLabel(e.source))}</span></td><td class="row-chevron">${icon('chevronRight', 'icon-sm')}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="${esc(label)}" tabindex="0"><table class="data-table"><thead><tr>${checkbox ? '<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>' : ''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th class="row-chevron-col"></th></tr></thead><tbody>${entries.map(e => `<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox ? `<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id) ? 'checked' : ''} aria-label="选择 ${esc(entryDescription(e))}"></td>` : ''}<td><div class="entry-title-cell"><strong>${esc(entryDescription(e))}</strong><span class="subline entry-meta-line">${entryKindDot(e)}<span>${entryType(e)}</span>${e.receipt ? '<span class="meta-sep">·</span>' + receiptLink(e) : ''}</span></div></td><td>${esc(e.payer_name)}</td><td class="mono muted-cell">${esc(e.date)}</td><td class="money ${e.kind === 'income' ? 'income' : ''}"><div class="amount-primary"><strong>${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency)}</strong></div>${compactAmountSubline(e)}</td><td>${badge(entryStatus(e))}</td><td class="row-chevron">${icon('chevronRight', 'icon-sm')}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function reportWarning(report = state.report) {
-  if (!report) return `<div class="callout warning">${icon('info')}<span class="callout-body">资金计算暂不可用，请刷新重试。原币种收支仍可正常查看。</span></div>`;
+  if (!report) return `<div class="callout warning">${icon('info')}<span class="callout-body">资金汇总暂不可用，请刷新重试。原币种记录不受影响。</span></div>`;
   if (report.fx.warning) return `<div class="callout ${report.complete ? 'warning' : 'error'}">${icon('info')}<span class="callout-body">${esc(report.fx.warning)}${report.fx.missing.length ? ' 缺少币种：' + esc(report.fx.missing.join('、')) : ''}</span></div>`;
   return '';
 }
 
-function aiQuickBar() {
-  return `<form class="ai-quickbar" id="ai-quick-form">${icon('spark')}<input name="quick_text" maxlength="4000" placeholder="用一句话记账或查账，例如：昨天我垫了打车 35 元，看看现在还能报多少…" aria-label="快速向 AI 记账助手提问"><button type="submit" class="button button-primary">交给 AI</button></form>`;
-}
-
 /* ============================================================================
- * AI Drawer Logic (Vanora Clean SVG Icons)
+ * AI Drawer Logic
  * ========================================================================== */
 
 const AI_LABELS = {create_entry: '新增账目', edit_entry: '修改账目', void_entry: '作废账目', submit_entry: '草稿入账', pay_entry: '登记报销', batch_pay: '批量报销', delete_entry: '永久删除'};
@@ -472,7 +476,7 @@ function aiActionCard(action, position) {
   const batch = action.type === 'batch_pay' && action.resolved?.items?.length
     ? `<div class="ai-batch-items">${action.resolved.items.slice(0, 12).map(item => `<div>#${esc(item.id)} ${esc(entryDescription(item))} · 实际付款 ${esc(item.amount)} ${esc(item.currency)} · 抵扣 ${esc(item.credited)} ${esc(item.entry_currency)}</div>`).join('')}${action.resolved.items.length > 12 ? `<div>另有 ${action.resolved.items.length - 12} 笔，确认后一次登记。</div>` : ''}</div>`
     : '';
-  return `<article class="ai-action-card ${disabled ? 'has-error' : ''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${icon(AI_ICON_NAMES[action.type] || 'receipt')}</span><strong>${esc(action.label || AI_LABELS[action.type] || action.type)}</strong></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length ? `<div class="ai-action-error">${errors.map(esc).join('<br>')}</div>` : ''}${warnings.length ? `<div class="ai-action-warning">${warnings.map(esc).join('<br>')}</div>` : ''}${aiFieldRows(action)}${batch}${action.type === 'create_entry' && !disabled ? `<button type="button" class="button button-outline button-small" data-ai-edit-form="${action.index}">在表单中修改（可传凭证）</button>` : ''}</div></article>`;
+  return `<article class="ai-action-card ${disabled ? 'has-error' : ''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${icon(AI_ICON_NAMES[action.type] || 'receipt')}</span><strong>${esc(action.label || AI_LABELS[action.type] || action.type)}</strong></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length ? `<div class="ai-action-error">${errors.map(esc).join('<br>')}</div>` : ''}${warnings.length ? `<div class="ai-action-warning">${warnings.map(esc).join('<br>')}</div>` : ''}${aiFieldRows(action)}${batch}${action.type === 'create_entry' && !disabled ? `<button type="button" class="button button-outline button-small" data-ai-edit-form="${action.index}">在表单中修改</button>` : ''}</div></article>`;
 }
 
 function aiQueryText(card) {
@@ -490,7 +494,7 @@ function aiQueryCard(card) {
   if (!card) return '';
   if (card.kind === 'entries') {
     const totals = Object.entries(card.totals || {}).map(([code, amount]) => money(amount, code)).join(' / ') || '—';
-    return `<div class="ai-query-card"><div class="ai-query-head">查询结果 <span>共 ${esc(card.total)} 笔 · ${totals}</span></div>${table(card.entries || [])}</div>`;
+    return `<div class="ai-query-card"><div class="ai-query-head">查询结果 <span>共 ${esc(card.total)} 笔 · ${totals}</span></div>${table(card.entries || [], {emptyCta: false})}</div>`;
   }
   if (card.kind === 'summary') {
     const slots = [...(card.by_kind?.expense || []).map(x => ({...x, kind: 'expense'})), ...(card.by_kind?.income || []).map(x => ({...x, kind: 'income'}))];
@@ -504,7 +508,7 @@ function aiQueryCard(card) {
   if (card.kind === 'simulation') {
     if (!card.complete) return `<div class="ai-query-card warn">${esc(card.warning || '模拟暂不可用')}</div>`;
     const base = card.base;
-    return `<div class="ai-query-card"><div class="ai-query-head">模拟进账 <span>仅试算，未入账</span></div><div class="ai-metrics"><span>模拟后可用 ${money(card.cash, base)}</span><span>待报销 ${money(card.due, base)}</span><span>可安排 ${money(card.payable, base)}</span><span>缺口 ${money(card.shortage, base)}</span></div>${card.warning ? `<div class="ai-action-warning">${esc(card.warning)}</div>` : ''}</div>`;
+    return `<div class="ai-query-card"><div class="ai-query-head">模拟进账 <span>试算</span></div><div class="ai-metrics"><span>模拟后可用 ${money(card.cash, base)}</span><span>待报销 ${money(card.due, base)}</span><span>可安排 ${money(card.payable, base)}</span><span>缺口 ${money(card.shortage, base)}</span></div>${card.warning ? `<div class="ai-action-warning">${esc(card.warning)}</div>` : ''}</div>`;
   }
   if (card.kind === 'entry') {
     const e = card.entry;
@@ -522,16 +526,14 @@ function renderAiPlan() {
   const actions = plan.actions || [], results = plan.results || [], valid = actions.filter(a => !a.errors?.length), count = aiSelected();
   let html = '<section class="ai-plan">';
   if (results.length) html += `<div class="ai-results">${results.map(r => aiQueryCard(r.card)).join('')}</div>`;
-  if (results.length && actions.length) html += '<p class="ai-plan-note">查询结果为当前账本状态；确认写操作后会自动更新。</p>';
   if (actions.length) {
-    if (plan.questions?.length) html += '<p class="ai-plan-note">还有需要确认的信息：可先执行已识别的项，或补充说明后重新整理。</p>';
-    html += `<div class="ai-plan-head"><strong>待确认操作清单</strong><span id="ai-plan-count">${actions.length} 项 · 已选 ${count} 项</span></div>`;
+    html += `<div class="ai-plan-head"><strong>待确认操作</strong><span id="ai-plan-count">${actions.length} 项 · 已选 ${count} 项</span></div>`;
     html += actions.map((action, position) => aiActionCard(action, position + 1)).join('');
   }
   if (plan.plan_id) {
-    html += `<div class="ai-plan-footer"><span id="ai-selected-count">已选 ${count} / ${valid.length} 项</span><button type="button" class="button button-outline" data-ai-cancel-plan>取消清单</button><button type="button" class="button button-primary" data-ai-confirm ${count ? '' : 'disabled'}>确认执行 ${count} 项</button></div>`;
+    html += `<div class="ai-plan-footer"><span id="ai-selected-count">已选 ${count} / ${valid.length} 项</span><button type="button" class="button button-outline" data-ai-cancel-plan>取消</button><button type="button" class="button button-primary" data-ai-confirm ${count ? '' : 'disabled'}>确认执行 ${count} 项</button></div>`;
   } else if (actions.length) {
-    html += '<p class="ai-plan-note">没有可执行的操作，请根据上面的提示补充或修改描述。</p>';
+    html += '<p class="ai-plan-note">暂无可执行操作，请按提示补充描述。</p>';
   }
   html += '</section>';
   return html;
@@ -544,15 +546,11 @@ function renderAi() {
   const disabledInWeb = Boolean(aiCfg && !aiCfg.enabled && (aiCfg.has_api_key || !isOwner()));
   const unconfiguredHint = !state.integrations?.ai_configured
     ? `<div class="callout warning">${icon('info')}<div class="callout-body">${isOwner()
-      ? (disabledInWeb
-        ? 'AI 记账引擎当前已停用，可在「机器人与 AI」中重新启用。'
-        : '尚未配置 AI 接口，可直接在「机器人与 AI」填写接口地址、API Key 和模型名称，无需修改环境变量。')
-      : (disabledInWeb
-        ? 'AI 记账引擎当前已停用，请联系账本所有者重新启用。'
-        : '尚未配置 AI 接口，请联系账本所有者在「机器人与 AI」中完成配置。')}${isOwner() ? `<div class="ai-welcome-actions"><a href="#integrations" class="console-inline-link" data-close>前往配置 AI ${icon('arrowUpRight', 'icon-sm')}</a></div>` : ''}</div></div>`
+      ? (disabledInWeb ? 'AI 记账引擎已停用，可在设置中重新启用。' : '尚未配置 AI 接口，请在设置中填写接口地址、密钥与模型。')
+      : (disabledInWeb ? 'AI 记账引擎已停用，请联系账本所有者启用。' : '尚未配置 AI 接口，请联系账本所有者配置。')}${isOwner() ? `<div class="ai-welcome-actions"><a href="#settings/bots-ai" class="console-inline-link" data-close>前往配置 ${icon('arrowUpRight', 'icon-sm')}</a></div>` : ''}</div></div>`
     : '';
   const welcome = !state.ai.conversation.length && !state.ai.plan
-    ? `${unconfiguredHint}<div class="ai-welcome"><strong>用自然语言批量记账、修改、报销或查账</strong>所有写操作都会先生成待确认清单，核对勾选后才会写入账本。Web、飞书与 Telegram 共用同一套引擎。</div>`
+    ? `${unconfiguredHint}<div class="ai-welcome"><strong>自然语言记账与查账</strong>支持批量新增、修改、作废、报销和查账，写入前会生成清单供核对。</div>`
     : '';
   const bubbles = state.ai.conversation.map(m => `<div class="ai-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${esc(m.text).replace(/\n/g, '<br>')}</div>`).join('');
   const typing = state.ai.busy ? '<div class="ai-bubble assistant typing" aria-label="AI 正在思考"><span></span><span></span><span></span></div>' : '';
@@ -604,7 +602,7 @@ async function submitAi(form) {
   try {
     const data = await api('/ai/plan', 'POST', {text, history});
     const summary = [data.reply || '', ...(data.questions || []).map(q => '需要确认：' + q)].filter(Boolean).join('\n');
-    const fallback = (data.actions?.length || data.results?.length) ? '已整理好操作清单，请核对后确认。' : '未识别出可执行的操作，请换一种说法补充。';
+    const fallback = (data.actions?.length || data.results?.length) ? '已整理操作清单，请核对后确认。' : '未识别出可执行操作，请补充说明。';
     aiMessage('assistant', summary || fallback);
     state.ai.plan = data;
     state.ai.selected = new Set((data.actions || []).filter(a => !a.errors?.length).map(a => a.index));
@@ -668,7 +666,7 @@ async function executeAiPlan() {
 
 function cancelAiPlan() {
   if (!state.ai.plan) return;
-  aiMessage('assistant', '已取消本次操作清单，未写入任何账目。');
+  aiMessage('assistant', '已取消本次操作清单。');
   state.ai.plan = null;
   state.ai.selected.clear();
   renderAi();
@@ -687,7 +685,7 @@ function aiEditInForm(index) {
     kind: r.kind, expense_type: r.expense_type, amount: r.amount, currency: r.currency,
     description: r.description, date: r.date, payer_id: r.payer_id, note: r.note, status: r.status,
   });
-  toast('已在表单中打开；保存后不会重复执行清单中的这一项');
+  toast('已在表单中打开，保存后不会重复执行此项');
 }
 
 /* ============================================================================
@@ -697,7 +695,7 @@ function aiEditInForm(index) {
 function rateDetails(report = state.report) {
   if (!report) return '';
   const rows = Object.entries(report.fx.rates).filter(([code]) => code !== report.base);
-  return `<div class="rates">${rows.map(([code, r]) => `<span class="rate-chip">1 ${esc(code)} ≈ ${Number(r.rate).toLocaleString('zh-CN', {maximumFractionDigits: 6})} ${esc(report.base)} · ${esc(r.date)}</span>`).join('')}</div><p class="fx-caption">${rows.length ? `${esc(report.fx.source)}${report.fx.stale ? ' · 缓存已过期，获取失败后沿用' : ''}。周末、节假日可能返回最近工作日。` : '当前账目无需跨币种换算。'}换算仅供资金规划；付款可选记账货币或团队结算货币，平台不会自动转账。</p>`;
+  return `${rows.length ? `<div class="rates">${rows.map(([code, r]) => `<span class="rate-chip">1 ${esc(code)} ≈ ${Number(r.rate).toLocaleString('zh-CN', {maximumFractionDigits: 6})} ${esc(report.base)} · ${esc(r.date)}</span>`).join('')}</div>` : '<p class="muted">当前账目无需跨币种换算。</p>'}<p class="fx-caption">${rows.length ? `${esc(report.fx.source)}${report.fx.stale ? ' · 缓存沿用' : ''}` : ''}</p>`;
 }
 
 function converted(entry, report = state.report) {
@@ -707,7 +705,7 @@ function converted(entry, report = state.report) {
 
 function chart() {
   const r = state.report;
-  if (!r?.complete) return empty('等待可用汇率', '获取汇率后显示最近 7 天的团队资金流向。');
+  if (!r?.complete) return empty('等待汇率数据', '汇率恢复后将显示最近 7 天资金流向。');
   const days = [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date(state.conf.today + 'T12:00:00Z');
@@ -809,113 +807,82 @@ function hydrateChart() {
 function renderOverview() {
   const r = state.report, ok = r?.complete, base = r?.base || state.conf.reference_currency;
   const recent = state.entries.filter(e => e.status !== 'voided');
-  const pending = state.entries.filter(e => e.status === 'pending').length;
+  const pendingCount = state.entries.filter(e => e.status === 'pending').length;
   const metric = k => ok ? money(r[k], base) : '—';
   const memberRows = ok ? r.members : [];
-  const i = state.integrations || {};
+  const teamLabel = state.conf.team_name ? `<span class="heading-team-tag">${esc(state.conf.team_name)}</span>` : '';
 
   return heading(
     '团队总览',
-    '可用资金、待报销与最近动态，均按团队结算参考币种汇总。',
     `${canManage() ? `<button type="button" class="button button-outline" data-export-open="overview">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`,
+    teamLabel,
   ) + `
-    <div class="console-activity-grid">
-      <div class="console-activity-main">
-        ${aiQuickBar()}
-        <div class="activity-summary-grid">
-          <section class="summary-card">
-            <div class="summary-card-head">
-              <h2>团队可用余额</h2>
-              <span class="mono muted">${esc(base)}</span>
-            </div>
-            <p class="summary-card-sub">收入 − 公账支出 − 已报销</p>
-            <div class="summary-card-value">${metric('cash')}</div>
-            <div class="summary-card-foot">
-              <span>累计参考换算</span>
-              <a class="activity-summary-link" href="#calculator">资金计算 ${icon('arrow', 'icon-sm')}</a>
-            </div>
-          </section>
-          <section class="summary-card">
-            <div class="summary-card-head"><h2>累计团队收入</h2></div>
-            <p class="summary-card-sub">今日入账 ${ok ? money(r.today_income, base, false) : '待换算'}</p>
-            <div class="summary-card-value">${metric('income')}</div>
-            <div class="summary-card-foot">
-              <span>公账在账资金</span>
-              ${canManage() ? `<a class="activity-summary-link" href="#ledger" data-income-link>登记收入 ${icon('arrow', 'icon-sm')}</a>` : '<span></span>'}
-            </div>
-          </section>
-          <section class="summary-card">
-            <div class="summary-card-head"><h2>团队待报销</h2></div>
-            <p class="summary-card-sub">${pending} 笔成员垫付待结清</p>
-            <div class="summary-card-value">${metric('due')}</div>
-            <div class="summary-card-foot">
-              <span>可安排 ${metric('payable')}</span>
-              <a class="activity-summary-link" href="#reimbursements">去处理 ${icon('arrow', 'icon-sm')}</a>
-            </div>
-          </section>
+    ${reportWarning()}
+    <div class="activity-summary-grid">
+      <section class="summary-card">
+        <div class="summary-card-head">
+          <h2>团队可用余额</h2>
+          <span class="mono muted">${esc(base)}</span>
         </div>
-        ${reportWarning()}
-        ${ok ? `<div class="callout highlight">${icon('info')}<span class="callout-body">优先报销安排：当前可预留 <strong>${money(r.reserve, base)}</strong> 用于报销，${Number(r.shortage) > 0 ? `覆盖全部待报销仍有 <strong>${money(r.shortage, base)}</strong> 缺口。` : `预留后结余 <strong>${money(r.remaining, base)}</strong>。`}</span><a class="console-inline-link" href="#calculator">查看安排 ${icon('arrowUpRight', 'icon-sm')}</a></div>` : ''}
-        <section class="panel chart-panel">
-          <div class="panel-heading">
-            <div>
-              <h3>最近 7 天资金流向</h3>
-              <p>团队收入与公账支出、报销付款 · ${esc(base)} 参考换算</p>
-            </div>
-            <div class="chart-key"><span><i></i>收入</span><span><i class="gold"></i>支出</span></div>
-          </div>
-          ${chart()}
-        </section>
-        <section class="panel recent-panel">
-          <div class="panel-heading">
-            <div>
-              <h3>最近账目</h3>
-              <p>共 ${recent.length} 笔有效记录 · 保留原始币种金额</p>
-            </div>
-            <a href="#ledger" class="console-inline-link">全部收支 ${icon('arrowUpRight', 'icon-sm')}</a>
-          </div>
-          ${table(recent.slice(0, 6))}
-          <div class="table-footer">
-            <span>点击任意一行查看详情与凭证</span>
-            <span>Web · 飞书 · Telegram 实时同步</span>
-          </div>
-        </section>
-      </div>
-      <aside class="activity-right-rail">
-        <section class="activity-rail-block">
-          <div class="activity-rail-heading">
-            <div>
-              <h2>待报销成员</h2>
-              <p>按成员汇总全部待报销金额</p>
-            </div>
-            <a href="#reimbursements" class="console-square-link" aria-label="查看报销管理">${icon('chevronRight')}</a>
-          </div>
+        <div class="summary-card-value">${metric('cash')}</div>
+        <div class="summary-card-foot">
+          <span>${ok && Number(r.shortage) > 0 ? `缺口 ${money(r.shortage, base, false)}` : ok ? `报销后结余 ${money(r.remaining, base, false)}` : '参考换算'}</span>
+          <a class="activity-summary-link" href="#reimbursements/calculator">资金测算 ${icon('arrow', 'icon-sm')}</a>
+        </div>
+      </section>
+      <section class="summary-card">
+        <div class="summary-card-head">
+          <h2>累计团队收入</h2>
+          <span class="mono muted">${ok ? `今日 ${money(r.today_income, base, false)}` : ''}</span>
+        </div>
+        <div class="summary-card-value">${metric('income')}</div>
+        <div class="summary-card-foot">
+          <span>累计已报销 ${ok ? money(r.paid, base, false) : '—'}</span>
+          ${canManage() ? `<a class="activity-summary-link" href="#ledger" data-income-link>登记收入 ${icon('arrow', 'icon-sm')}</a>` : '<span></span>'}
+        </div>
+      </section>
+      <section class="summary-card">
+        <div class="summary-card-head">
+          <h2>团队待报销</h2>
+          <span class="mono muted">${pendingCount} 笔</span>
+        </div>
+        <div class="summary-card-value">${metric('due')}</div>
+        <div class="summary-card-foot">
+          <span>可安排 ${ok ? money(r.payable, base, false) : '—'}</span>
+          <a class="activity-summary-link" href="#reimbursements">去处理 ${icon('arrow', 'icon-sm')}</a>
+        </div>
+      </section>
+    </div>
+
+    <div class="overview-mid-grid">
+      <section class="panel overview-chart-panel">
+        <div class="panel-heading">
+          <h3>最近 7 天资金流向 <span class="panel-meta mono">${esc(base)}</span></h3>
+          <div class="chart-key"><span><i></i>收入</span><span><i class="gold"></i>支出</span></div>
+        </div>
+        ${chart()}
+      </section>
+
+      <section class="panel overview-members-panel">
+        <div class="panel-heading">
+          <h3>待报销成员</h3>
+          <a href="#reimbursements" class="console-inline-link">去处理 ${icon('arrowUpRight', 'icon-sm')}</a>
+        </div>
+        <div class="overview-members-body">
           ${memberRows.length
             ? `<div class="activity-log-list">${memberRows.slice(0, 6).map(m => `<div class="member-row">${avatar(m.name, m.id)}<div class="member-info"><strong>${esc(m.name)}${m.id === state.user.id ? ' · 我' : ''}</strong><small>${state.entries.filter(e => e.payer_id === m.id && e.status === 'pending').length} 笔待报销</small></div><div class="member-amount">${money(m.due, base, false)} <small>${esc(base)}</small></div></div>`).join('')}</div>`
-            : empty(ok ? '暂时没有待报销' : '等待汇率换算', ok ? '所有成员垫付均已结清。' : '可前往收支明细查看原始币种记录。')}
-        </section>
-        <section class="activity-agent-note">
-          <span class="activity-note-kicker">VANORA / SYNC</span>
-          <h2>多端协同状态</h2>
-          <p>在 Web 管理全局，在飞书或 Telegram 里随手记账并实时同步。</p>
-          <div class="channel-status-list">
-            <div class="channel-status-item">
-              <span class="channel-status-name"><i class="status-dot ${i.feishu_online ? 'online' : i.feishu_configured ? 'warn' : ''}"></i>飞书机器人</span>
-              <span>${i.feishu_linked ? (i.feishu_online ? '已绑定 · 在线' : '已绑定') : i.feishu_configured ? '已配置 · 未绑定' : '未配置'}</span>
-            </div>
-            <div class="channel-status-item">
-              <span class="channel-status-name"><i class="status-dot ${i.bot_online ? 'online' : i.bot_configured ? 'warn' : ''}"></i>Telegram 机器人</span>
-              <span>${i.telegram_linked ? (i.bot_online ? '已绑定 · 在线' : '已绑定') : i.bot_configured ? '已配置 · 未绑定' : '未配置'}</span>
-            </div>
-            <div class="channel-status-item">
-              <span class="channel-status-name"><i class="status-dot ${i.ai_configured ? 'online' : (i.ai && !i.ai.enabled && i.ai.has_api_key ? 'warn' : '')}"></i>AI 记账引擎</span>
-              <span>${i.ai_configured ? '已就绪' : (i.ai && !i.ai.enabled && i.ai.has_api_key ? '已停用' : '未配置')}</span>
-            </div>
-          </div>
-          <a class="activity-note-link" href="#integrations">管理接入与绑定 ${icon('arrowUpRight', 'icon-sm')}</a>
-        </section>
-      </aside>
-    </div>`;
+            : empty(ok ? '暂无待报销' : '等待汇率换算', ok ? '所有成员垫付已结清。' : '可在收支明细查看原币种记录。')}
+        </div>
+      </section>
+    </div>
+
+    <section class="panel recent-panel">
+      <div class="panel-heading">
+        <h3>最近账目 <span class="panel-meta mono">${recent.length} 笔</span></h3>
+        <a href="#ledger" class="console-inline-link">全部收支 ${icon('arrowUpRight', 'icon-sm')}</a>
+      </div>
+      ${table(recent.slice(0, 6))}
+    </section>`;
 }
 
 function filteredEntries() {
@@ -931,10 +898,9 @@ function filteredEntries() {
   );
 }
 
-function ledgerResults() {
-  const rows = filteredEntries();
-  const total = state.filter.status === 'all' ? state.entries.filter(e => e.status !== 'voided').length : state.entries.length;
-  return table(rows) + `<div class="table-footer"><span>已显示 ${rows.length} / ${total} 笔 · 原始币种金额</span><span>点击账目查看详情与凭证</span></div>`;
+function secondaryFilterCount() {
+  const f = state.filter;
+  return [f.currency !== 'all', f.payer !== 'all', Boolean(f.from), Boolean(f.to)].filter(Boolean).length;
 }
 
 function ledgerHasFilter() {
@@ -942,20 +908,42 @@ function ledgerHasFilter() {
   return Boolean(f.text || f.kind !== 'all' || f.currency !== 'all' || f.payer !== 'all' || f.status !== 'all' || f.from || f.to);
 }
 
-function syncLedgerExportButton() {
+function ledgerResults() {
+  const rows = filteredEntries();
+  return table(rows);
+}
+
+function syncLedgerChrome() {
   const btn = $('#ledger-export-btn');
-  if (!btn) return;
-  btn.innerHTML = `${icon('download', 'ico-download')}${ledgerHasFilter() ? '导出筛选 Excel' : '导出 Excel'}`;
+  if (btn) btn.innerHTML = `${icon('download', 'ico-download')}${ledgerHasFilter() ? '导出筛选 Excel' : '导出 Excel'}`;
+  const countEl = $('#ledger-count');
+  if (countEl) {
+    const rows = filteredEntries();
+    const total = state.filter.status === 'all' ? state.entries.filter(e => e.status !== 'voided').length : state.entries.length;
+    countEl.textContent = ledgerHasFilter() ? `${rows.length} / ${total} 笔` : `${total} 笔`;
+  }
+  const secCount = secondaryFilterCount();
+  const moreBtn = $('#toggle-more-filters');
+  if (moreBtn) {
+    moreBtn.classList.toggle('is-active', state.filterOpen || secCount > 0);
+    moreBtn.setAttribute('aria-expanded', String(state.filterOpen));
+    moreBtn.innerHTML = `${icon('filter', 'icon-sm')}<span>更多筛选</span>${secCount ? `<small class="filter-badge">${secCount}</small>` : ''}`;
+  }
+  const resetBtn = $('#reset-filters');
+  if (resetBtn) resetBtn.hidden = !ledgerHasFilter();
 }
 
 function renderLedger() {
   const f = state.filter;
   const hasFilter = ledgerHasFilter();
+  const secCount = secondaryFilterCount();
+  const rows = filteredEntries();
+  const total = f.status === 'all' ? state.entries.filter(e => e.status !== 'voided').length : state.entries.length;
   return heading(
     '收支明细',
-    '公账支出、成员垫付、团队进账统一归档，支持多维筛选与 Excel 导出。',
-    `${canManage() ? `<button type="button" class="button button-outline" id="ledger-export-btn" data-export-open="ledger">${icon('download', 'ico-download')}${hasFilter ? '导出筛选 Excel' : '导出 Excel'}</button><button type="button" class="button button-outline" data-new="income">登记收入</button>` : ''}${newButton()}`,
-  ) + aiQuickBar() + `
+    `${canManage() ? `<button type="button" class="button button-outline" id="ledger-export-btn" data-export-open="ledger">${icon('download', 'ico-download')}${hasFilter ? '导出筛选 Excel' : '导出 Excel'}</button>` : ''}${newButton()}`,
+    `<span class="heading-count mono" id="ledger-count">${hasFilter ? `${rows.length} / ${total} 笔` : `${total} 笔`}</span>`,
+  ) + `
     <section class="panel">
       <div class="filter-tabs" role="tablist" aria-label="收支类型筛选">
         ${[['all', '全部记录'], ['public', '公账支出'], ['advance', '成员垫付'], ['income', '团队收入']].map(([value, label]) => `<button type="button" role="tab" aria-selected="${f.kind === value}" data-filter-kind="${value}" class="${f.kind === value ? 'active' : ''}">${label}</button>`).join('')}
@@ -965,14 +953,17 @@ function renderLedger() {
           ${icon('search')}
           <input id="search-entries" placeholder="搜索用途、成员、备注…" value="${esc(f.text)}" aria-label="搜索账目">
         </div>
+        <select data-filter="status" aria-label="筛选状态"><option value="all">全部状态</option>${options(Object.entries(STATUS), x => x[0], x => x[1], f.status)}</select>
+        <button type="button" class="button button-outline filter-more-btn${state.filterOpen || secCount > 0 ? ' is-active' : ''}" id="toggle-more-filters" aria-expanded="${state.filterOpen}" aria-controls="more-filters-panel">${icon('filter', 'icon-sm')}<span>更多筛选</span>${secCount ? `<small class="filter-badge">${secCount}</small>` : ''}</button>
+        <button type="button" class="button button-quiet button-small" id="reset-filters" ${hasFilter ? '' : 'hidden'}>重置</button>
+      </div>
+      <div class="filters-secondary" id="more-filters-panel" ${state.filterOpen ? '' : 'hidden'}>
         <select data-filter="currency" aria-label="筛选币种"><option value="all">全部币种</option>${options(state.conf.currencies, c => c.code, c => c.code, f.currency)}</select>
         <select data-filter="payer" aria-label="筛选成员"><option value="all">全部成员</option>${options(state.members, m => m.id, m => m.name, f.payer)}</select>
-        <select data-filter="status" aria-label="筛选状态"><option value="all">全部（不含作废）</option>${options(Object.entries(STATUS), x => x[0], x => x[1], f.status)}</select>
         <label class="filter-date-field"><span>从</span><input type="date" data-filter="from" value="${esc(f.from)}" aria-label="开始日期"></label>
         <label class="filter-date-field"><span>至</span><input type="date" data-filter="to" value="${esc(f.to)}" aria-label="结束日期"></label>
-        ${hasFilter ? '<button type="button" class="button button-quiet button-small" id="reset-filters">重置</button>' : ''}
       </div>
-      <div id="ledger-results">${ledgerResults()}</div>
+      <div id="ledger-results">${table(rows)}</div>
     </section>`;
 }
 
@@ -982,116 +973,148 @@ function reimbursementRows() {
 
 function batchToolbar() {
   const n = state.selected.size;
-  return `<span>已选 ${n} 笔${n ? ' · 不同币种会分别列示' : ''}</span>${canManage() ? `<button type="button" class="button button-outline button-small" data-export-selected ${n ? '' : 'disabled'}>${icon('download', 'ico-download')}导出已选 Excel</button>` : ''}${state.reimburseTab === 'pending' ? '<button type="button" class="button button-primary button-small" data-batch="pay">登记已付款</button>' : ''}${state.reimburseTab === 'draft' ? '<button type="button" class="button button-primary button-small" data-batch="submit">记入账本</button>' : ''}`;
-}
-
-function renderReimbursements() {
-  const r = state.report, base = r?.base || state.conf.reference_currency;
-  const metric = k => r?.complete ? money(r[k], base) : '—';
-  const rows = reimbursementRows();
-  const selectable = canManage() && ['pending', 'draft'].includes(state.reimburseTab);
-  return heading(
-    '报销管理',
-    '成员垫付记账后直接进入待报销，支持分次、跨币种登记已付款。',
-    `${canManage() ? `<button type="button" class="button button-outline" data-export-open="reimbursements">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`,
-  ) + `
-    <div class="reimbursement-summary">
-      <div class="mini-stat"><small>全部待报销 · 参考换算</small><strong>${metric('due')}</strong></div>
-      <div class="mini-stat"><small>当前可安排报销资金</small><strong>${metric('payable')}</strong></div>
-      <div class="mini-stat"><small>累计已报销</small><strong>${metric('paid')}</strong></div>
-    </div>
-    ${reportWarning()}
-    <section class="panel">
-      <div class="filter-tabs" role="tablist" aria-label="报销状态">
-        ${['pending', 'reimbursed', 'draft', 'voided'].map(s => `<button type="button" role="tab" aria-selected="${state.reimburseTab === s}" data-reimburse-tab="${s}" class="${state.reimburseTab === s ? 'active' : ''}">${STATUS[s]}<small>${state.entries.filter(e => e.kind === 'expense' && e.expense_type === 'advance' && e.status === s).length}</small></button>`).join('')}
-      </div>
-      <div id="reimbursement-results">${table(rows, {checkbox: selectable})}</div>
-      ${rows.length && selectable ? `<div class="batch-toolbar" id="batch-toolbar">${batchToolbar()}</div>` : ''}
-    </section>
-    <div class="notice">成员垫付记账后直接进入待报销。账本所有者和财务管理员可在实际转账后登记付款，支持分次和跨币种付款。</div>`;
+  return `<span>已选 ${n} 笔</span>${canManage() ? `<button type="button" class="button button-outline button-small" data-export-selected ${n ? '' : 'disabled'}>${icon('download', 'ico-download')}导出已选 Excel</button>` : ''}${state.reimburseTab === 'pending' ? '<button type="button" class="button button-primary button-small" data-batch="pay">登记已付款</button>' : ''}${state.reimburseTab === 'draft' ? '<button type="button" class="button button-primary button-small" data-batch="submit">记入账本</button>' : ''}`;
 }
 
 function calcSummary(report, scenario = false) {
   if (!report?.complete) {
-    return `<div class="calc-summary"><span class="calc-summary-kicker">资金规划</span><div class="calc-amount">等待汇率</div><p>原币种账目已保留，缺少可靠汇率时暂停合并计算。</p></div>${reportWarning(report)}`;
+    return `<div class="calc-summary"><span class="calc-summary-kicker">资金测算</span><div class="calc-amount">等待汇率</div><p>缺少可靠汇率时暂停合并计算。</p></div>${reportWarning(report)}`;
   }
   const b = report.base, mode = report.reimbursement?.mode || 'auto';
-  const label = {auto: '按最早发生日期自动安排', budget: '按指定预算安排', manual: '仅安排手动勾选项目'}[mode];
+  const label = {auto: '按最早日期自动安排', budget: '按指定预算安排', manual: '仅安排手动勾选项目'}[mode];
   return `
     <div class="calc-summary">
-      <span class="calc-summary-kicker">${scenario ? '新进账预演' : '当前余额规划'}</span>
+      <div class="calc-summary-top">
+        <span class="calc-summary-kicker">${scenario ? '新进账预演' : '当前余额规划'}</span>
+        <span class="calc-summary-mode">${label}</span>
+      </div>
       <div class="calc-amount">${money(report.reserve, b)}</div>
-      <p>本次安排报销 · ${label}</p>
-      <div class="calculation-equation">可用资金 = 团队收入 − 公账支出 − 已报销付款${scenario ? ' + 本次模拟进账' : ''}<br>本次报销以可用资金、报销范围${mode === 'budget' ? '及指定预算' : ''}为上限</div>
-      <div class="calc-row"><span>${scenario ? '模拟后的' : '当前'}可用资金</span><strong>${money(report.cash, b)}</strong></div>
-      <div class="calc-row"><span>全部待报销</span><strong>${money(report.due, b)}</strong></div>
-      ${mode === 'manual' ? `<div class="calc-row"><span>所选项目待报销</span><strong>${money(report.selected_due, b)}</strong></div>` : ''}
-      ${mode === 'budget' ? `<div class="calc-row"><span>本次报销预算</span><strong>${money(report.reimbursement.budget, b)}</strong></div>` : ''}
-      <div class="calc-row"><span>本次可安排付款</span><strong>${money(report.payable, b)}</strong></div>
-      <div class="calc-row highlight"><span>本次安排后结余</span><strong>${money(report.remaining, b)}</strong></div>
-      <div class="calc-row"><span>本次安排后仍待报销</span><strong>${money(report.unplanned, b)}</strong></div>
-      <div class="calc-row ${Number(report.shortage) > 0 ? 'shortage' : ''}"><span>覆盖全部待报销的资金缺口</span><strong>${money(report.shortage, b)}</strong></div>
+      <div class="calc-rows">
+        <div class="calc-row"><span>${scenario ? '模拟后' : '当前'}可用资金</span><strong>${money(report.cash, b)}</strong></div>
+        <div class="calc-row"><span>全部待报销</span><strong>${money(report.due, b)}</strong></div>
+        ${mode === 'manual' ? `<div class="calc-row"><span>已选项目待报销</span><strong>${money(report.selected_due, b)}</strong></div>` : ''}
+        ${mode === 'budget' ? `<div class="calc-row"><span>指定预算</span><strong>${money(report.reimbursement.budget, b)}</strong></div>` : ''}
+        <div class="calc-row"><span>本次可安排付款</span><strong>${money(report.payable, b)}</strong></div>
+        <div class="calc-row highlight"><span>安排后结余</span><strong>${money(report.remaining, b)}</strong></div>
+        <div class="calc-row"><span>安排后仍待报销</span><strong>${money(report.unplanned, b)}</strong></div>
+        <div class="calc-row ${Number(report.shortage) > 0 ? 'shortage' : ''}"><span>覆盖全部待报销缺口</span><strong>${money(report.shortage, b)}</strong></div>
+      </div>
     </div>`;
 }
 
-function planTable(report, selectable = false) {
+function planGroups(report, selectable = false) {
   if (!report?.complete || !report.members.length) {
-    return empty('暂时没有待报销', '记下成员垫付后，这里会显示每位成员的建议付款安排。');
+    return empty('暂无待报销项目', '有成员垫付待结清时，这里会生成每位成员的建议付款安排。', '');
   }
-  const entryLabel = entry => {
-    const hasSuggestion = Number(entry.suggested) > 0;
-    const status = hasSuggestion ? (entry.fully_covered ? '建议付款' : '部分安排') : '暂不安排';
-    const original = money(entry.amount, entry.currency, false);
-    const convertedText = entry.currency === report.base ? '' : ` · 结算参考 ${money(entry.settlement, report.base, false)}`;
-    return `<div class="plan-entry ${hasSuggestion ? 'is-selected' : 'is-waiting'}">${selectable ? `<input class="plan-checkbox" type="checkbox" data-calc-select="${entry.id}" ${state.calculator.ids.has(entry.id) ? 'checked' : ''} aria-label="选择报销项目 #${entry.id} ${esc(entryDescription(entry))}">` : ''}<div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entryDescription(entry))}</strong><small>#${entry.id} · ${esc(entry.date)} · 剩余待报 ${original}${convertedText}${Number(entry.reimbursed_amount) > 0 ? ` · 原金额 ${money(entry.original_amount, entry.currency, false)} · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small></div><div class="plan-entry-suggested">${hasSuggestion ? `建议 ${money(entry.suggested, report.base, false)}` : '—'}</div></div>`;
-  };
-  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="成员报销安排" tabindex="0"><table class="data-table plan-table"><thead><tr><th>成员 / 具体项目</th><th class="money">全部待报销</th><th class="money">建议安排付款</th></tr></thead><tbody>${report.members.map(m => `<tr><td><strong>${esc(m.name)}</strong><div class="plan-entry-list">${m.entries.map(entryLabel).join('')}</div></td><td class="money">${money(m.due, report.base, false)}</td><td class="money"><strong>${money(m.suggested, report.base, false)}</strong><small class="subline">按项目明细安排</small></td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="plan-groups">${report.members.map(m => `
+    <div class="plan-group">
+      <div class="plan-group-head">
+        <div class="plan-group-member">${avatar(m.name, m.id)}<strong>${esc(m.name)}</strong><span class="mono muted">${m.entries.length} 笔</span></div>
+        <div class="plan-group-totals">
+          <span>待报 ${money(m.due, report.base, false)}</span>
+          <strong class="plan-group-suggested">建议 ${money(m.suggested, report.base)}</strong>
+        </div>
+      </div>
+      <div class="plan-group-items">
+        ${m.entries.map(entry => {
+          const hasSuggestion = Number(entry.suggested) > 0;
+          const status = hasSuggestion ? (entry.fully_covered ? '建议付款' : '部分安排') : '暂不安排';
+          const original = money(entry.amount, entry.currency, false);
+          const convertedText = entry.currency === report.base ? '' : ` ≈ ${money(entry.settlement, report.base, false)} ${esc(report.base)}`;
+          return `<div class="plan-item ${hasSuggestion ? 'is-selected' : 'is-waiting'}">
+            ${selectable ? `<input class="plan-checkbox" type="checkbox" data-calc-select="${entry.id}" ${state.calculator.ids.has(entry.id) ? 'checked' : ''} aria-label="选择报销项目 #${entry.id} ${esc(entryDescription(entry))}">` : ''}
+            <span class="plan-item-status">${status}</span>
+            <div class="plan-item-main">
+              <strong>${esc(entryDescription(entry))}</strong>
+              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
+            </div>
+            <div class="plan-item-suggested">${hasSuggestion ? money(entry.suggested, report.base, false) : '—'}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`).join('')}</div>`;
 }
 
-function renderCalculator() {
-  const c = state.calculator, r = c.report || state.report, base = r?.base || state.conf.reference_currency;
+function renderReimbursements() {
+  const mode = state.reimburseMode === 'calculator' ? 'calculator' : 'queue';
+  const c = state.calculator;
+  const r = mode === 'calculator' ? (c.report || state.report) : state.report;
+  const base = r?.base || state.conf.reference_currency;
+  const metric = k => r?.complete ? money(r[k], base) : '—';
+  const rows = reimbursementRows();
+  const selectable = canManage() && ['pending', 'draft'].includes(state.reimburseTab);
+  const modeSwitch = `
+    <div class="segmented segmented-compact" role="tablist" aria-label="报销与资金视图">
+      <button type="button" role="tab" aria-selected="${mode === 'queue'}" class="${mode === 'queue' ? 'active' : ''}" data-reimburse-mode="queue">报销处理</button>
+      <button type="button" role="tab" aria-selected="${mode === 'calculator'}" class="${mode === 'calculator' ? 'active' : ''}" data-reimburse-mode="calculator">资金测算</button>
+    </div>`;
+
+  const actions = mode === 'calculator'
+    ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
+    : `${canManage() ? `<button type="button" class="button button-outline" data-export-open="reimbursements">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`;
+
+  const summaryBar = `
+    <div class="metric-strip">
+      <div class="metric-cell"><small>全部待报销</small><strong>${metric('due')}</strong></div>
+      <div class="metric-cell"><small>当前可安排资金</small><strong>${metric('payable')}</strong></div>
+      <div class="metric-cell"><small>累计已报销</small><strong>${metric('paid')}</strong></div>
+    </div>`;
+
+  if (mode === 'queue') {
+    return heading('报销与资金', actions, modeSwitch) + summaryBar + reportWarning() + `
+      <section class="panel">
+        <div class="filter-tabs" role="tablist" aria-label="报销状态">
+          ${['pending', 'reimbursed', 'draft', 'voided'].map(s => `<button type="button" role="tab" aria-selected="${state.reimburseTab === s}" data-reimburse-tab="${s}" class="${state.reimburseTab === s ? 'active' : ''}">${STATUS[s]}<small>${state.entries.filter(e => e.kind === 'expense' && e.expense_type === 'advance' && e.status === s).length}</small></button>`).join('')}
+        </div>
+        <div id="reimbursement-results">${table(rows, {checkbox: selectable})}</div>
+        ${rows.length && selectable ? `<div class="batch-toolbar" id="batch-toolbar">${batchToolbar()}</div>` : ''}
+      </section>`;
+  }
+
   if (c.budgetBase && c.budgetBase !== base) c.budget = '';
   c.budgetBase = base;
-  return heading('资金计算', '按预算或勾选项目测算报销安排，也可模拟新进账，试算不会写入账本。', baseSelect()) + `
+  const fxIssue = Boolean(!r?.complete || r?.fx?.warning);
+  const fxCount = r?.fx?.rates ? Object.keys(r.fx.rates).filter(code => code !== r.base).length : 0;
+
+  return heading('报销与资金', actions, modeSwitch) + summaryBar + `
     <div class="calculator-grid">
       <section class="panel"><div class="panel-inner">
-        <h2>测算参数</h2>
-        <p class="calculator-intro">直接安排当前公账余额，或加入一笔尚未入账的新收入预演。公账支出与已登记报销均已从余额扣除。</p>
+        <h3>测算参数</h3>
         <form id="calculator-form">
           <div class="form-grid">
-            <label><span>本次新增进账 <small class="optional">选填</small></span><input name="amount" value="${esc(c.amount)}" inputmode="decimal" placeholder="留空，使用当前余额"></label>
+            <label><span>模拟新增进账 <small class="optional">选填</small></span><input name="amount" value="${esc(c.amount)}" inputmode="decimal" placeholder="留空按当前余额"></label>
             <label><span>收入币种</span><select name="currency">${currencyOptions(c.currency || state.conf.default_currency)}</select></label>
           </div>
-          <label><span>本次报销方式</span><select name="reimbursement_mode" id="calculator-mode">${options([{id: 'auto', name: '自动安排 · 最早发生优先'}, {id: 'budget', name: '指定报销预算'}, {id: 'manual', name: '手动选择报销项目'}], m => m.id, m => m.name, c.mode)}</select></label>
-          <label id="calculator-budget-field" ${c.mode === 'budget' ? '' : 'hidden'}><span>用于报销的金额 · ${esc(base)}</span><input name="budget" value="${esc(c.budget)}" inputmode="decimal" placeholder="例如：100.00，填 0 暂不报销" ${c.mode === 'budget' ? 'required' : ''}></label>
-          <p id="calculator-selection-hint" class="notice" ${c.mode === 'manual' ? '' : 'hidden'}>在下方项目清单勾选本次要报销的项目；已选 <strong id="calculator-selection-count">${c.ids.size}</strong> 项。未选项目继续待报销。</p>
+          <label><span>报销方式</span><select name="reimbursement_mode" id="calculator-mode">${options([{id: 'auto', name: '自动安排 · 最早发生优先'}, {id: 'budget', name: '指定报销预算'}, {id: 'manual', name: '手动勾选报销项目'}], m => m.id, m => m.name, c.mode)}</select></label>
+          <label id="calculator-budget-field" ${c.mode === 'budget' ? '' : 'hidden'}><span>报销预算（${esc(base)}）</span><input name="budget" value="${esc(c.budget)}" inputmode="decimal" placeholder="例如：100.00" ${c.mode === 'budget' ? 'required' : ''}></label>
+          <p id="calculator-selection-hint" class="calc-selection-inline" ${c.mode === 'manual' ? '' : 'hidden'}>在下方清单勾选本次要报销的项目 · 已选 <strong id="calculator-selection-count">${c.ids.size}</strong> 项</p>
           <div class="integration-actions">
-            <button class="button button-primary full-width" type="submit">${icon('calc')}计算资金安排</button>
+            <button class="button button-primary full-width" type="submit">${icon('calc')}计算安排</button>
           </div>
           <div class="form-error" id="calculator-error" role="alert"></div>
         </form>
-        <div class="notice"><strong>试算不会改动账本。</strong><p>指定预算时按最早发生日期分配；手动模式仅安排勾选项目。资金不足时自动显示部分安排，未结清部分继续待报销。</p></div>
-        ${canManage() ? '<div class="integration-actions"><button type="button" class="button button-outline full-width" data-new="income">把真实进账记入账本</button></div>' : ''}
       </div></section>
       <section id="calculator-result" aria-live="polite">${calcSummary(r, Boolean(r?.scenario))}</section>
     </div>
+
     <section class="panel recent-panel">
       <div class="panel-heading">
-        <div><h3>成员报销安排</h3><p>统一按 ${esc(base)} 参考换算 · 手动模式可直接勾选项目</p></div>
-        <div class="panel-heading-actions">
-          ${canManage() ? `<button type="button" class="button button-outline button-small" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}
-          <a class="console-inline-link" href="#reimbursements">前往报销管理 ${icon('arrowUpRight', 'icon-sm')}</a>
-        </div>
+        <h3>成员报销安排 <span class="panel-meta mono">${esc(base)}</span></h3>
+        <button type="button" class="console-inline-link" data-reimburse-mode="queue">返回报销处理 ${icon('arrow', 'icon-sm')}</button>
       </div>
-      <div id="plan-table">${planTable(r, c.mode === 'manual')}</div>
+      <div id="plan-table">${planGroups(r, c.mode === 'manual')}</div>
     </section>
-    <section class="panel recent-panel">
-      <div class="panel-heading">
-        <div><h3>参考汇率</h3><p>每日公开参考汇率 · 用于资金规划与跨币种报销确认</p></div>
+
+    <details class="panel fx-disclosure recent-panel" ${fxIssue ? 'open' : ''}>
+      <summary class="fx-disclosure-summary">
+        <div class="fx-disclosure-title">
+          <h3>参考汇率</h3>
+          <span class="badge ${fxIssue ? 'warn' : 'neutral'}">${fxIssue ? '需要检查' : fxCount ? `${fxCount} 组汇率` : '单币种'}</span>
+        </div>
         <button type="button" class="button button-outline button-small" id="refresh-fx">${icon('refresh', 'ico-refresh')}刷新汇率</button>
-      </div>
-      <div class="panel-inner" id="fx-details">${rateDetails(r)}${reportWarning(r)}</div>
-    </section>`;
+      </summary>
+      <div class="panel-inner fx-disclosure-body" id="fx-details">${rateDetails(r)}${reportWarning(r)}</div>
+    </details>`;
 }
 
 async function calculateFunds() {
@@ -1119,101 +1142,75 @@ async function calculateFunds() {
     if (request !== c.request || !$('#calculator-form')) return;
     c.report = data;
     $('#calculator-result').innerHTML = calcSummary(data, Boolean(data.scenario));
-    $('#plan-table').innerHTML = planTable(data, c.mode === 'manual');
+    $('#plan-table').innerHTML = planGroups(data, c.mode === 'manual');
     $('#fx-details').innerHTML = rateDetails(data) + reportWarning(data);
   } catch (e) {
     if (request !== c.request || !$('#calculator-form')) return;
     c.report = null;
     $('#calculator-error').textContent = e.message;
-    $('#calculator-result').innerHTML = '<div class="calc-summary"><h2>请调整后重新计算</h2><p>当前输入尚未生成有效的资金安排。</p></div>';
-    $('#plan-table').innerHTML = empty('本次安排尚未计算', '请检查预算或刷新项目后重新计算。');
+    $('#calculator-result').innerHTML = '<div class="calc-summary"><h3>请调整参数后重新计算</h3><p>当前输入尚未生成有效的资金安排。</p></div>';
+    $('#plan-table').innerHTML = empty('尚未生成安排', '请检查输入后重新计算。', '');
   } finally {
     if (request === c.request) $('#calculator-result')?.setAttribute('aria-busy', 'false');
   }
 }
 
-function renderMembers() {
-  const actions = [];
-  if (canManage()) {
-    actions.push(`<button type="button" class="button button-outline" id="sync-members">${icon('refresh', 'ico-refresh')}同步成员权限</button>`);
-  }
-  if (isOwner() && state.adminUrl) {
-    actions.push(`<a class="button button-primary" href="${esc(state.adminUrl)}" target="_blank" rel="noreferrer">前往 Vanora 管理后台 ${icon('arrowUpRight', 'icon-sm')}</a>`);
-  }
-  const activeCount = state.members.filter(m => m.active).length;
-  return heading(
-    '团队成员',
-    `只读成员名录 · 当前共 ${activeCount} 位启用成员，成员角色与启停由 Vanora OAuth 统一管理。`,
-    actions.join(''),
-  ) + `
-    <div class="notice">
-      成员的账本角色（<code>owner</code> 账本所有者 / <code>finance</code> 财务管理员 / <code>member</code> 普通成员）、账号启停与权限审计日志均由 <strong>Vanora OAuth</strong> 集中管理。在 Vanora 管理后台调整角色或停用账号后，系统会通过 OIDC Back-channel Logout 与权限同步自动生效。个人显示名称可在右上角「个人资料」中修改。
-    </div>
-    ${state.members.length ? `<div class="members-grid">
-      ${state.members.map(m => `
-        <section class="person-card ${m.active ? '' : 'inactive'}">
-          <div class="person-card-top">
-            ${avatar(m.name, m.id)}
-            <div>
-              <h3>${esc(m.name)}${m.id === state.user.id ? ' · 我' : ''}</h3>
-              <p class="person-handle">@${esc(m.username)}</p>
-              ${m.oidc_email ? `<p class="person-email">${esc(m.oidc_email)}</p>` : ''}
-            </div>
-          </div>
-          <hr>
-          <div class="person-detail"><span>账本角色</span><span class="badge ${m.active ? 'good' : 'draft'}">${esc(roleName(m.role))}${m.active ? '' : ' · 已停用'}</span></div>
-          <div class="person-detail"><span>Vanora 账号</span><span class="badge ${m.oidc_linked ? 'good' : 'draft'}">${m.oidc_linked ? '已同步' : '历史记录'}</span></div>
-          <div class="person-detail"><span>飞书绑定</span><span class="badge ${m.feishu_linked ? 'good' : 'draft'}">${m.feishu_linked ? '已绑定' : '未绑定'}</span></div>
-          <div class="person-detail"><span>Telegram</span><span class="badge ${m.telegram_linked ? 'good' : 'draft'}">${m.telegram_linked ? '已绑定' : '未绑定'}</span></div>
-          <div class="person-detail"><span>待报销 · 原币种</span><strong>${groupedTotals(state.entries.filter(e => e.payer_id === m.id && e.status === 'pending'), 'remaining_amount')}</strong></div>
-        </section>`).join('')}
-    </div>` : empty('暂无已同步成员', '请先在 Vanora OAuth 为成员分配客户端角色（owner / finance / member），再点击上方「同步成员权限」或等待成员登录。')}`;
+/* ============================================================================
+ * Settings Workbench (Role-Scoped Left Pill Sidebar)
+ * ========================================================================== */
+
+function allowedSettingsTabs() {
+  return isOwner() ? ['members', 'my-bots', 'general', 'bots-ai', 'backups'] : ['members', 'my-bots'];
 }
 
-function renderIntegrations() {
-  const i = state.integrations;
-  const domainVal = i.feishu_domain || 'feishu';
-  const presetDomain = ['feishu', 'lark'].includes(domainVal) ? domainVal : 'custom';
-  return heading('机器人与 AI', 'Web 上管理全局，飞书与 Telegram 中随手记账、查账与报销。') + `
-    <div class="integration-grid">
-      <section class="panel integration-card">
-        <div class="integration-head">
+function currencyEditorRow(c) {
+  return `<div class="currency-edit-row"><input data-cur="code" value="${esc(c.code)}" maxlength="3" aria-label="币种代码" placeholder="USD" required><input data-cur="name" value="${esc(c.name)}" maxlength="20" aria-label="币种名称" placeholder="美元" required><input data-cur="symbol" value="${esc(c.symbol)}" maxlength="8" aria-label="币种符号" placeholder="$" required><select data-cur="decimals" aria-label="币种小数位">${[0, 2, 3, 4].map(d => `<option ${d === c.decimals ? 'selected' : ''}>${d}</option>`).join('')}</select><button type="button" class="icon-button" data-remove-currency aria-label="移除此币种">${icon('close', 'icon-sm')}</button></div>`;
+}
+
+function renderSettingsMembers() {
+  const activeCount = state.members.filter(m => m.active).length;
+  const actions = [];
+  if (canManage()) {
+    actions.push(`<button type="button" class="button button-outline" id="sync-members">${icon('refresh', 'ico-refresh')}同步权限</button>`);
+  }
+  if (isOwner() && state.adminUrl) {
+    actions.push(`<a class="button button-primary" href="${esc(state.adminUrl)}" target="_blank" rel="noreferrer">Vanora 管理后台 ${icon('arrowUpRight', 'icon-sm')}</a>`);
+  }
+  return `
+    <div class="settings-section-head">
+      <div>
+        <h2>团队成员 <span class="panel-meta mono">${activeCount} 位启用</span></h2>
+      </div>
+      ${actions.length ? `<div class="heading-actions">${actions.join('')}</div>` : ''}
+    </div>
+    <section class="panel">
+      ${state.members.length ? `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="团队成员列表" tabindex="0"><table class="data-table members-table"><thead><tr><th>成员</th><th>角色</th><th>绑定状态</th><th class="money">待报销</th></tr></thead><tbody>${state.members.map(m => `<tr class="${m.active ? '' : 'is-inactive'}"><td><div class="member-table-cell">${avatar(m.name, m.id)}<div><strong>${esc(m.name)}${m.id === state.user.id ? ' · 我' : ''}</strong><span class="subline mono">@${esc(m.username)}${m.oidc_email ? ` · ${esc(m.oidc_email)}` : ''}</span></div></div></td><td><span class="badge ${m.active ? 'good' : 'draft'}">${esc(roleName(m.role))}${m.active ? '' : ' · 已停用'}</span></td><td><div class="member-links-cell"><span class="link-pill ${m.oidc_linked ? 'on' : ''}"><i class="status-dot ${m.oidc_linked ? 'online' : ''}"></i>Vanora</span><span class="link-pill ${m.feishu_linked ? 'on' : ''}"><i class="status-dot ${m.feishu_linked ? 'online' : ''}"></i>飞书</span><span class="link-pill ${m.telegram_linked ? 'on' : ''}"><i class="status-dot ${m.telegram_linked ? 'online' : ''}"></i>TG</span></div></td><td class="money">${groupedTotals(state.entries.filter(e => e.payer_id === m.id && e.status === 'pending'), 'remaining_amount')}</td></tr>`).join('')}</tbody></table></div>` : empty('暂无已同步成员', '在 Vanora OAuth 为成员分配客户端角色后，点击右上角「同步权限」。', '')}
+    </section>`;
+}
+
+function renderSettingsMyBots() {
+  const i = state.integrations || {};
+  return `
+    <div class="settings-section-head">
+      <h2>我的机器人</h2>
+    </div>
+    <div class="my-bots-grid">
+      <section class="panel bot-bind-card">
+        <div class="bot-bind-head">
           <div class="integration-title-wrap">
             <span class="integration-icon feishu">${icon('message')}</span>
             <div>
-              <h2>飞书 / Lark 机器人</h2>
-              <div class="badge-row">
-                <span class="badge ${i.feishu_linked ? 'good' : 'draft'}">${i.feishu_linked ? '账号已绑定' : '账号未绑定'}</span>
-                <span class="badge ${i.feishu_online ? 'good' : i.feishu_configured ? 'warn' : 'draft'}">${i.feishu_online ? '进程在线' : i.feishu_configured ? '未检测到在线' : '未配置'}</span>
-                ${i.feishu_embed_enabled ? '<span class="badge good">支持工作台嵌入</span>' : ''}
+              <h3>飞书 / Lark</h3>
+              <div class="bot-status-line">
+                <span><i class="status-dot ${i.feishu_linked ? 'online' : ''}"></i>${i.feishu_linked ? '已绑定' : '未绑定'}</span>
+                <span class="meta-sep">·</span>
+                <span><i class="status-dot ${i.feishu_online ? 'online' : i.feishu_configured ? 'warn' : ''}"></i>${i.feishu_online ? '在线' : i.feishu_configured ? '未在线' : '未配置'}</span>
               </div>
             </div>
           </div>
         </div>
-        <p class="integration-subtitle">支持交互卡片原地刷新、私聊与允许名单群聊、富文本消息、深度链接回跳 Web 传凭证，以及国内版飞书与国际版 Lark。</p>
-        <div class="integration-steps">
-          <div class="integration-step"><span class="step-number">1</span><span>在飞书开放平台创建企业自建应用并启用机器人，开启长连接事件 <code>im.message.receive_v1</code> 与卡片回调 <code>card.action.trigger</code>，启动 <code>python -m app.feishu</code>。</span></div>
-          <div class="integration-step"><span class="step-number">2</span><span>应用由账本所有者配置。点击生成一次性绑定码，私聊机器人发送「绑定 绑定码」。</span></div>
-          <div class="integration-step"><span class="step-number">3</span><span>发送 <code>/start</code> 或「菜单」呼出交互卡片；也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」或自然语言。</span></div>
-        </div>
-        ${i.feishu_bot_name ? `<div class="notice">当前连接应用：<strong>${esc(i.feishu_bot_name)}</strong> · 群聊请先在「团队设置」中添加允许名单。</div>` : '<div class="notice">群聊中 @机器人发送 <code>/groupid</code> 获取群 ID，添加到「团队设置」允许名单即可在群内记账。</div>'}
-        ${i.feishu_last_error ? `<div class="callout warning">${icon('info')}<span class="callout-body">最近状态提示：${esc(i.feishu_last_error)}</span></div>` : ''}
-        ${isOwner() ? `<form id="feishu-config-form" class="integration-form">
-          <label><span>飞书 App ID</span><input id="feishu-app-id" name="app_id" value="${esc(i.feishu_app_id || '')}" placeholder="cli_xxxxxxxxxxxxxxxx" autocomplete="off" required></label>
-          <label><span>飞书 App Secret</span><input id="feishu-app-secret" name="app_secret" type="password" autocomplete="new-password" placeholder="${i.feishu_configured ? '留空以保留已保存的密钥' : '填写应用密钥'}"></label>
-          <label><span>服务区域 / 域名</span>
-            <select id="feishu-domain-preset" name="domain_preset">
-              <option value="feishu" ${presetDomain === 'feishu' ? 'selected' : ''}>飞书国内版（open.feishu.cn）</option>
-              <option value="lark" ${presetDomain === 'lark' ? 'selected' : ''}>Lark 国际版（open.larksuite.com）</option>
-              <option value="custom" ${presetDomain === 'custom' ? 'selected' : ''}>自定义私有化域名</option>
-            </select>
-          </label>
-          <label id="feishu-domain-custom-wrap" ${presetDomain === 'custom' ? '' : 'hidden'}><span>自定义服务地址</span><input id="feishu-domain-custom" name="domain_custom" type="url" value="${presetDomain === 'custom' ? esc(domainVal) : ''}" placeholder="https://open.example.com" autocomplete="off"></label>
-          <p class="fx-caption">密钥保存在服务器账本数据库中，不会明文返回到网页；修改后飞书 worker 自动重连。</p>
-          <div class="integration-actions">
-            <button type="submit" class="button button-outline" id="save-feishu-config">保存飞书配置</button>
-          </div>
-        </form>` : ''}
+        ${i.feishu_bot_name ? `<p class="bot-meta-line">当前应用：<strong>${esc(i.feishu_bot_name)}</strong></p>` : ''}
+        ${i.feishu_last_error ? `<div class="callout warning">${icon('info')}<span class="callout-body">${esc(i.feishu_last_error)}</span></div>` : ''}
         <div class="integration-actions">
           <button type="button" class="button button-primary" id="generate-feishu-link">${i.feishu_linked ? '重新生成绑定码' : '生成绑定码'}</button>
           ${i.feishu_linked ? '<button type="button" class="button button-outline button-danger-outline" id="unlink-feishu">解除绑定</button>' : ''}
@@ -1221,210 +1218,265 @@ function renderIntegrations() {
         <div id="feishu-link-code-result"></div>
       </section>
 
-      <section class="panel integration-card">
-        <div class="integration-head">
+      <section class="panel bot-bind-card">
+        <div class="bot-bind-head">
           <div class="integration-title-wrap">
             <span class="integration-icon">${icon('send')}</span>
             <div>
-              <h2>Telegram 机器人</h2>
-              <div class="badge-row">
-                <span class="badge ${i.telegram_linked ? 'good' : 'draft'}">${i.telegram_linked ? '账号已绑定' : '账号未绑定'}</span>
-                <span class="badge ${i.bot_online ? 'good' : i.bot_configured ? 'warn' : 'draft'}">${i.bot_online ? '进程在线' : i.bot_configured ? '未检测到在线' : '未配置'}</span>
+              <h3>Telegram</h3>
+              <div class="bot-status-line">
+                <span><i class="status-dot ${i.telegram_linked ? 'online' : ''}"></i>${i.telegram_linked ? '已绑定' : '未绑定'}</span>
+                <span class="meta-sep">·</span>
+                <span><i class="status-dot ${i.bot_online ? 'online' : i.bot_configured ? 'warn' : ''}"></i>${i.bot_online ? '在线' : i.bot_configured ? '未在线' : '未配置'}</span>
               </div>
             </div>
           </div>
         </div>
-        <p class="integration-subtitle">通过按钮逐步记账、分页查账、试算资金并一键登记报销，或直接发送自然语言由 AI 解析。</p>
-        <div class="integration-steps">
-          <div class="integration-step"><span class="step-number">1</span><span>通过 BotFather 创建机器人，在服务器 <code>.env</code> 配置 <code>TELEGRAM_BOT_TOKEN</code> 并启动 <code>python -m app.bot</code>。</span></div>
-          <div class="integration-step"><span class="step-number">2</span><span>点击下方生成 10 分钟内有效的一次性绑定码，在机器人私聊中发送 <code>/start 绑定码</code>。</span></div>
-          <div class="integration-step"><span class="step-number">3</span><span>发送 <code>/expense</code> 记录公账支出、<code>/book</code> 记录成员垫付、<code>/funds</code> 计算资金与一键报销。</span></div>
-        </div>
-        <div class="notice">机器人配置：${i.bot_configured ? '已配置' : '尚未配置'} · 进程：${i.bot_online ? '在线' : '尚未检测到在线'}${i.bot_username ? `<p>机器人：<a class="console-inline-link" href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ${icon('arrowUpRight', 'icon-sm')}</a></p>` : ''}</div>
+        ${i.bot_username ? `<p class="bot-meta-line">机器人：<a class="console-inline-link" href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ${icon('arrowUpRight', 'icon-sm')}</a></p>` : ''}
         <div class="integration-actions">
           <button type="button" class="button button-primary" id="generate-link">${i.telegram_linked ? '重新生成绑定码' : '生成绑定码'}</button>
           ${i.telegram_linked ? '<button type="button" class="button button-outline button-danger-outline" id="unlink-telegram">解除绑定</button>' : ''}
         </div>
         <div id="link-code-result"></div>
       </section>
-
-      <section class="panel integration-card integration-card-wide">
-        ${(() => {
-          const aiCfg = i.ai || {
-            enabled: true, configured: Boolean(i.ai_configured), source: 'none',
-            base_url: 'https://api.openai.com/v1', has_api_key: false, model: '',
-            response_format: 'json_object', timeout: 40, context_entries: 120,
-            context_chars: 60000, max_actions: 20, updated_at: '',
-          };
-          const statusClass = aiCfg.configured ? 'good' : (!aiCfg.enabled && aiCfg.has_api_key ? 'warn' : 'draft');
-          const statusLabel = aiCfg.configured ? '已配置并就绪' : (!aiCfg.enabled && aiCfg.has_api_key ? '已停用' : '未配置');
-          return `
-        <div class="integration-head">
-          <div class="integration-title-wrap">
-            <span class="integration-icon ai">${icon('spark')}</span>
-            <div>
-              <h2>AI 自然语言记账引擎</h2>
-              <div class="badge-row">
-                <span class="badge ${statusClass}">${statusLabel}</span>
-                ${aiCfg.configured && aiCfg.model ? `<span class="badge neutral mono">${esc(aiCfg.model)}</span>` : ''}
-                <span class="badge neutral">Web · 飞书 · Telegram 共用</span>
-                ${aiCfg.source === 'env' ? '<span class="badge warn">当前来自环境变量</span>' : ''}
-              </div>
-            </div>
-          </div>
-          <button type="button" class="button button-primary" data-ai-open>${icon('spark')}打开 AI 助手</button>
-        </div>
-        <p class="integration-subtitle">账本所有者可直接在此配置 OpenAI 兼容接口，保存后立即对 Web、飞书与 Telegram 生效，无需环境变量。AI 生成的写入操作须经核对确认，并遵循当前账号的账本权限。</p>
-        <div class="ai-wide-columns${isOwner() ? '' : ' ai-wide-single'}">
-          ${isOwner() ? `<div>
-            <h3>接口与模型设置</h3>
-            <form id="ai-config-form" class="integration-form">
-              <label class="ai-switch-row">
-                <input class="settings-switch" id="ai-enabled" name="enabled" type="checkbox" ${aiCfg.enabled ? 'checked' : ''}>
-                <span>启用 AI 自然语言记账</span>
-              </label>
-              <label>
-                <span>接口地址（Base URL）</span>
-                <input id="ai-base-url" name="base_url" type="url" value="${esc(aiCfg.base_url || 'https://api.openai.com/v1')}" placeholder="https://api.openai.com/v1" autocomplete="off">
-              </label>
-              <p class="fx-caption">兼容 OpenAI Chat Completions 接口，填写到 <code>/v1</code> 即可，无需包含 <code>/chat/completions</code>。</p>
-              <div class="form-grid">
-                <label>
-                  <span>模型名称</span>
-                  <input id="ai-model" name="model" value="${esc(aiCfg.model || '')}" placeholder="例如：gpt-4o-mini" autocomplete="off">
-                </label>
-                <label>
-                  <span>返回格式</span>
-                  <select id="ai-response-format" name="response_format">
-                    <option value="json_object" ${aiCfg.response_format === 'json_object' ? 'selected' : ''}>JSON 对象（json_object · 推荐）</option>
-                    <option value="json_schema" ${aiCfg.response_format === 'json_schema' ? 'selected' : ''}>结构化输出（json_schema）</option>
-                    <option value="none" ${aiCfg.response_format === 'none' ? 'selected' : ''}>不指定（由提示词约束 JSON）</option>
-                  </select>
-                </label>
-              </div>
-              <label>
-                <span>API Key <small class="optional">${aiCfg.has_api_key ? '已保存，留空保留原密钥' : '本地无鉴权接口可填任意占位符'}</small></span>
-                <input id="ai-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="${aiCfg.has_api_key ? '已保存，留空保留原密钥' : 'sk-...'}">
-              </label>
-              <details class="ai-advanced">
-                <summary>高级参数（超时、上下文规模与单次操作上限）</summary>
-                <div class="form-grid ai-advanced-grid">
-                  <label>
-                    <span>请求超时（秒）</span>
-                    <input id="ai-timeout" name="timeout" type="number" min="5" max="180" step="1" value="${esc(aiCfg.timeout)}">
-                  </label>
-                  <label>
-                    <span>单次最多操作数</span>
-                    <input id="ai-max-actions" name="max_actions" type="number" min="1" max="50" step="1" value="${esc(aiCfg.max_actions)}">
-                  </label>
-                  <label>
-                    <span>上下文最近账目条数</span>
-                    <input id="ai-context-entries" name="context_entries" type="number" min="20" max="500" step="1" value="${esc(aiCfg.context_entries)}">
-                  </label>
-                  <label>
-                    <span>上下文字符上限</span>
-                    <input id="ai-context-chars" name="context_chars" type="number" min="5000" max="200000" step="1000" value="${esc(aiCfg.context_chars)}">
-                  </label>
-                </div>
-              </details>
-              <div class="form-error" id="ai-config-error" role="alert"></div>
-              <p class="fx-caption">API Key 保存在服务器账本数据库中，不会明文返回到网页；保存后立即生效，无需重启服务。${aiCfg.source === 'env' ? ' 当前检测到旧的环境变量配置，保存后将改由 Web 数据库统一管理。' : ''}</p>
-              <div class="integration-actions">
-                <button type="submit" class="button button-primary" id="save-ai-config">保存 AI 配置</button>
-                <button type="button" class="button button-outline" id="test-ai-config">保存并测试连接</button>
-                ${aiCfg.has_api_key || aiCfg.source === 'db' ? '<button type="button" class="button button-outline button-danger-outline" id="clear-ai-config">清除配置</button>' : ''}
-              </div>
-            </form>
-          </div>` : ''}
-          <div>
-            <h3>自然语言示例</h3>
-            <div class="code-block">昨天我垫了打车 35 元，老王垫的聚餐 240 元，
-收到客户尾款 2000 美元；
-公账支付服务器费 100 元；看看现在能报多少。</div>
-            <div class="notice">AI 仅读取最近约 ${esc(aiCfg.context_entries)} 笔账目摘要用于精准匹配，单次最多生成 ${esc(aiCfg.max_actions)} 项操作，绝不发送凭证文件、密码或会话令牌。</div>
-            <div class="notice">未启用或未配置 AI 时，Web 表单与飞书 / Telegram 按钮菜单均正常可用。</div>
-          </div>
-        </div>`;
-        })()}
-      </section>
     </div>`;
 }
 
-function currencyEditorRow(c) {
-  return `<div class="currency-edit-row"><input data-cur="code" value="${esc(c.code)}" maxlength="3" aria-label="币种代码" placeholder="USD" required><input data-cur="name" value="${esc(c.name)}" maxlength="20" aria-label="币种名称" placeholder="美元" required><input data-cur="symbol" value="${esc(c.symbol)}" maxlength="8" aria-label="币种符号" placeholder="$" required><select data-cur="decimals" aria-label="币种小数位">${[0, 2, 3, 4].map(d => `<option ${d === c.decimals ? 'selected' : ''}>${d}</option>`).join('')}</select><button type="button" class="icon-button" data-remove-currency aria-label="移除此币种">${icon('close', 'icon-sm')}</button></div>`;
+function renderSettingsGeneral() {
+  const c = state.conf;
+  return `
+    <div class="settings-section-head">
+      <h2>常规与币种</h2>
+    </div>
+    <form id="settings-form">
+      <section class="panel">
+        <div class="panel-inner">
+          <h3>团队偏好</h3>
+          <div class="settings-three-col">
+            <label><span>团队名称</span><input name="team_name" value="${esc(c.team_name)}" maxlength="40" required></label>
+            <label><span>默认记账币种</span><select name="default_currency" id="default-currency">${currencyOptions(c.default_currency)}</select></label>
+            <label><span>资金汇总参考币种</span><select name="reference_currency" id="reference-currency">${currencyOptions(c.reference_currency)}</select></label>
+          </div>
+          <p class="fx-caption">账目时区 <span class="mono">${esc(c.timezone)}</span></p>
+        </div>
+        <div class="panel-divider"></div>
+        <div class="panel-inner">
+          <div class="panel-inner-head">
+            <h3>可用币种</h3>
+            <button type="button" class="button button-outline button-small" id="add-currency">${icon('plus', 'ico-plus')}添加币种</button>
+          </div>
+          <div class="currencies-editor">
+            <div class="currency-edit-head"><span>代码</span><span>名称</span><span>符号</span><span>小数位</span><span></span></div>
+            <div id="currency-rows">${c.currencies.map(currencyEditorRow).join('')}</div>
+          </div>
+        </div>
+        <div class="panel-footer-actions">
+          <div class="form-error panel-footer-error" id="settings-error" role="alert"></div>
+          <button class="button button-primary" type="submit">保存团队设置</button>
+        </div>
+      </section>
+    </form>`;
+}
+
+function renderSettingsBotsAi() {
+  const i = state.integrations || {};
+  const c = state.conf;
+  const domainVal = i.feishu_domain || 'feishu';
+  const presetDomain = ['feishu', 'lark'].includes(domainVal) ? domainVal : 'custom';
+  const aiCfg = i.ai || {
+    enabled: true, configured: Boolean(i.ai_configured), source: 'none',
+    base_url: 'https://api.openai.com/v1', has_api_key: false, model: '',
+    response_format: 'json_object', timeout: 40, context_entries: 120,
+    context_chars: 60000, max_actions: 20, updated_at: '',
+  };
+  const statusClass = aiCfg.configured ? 'good' : (!aiCfg.enabled && aiCfg.has_api_key ? 'warn' : 'draft');
+  const statusLabel = aiCfg.configured ? '已就绪' : (!aiCfg.enabled && aiCfg.has_api_key ? '已停用' : '未配置');
+
+  return `
+    <div class="settings-section-head">
+      <h2>机器人与 AI</h2>
+      <button type="button" class="button button-outline" data-ai-open>${icon('spark')}打开 AI 助手</button>
+    </div>
+
+    <div class="settings-stack">
+      <form id="ai-config-form" class="panel">
+        <div class="panel-heading">
+          <div class="panel-heading-inline">
+            <h3>AI 记账引擎</h3>
+            <span class="badge ${statusClass}">${statusLabel}</span>
+            ${aiCfg.configured && aiCfg.model ? `<span class="badge neutral mono">${esc(aiCfg.model)}</span>` : ''}
+            ${aiCfg.source === 'env' ? '<span class="badge warn">环境变量</span>' : ''}
+          </div>
+          <label class="ai-switch-row">
+            <input class="settings-switch" id="ai-enabled" name="enabled" type="checkbox" ${aiCfg.enabled ? 'checked' : ''}>
+            <span>启用</span>
+          </label>
+        </div>
+        <div class="panel-inner form-stack">
+          <label>
+            <span>接口地址（Base URL）</span>
+            <input id="ai-base-url" name="base_url" type="url" value="${esc(aiCfg.base_url || 'https://api.openai.com/v1')}" placeholder="https://api.openai.com/v1" autocomplete="off">
+          </label>
+          <div class="form-grid">
+            <label>
+              <span>模型名称</span>
+              <input id="ai-model" name="model" value="${esc(aiCfg.model || '')}" placeholder="例如：gpt-4o-mini" autocomplete="off">
+            </label>
+            <label>
+              <span>返回格式</span>
+              <select id="ai-response-format" name="response_format">
+                <option value="json_object" ${aiCfg.response_format === 'json_object' ? 'selected' : ''}>JSON 对象（推荐）</option>
+                <option value="json_schema" ${aiCfg.response_format === 'json_schema' ? 'selected' : ''}>结构化输出（json_schema）</option>
+                <option value="none" ${aiCfg.response_format === 'none' ? 'selected' : ''}>不指定</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>API Key <small class="optional">${aiCfg.has_api_key ? '已保存，留空保留原密钥' : '选填占位符'}</small></span>
+            <input id="ai-api-key" name="api_key" type="password" autocomplete="new-password" placeholder="${aiCfg.has_api_key ? '已保存，留空保留原密钥' : 'sk-...'}">
+          </label>
+          <details class="disclosure-box">
+            <summary><span>高级参数（超时、上下文与上限）</span></summary>
+            <div class="disclosure-body">
+              <div class="form-grid">
+                <label><span>请求超时（秒）</span><input id="ai-timeout" name="timeout" type="number" min="5" max="180" step="1" value="${esc(aiCfg.timeout)}"></label>
+                <label><span>单次最多操作数</span><input id="ai-max-actions" name="max_actions" type="number" min="1" max="50" step="1" value="${esc(aiCfg.max_actions)}"></label>
+                <label><span>上下文最近条数</span><input id="ai-context-entries" name="context_entries" type="number" min="20" max="500" step="1" value="${esc(aiCfg.context_entries)}"></label>
+                <label><span>上下文字符上限</span><input id="ai-context-chars" name="context_chars" type="number" min="5000" max="200000" step="1000" value="${esc(aiCfg.context_chars)}"></label>
+              </div>
+            </div>
+          </details>
+          <details class="disclosure-box">
+            <summary><span>自然语言指令示例</span></summary>
+            <div class="disclosure-body">
+              <div class="code-block">昨天我垫了打车 35 元，老王垫的聚餐 240 元，
+收到客户尾款 2000 美元；
+公账支付服务器费 100 元；看看现在能报多少。</div>
+            </div>
+          </details>
+        </div>
+        <div class="panel-footer-actions panel-footer-split">
+          <div class="panel-footer-left">
+            ${aiCfg.has_api_key || aiCfg.source === 'db' ? '<button type="button" class="button button-outline button-danger-outline" id="clear-ai-config">清除配置</button>' : ''}
+            <div class="form-error panel-footer-error" id="ai-config-error" role="alert"></div>
+          </div>
+          <div class="modal-actions-group">
+            <button type="button" class="button button-outline" id="test-ai-config">保存并测试</button>
+            <button type="submit" class="button button-primary" id="save-ai-config">保存 AI 配置</button>
+          </div>
+        </div>
+      </form>
+
+      <form id="feishu-config-form" class="panel">
+        <div class="panel-heading">
+          <div class="panel-heading-inline">
+            <h3>飞书 / Lark 应用</h3>
+            <span class="badge ${i.feishu_online ? 'good' : i.feishu_configured ? 'warn' : 'draft'}">${i.feishu_online ? '在线' : i.feishu_configured ? '未在线' : '未配置'}</span>
+            ${i.feishu_embed_enabled ? '<span class="badge good">工作台嵌入</span>' : ''}
+          </div>
+        </div>
+        <div class="panel-inner form-stack">
+          ${i.feishu_last_error ? `<div class="callout warning">${icon('info')}<span class="callout-body">${esc(i.feishu_last_error)}</span></div>` : ''}
+          <div class="form-grid">
+            <label><span>App ID</span><input id="feishu-app-id" name="app_id" value="${esc(i.feishu_app_id || '')}" placeholder="cli_xxxxxxxxxxxxxxxx" autocomplete="off" required></label>
+            <label><span>App Secret</span><input id="feishu-app-secret" name="app_secret" type="password" autocomplete="new-password" placeholder="${i.feishu_configured ? '留空保留已保存密钥' : '填写应用密钥'}"></label>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>服务区域 / 域名</span>
+              <select id="feishu-domain-preset" name="domain_preset">
+                <option value="feishu" ${presetDomain === 'feishu' ? 'selected' : ''}>飞书国内版（open.feishu.cn）</option>
+                <option value="lark" ${presetDomain === 'lark' ? 'selected' : ''}>Lark 国际版（open.larksuite.com）</option>
+                <option value="custom" ${presetDomain === 'custom' ? 'selected' : ''}>自定义私有化域名</option>
+              </select>
+            </label>
+            <label id="feishu-domain-custom-wrap" ${presetDomain === 'custom' ? '' : 'hidden'}>
+              <span>自定义服务地址</span>
+              <input id="feishu-domain-custom" name="domain_custom" type="url" value="${presetDomain === 'custom' ? esc(domainVal) : ''}" placeholder="https://open.example.com" autocomplete="off">
+            </label>
+          </div>
+          <details class="disclosure-box">
+            <summary><span>飞书与 Telegram 机器人部署指引</span></summary>
+            <div class="disclosure-body help-steps">
+              <p><strong>飞书 / Lark：</strong>在开放平台创建企业自建应用并启用机器人，开启长连接事件 <code>im.message.receive_v1</code> 与卡片回调 <code>card.action.trigger</code>，启动 <code>python -m app.feishu</code>；成员在「我的机器人」生成绑定码私聊发送。</p>
+              <p><strong>Telegram：</strong>通过 BotFather 获取 Token 后写入 <code>TELEGRAM_BOT_TOKEN</code> 并启动 <code>python -m app.bot</code>；私聊发送 <code>/start 绑定码</code> 完成绑定。</p>
+            </div>
+          </details>
+        </div>
+        <div class="panel-footer-actions">
+          <button type="submit" class="button button-primary" id="save-feishu-config">保存飞书配置</button>
+        </div>
+      </form>
+
+      <form id="allowlist-form" class="panel">
+        <div class="panel-heading">
+          <h3>群组允许名单</h3>
+        </div>
+        <div class="panel-inner">
+          <div class="form-grid">
+            <label>
+              <span>飞书群组 ID <small class="optional">一行一个，群内发 /groupid 获取</small></span>
+              <textarea name="feishu_allowed_chats" rows="4" placeholder="例如：oc_123456789">${esc((c.feishu_allowed_chats || []).join('\n'))}</textarea>
+            </label>
+            <label>
+              <span>Telegram 群组 ID <small class="optional">一行一个</small></span>
+              <textarea name="telegram_allowed_chats" rows="4" placeholder="例如：-1001234567890">${esc((c.telegram_allowed_chats || []).join('\n'))}</textarea>
+            </label>
+          </div>
+        </div>
+        <div class="panel-footer-actions">
+          <div class="form-error panel-footer-error" id="allowlist-error" role="alert"></div>
+          <button class="button button-primary" type="submit" id="save-allowlist">保存群组白名单</button>
+        </div>
+      </form>
+    </div>`;
 }
 
 function renderSettings() {
-  const c = state.conf;
-  const tab = ['general', 'bots', 'backups'].includes(state.settingsTab) ? state.settingsTab : 'general';
-  const tabs = [
-    ['general', '常规与币种'],
-    ['bots', '群组白名单'],
-    ['backups', '备份与恢复'],
+  const allowed = allowedSettingsTabs();
+  if (!allowed.includes(state.settingsTab)) state.settingsTab = allowed[0];
+  const tab = state.settingsTab;
+  const personalGroup = [
+    ['members', '团队成员', 'users'],
+    ['my-bots', '我的机器人', 'message'],
   ];
-  return heading('团队设置', '管理团队名称、常用币种、机器人群组允许名单以及数据备份策略。') + `
-    <nav class="settings-categories" aria-label="团队设置分类">
-      ${tabs.map(([id, label]) => `<button type="button" data-settings-tab="${id}" ${tab === id ? 'aria-current="page"' : ''}>${label}</button>`).join('')}
-    </nav>
-    <div class="settings-main">
-      <form id="settings-form" ${tab === 'backups' ? 'hidden' : ''}>
-        <div class="settings-tab-panel" data-settings-panel="general" ${tab === 'general' ? '' : 'hidden'}>
-          <div class="settings-grid">
-            <section class="panel"><div class="panel-inner">
-              <h3>团队与币种偏好</h3>
-              <label><span>团队名称</span><input name="team_name" value="${esc(c.team_name)}" maxlength="40" required></label>
-              <label><span>默认记账币种</span><select name="default_currency" id="default-currency">${currencyOptions(c.default_currency)}</select></label>
-              <label><span>资金汇总参考币种</span><select name="reference_currency" id="reference-currency">${currencyOptions(c.reference_currency)}</select></label>
-              <p class="fx-caption">当前账目日期按 <span class="mono">${esc(c.timezone)}</span> 计算。可在服务器环境变量 <code>TEAM_TIMEZONE</code> 中调整时区。</p>
-            </div>
-            <div class="panel-footer-actions">
-              <button class="button button-primary" type="submit">保存团队设置</button>
-            </div></section>
-            <section class="panel"><div class="panel-inner">
-              <h3>可用币种</h3>
-              <p class="fx-caption">可添加 3 位大写字母币种代码。已有账目或付款记录的币种不能移除或修改小数位。</p>
-              <div class="currencies-editor">
-                <div class="currency-edit-head"><span>代码</span><span>名称</span><span>符号</span><span>小数位</span><span></span></div>
-                <div id="currency-rows">${c.currencies.map(currencyEditorRow).join('')}</div>
-                <button type="button" class="button button-outline button-small full-width" id="add-currency">${icon('plus', 'ico-plus')}添加币种</button>
-              </div>
-            </div>
-            <div class="panel-footer-actions">
-              <button class="button button-primary" type="submit">保存团队设置</button>
-            </div></section>
-          </div>
+  const teamGroup = isOwner() ? [
+    ['general', '常规与币种', 'settings'],
+    ['bots-ai', '机器人与 AI', 'spark'],
+    ['backups', '备份与恢复', 'database'],
+  ] : [];
+
+  let bodyHtml = '';
+  if (tab === 'members') bodyHtml = renderSettingsMembers();
+  else if (tab === 'my-bots') bodyHtml = renderSettingsMyBots();
+  else if (tab === 'general') bodyHtml = renderSettingsGeneral();
+  else if (tab === 'bots-ai') bodyHtml = renderSettingsBotsAi();
+  else if (tab === 'backups') bodyHtml = '<div id="backup-settings-slot"></div>';
+
+  const navItem = ([id, label, ico]) =>
+    `<button type="button" class="settings-nav-item${tab === id ? ' active' : ''}" data-settings-tab="${id}" ${tab === id ? 'aria-current="page"' : ''}>${icon(ico, 'icon-sm')}<span>${esc(label)}</span></button>`;
+
+  return heading('设置') + `
+    <div class="settings-shell">
+      <nav class="settings-sidebar" aria-label="设置分组">
+        <div class="settings-nav-group">
+          <span class="settings-nav-label">个人与团队</span>
+          ${personalGroup.map(navItem).join('')}
         </div>
-        <div class="settings-tab-panel" data-settings-panel="bots" ${tab === 'bots' ? '' : 'hidden'}>
-          <div class="settings-grid">
-            <section class="panel"><div class="panel-inner">
-              <h3>飞书群组允许名单</h3>
-              <label><span>允许使用的飞书群组 ID <small class="optional">一行一个</small></span><textarea name="feishu_allowed_chats" rows="4" placeholder="例如：oc_123456789">${esc((c.feishu_allowed_chats || []).join('\n'))}</textarea></label>
-              <p class="fx-caption">在飞书群里 @机器人并发送 <code>/groupid</code> 获取群组 ID。群成员须先私聊绑定，填写内容时请回复机器人提示并 @机器人。</p>
-            </div>
-            <div class="panel-footer-actions">
-              <button class="button button-primary" type="submit">保存群组白名单</button>
-            </div></section>
-            <section class="panel"><div class="panel-inner">
-              <h3>Telegram 群组允许名单</h3>
-              <label><span>允许使用的 Telegram 群组 ID <small class="optional">一行一个</small></span><textarea name="telegram_allowed_chats" rows="4" placeholder="例如：-1001234567890">${esc(c.telegram_allowed_chats.join('\n'))}</textarea></label>
-              <p class="fx-caption">未在允许名单中的群组不会收到机器人的记账回复。</p>
-            </div>
-            <div class="panel-footer-actions">
-              <button class="button button-primary" type="submit">保存群组白名单</button>
-            </div></section>
-          </div>
-        </div>
-        <div class="form-error" id="settings-error" role="alert"></div>
-      </form>
-      <div class="settings-tab-panel" data-settings-panel="backups" ${tab === 'backups' ? '' : 'hidden'}>
-        <div id="backup-settings-slot"></div>
-      </div>
+        ${teamGroup.length ? `<div class="settings-nav-group">
+          <span class="settings-nav-label">团队管理</span>
+          ${teamGroup.map(navItem).join('')}
+        </div>` : ''}
+      </nav>
+      <div class="settings-pane">${bodyHtml}</div>
     </div>`;
 }
 
 const renderers = {
-  overview: renderOverview, ledger: renderLedger, reimbursements: renderReimbursements,
-  calculator: renderCalculator, members: renderMembers, integrations: renderIntegrations, settings: renderSettings,
+  overview: renderOverview,
+  ledger: renderLedger,
+  reimbursements: renderReimbursements,
+  settings: renderSettings,
 };
 
 /* ============================================================================
@@ -1489,10 +1541,8 @@ function hydrateStaticChrome() {
       btn.innerHTML = icon('close');
     }
   });
-  $('#menu-new-entry').innerHTML = `${icon('plus')}<span>记一笔账目</span>`;
-  $('#menu-integrations').innerHTML = `${icon('message')}<span>机器人与 AI</span>`;
-  $('#settings-link').innerHTML = `${icon('settings')}<span>团队设置</span>`;
   $('#profile-button').innerHTML = `${icon('user')}<span>个人资料</span>`;
+  $('#menu-vanora-account').innerHTML = `${icon('arrowUpRight')}<span>Vanora 账户中心</span>`;
   $('#menu-logout').innerHTML = `${icon('logout')}<span>退出登录</span>`;
   if (feishuEnv.isFeishu) {
     const envBadge = $('#feishu-env-badge');
@@ -1507,23 +1557,38 @@ function renderNav() {
   const nav = $('#navigation');
   if (!nav) return;
   const pendingCount = state.entries.filter(e => e.status === 'pending').length;
-  const linksHtml = Object.entries(PAGES).filter(([key]) => key !== 'settings' || isOwner()).map(([key, [name]]) =>
-    `<a href="#${key}" class="${state.page === key ? 'active' : ''}" ${state.page === key ? 'aria-current="page"' : ''}><span>${esc(name)}</span>${key === 'reimbursements' && pendingCount ? `<small class="nav-count">${pendingCount}</small>` : ''}</a>`
-  ).join('');
-  nav.innerHTML = linksHtml + '<span class="console-topnav-indicator" id="nav-indicator" aria-hidden="true"></span>';
-  if (typeof ResizeObserver !== 'undefined') {
-    if (navObserver) navObserver.disconnect();
-    navObserver = new ResizeObserver(updateNavIndicator);
-    navObserver.observe(nav);
-    nav.querySelectorAll('a').forEach(a => navObserver.observe(a));
+  const existingLinks = $$('a[data-nav-page]', nav);
+  if (existingLinks.length !== Object.keys(PAGES).length) {
+    const linksHtml = Object.entries(PAGES).map(([key, [name]]) =>
+      `<a href="#${key}" data-nav-page="${key}" class="${state.page === key ? 'active' : ''}" ${state.page === key ? 'aria-current="page"' : ''}><span>${esc(name)}</span>${key === 'reimbursements' ? `<small class="nav-count" ${pendingCount ? '' : 'hidden'}>${pendingCount}</small>` : ''}</a>`
+    ).join('');
+    nav.innerHTML = linksHtml + '<span class="console-topnav-indicator" id="nav-indicator" aria-hidden="true"></span>';
+    if (typeof ResizeObserver !== 'undefined') {
+      if (navObserver) navObserver.disconnect();
+      navObserver = new ResizeObserver(updateNavIndicator);
+      navObserver.observe(nav);
+      nav.querySelectorAll('a').forEach(a => navObserver.observe(a));
+    }
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(updateNavIndicator);
+    }
+  } else {
+    existingLinks.forEach(a => {
+      const active = a.dataset.navPage === state.page;
+      a.classList.toggle('active', active);
+      if (active) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+      if (a.dataset.navPage === 'reimbursements') {
+        const badgeEl = $('.nav-count', a);
+        if (badgeEl) {
+          badgeEl.textContent = String(pendingCount);
+          badgeEl.hidden = !pendingCount;
+        }
+      }
+    });
   }
-  requestAnimationFrame(() => {
-    updateNavIndicator();
-    scrollActiveNavIntoView();
-  });
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(updateNavIndicator);
-  }
+  updateNavIndicator();
+  scrollActiveNavIntoView();
 }
 
 function parseHashRoute() {
@@ -1534,29 +1599,65 @@ function parseHashRoute() {
     state.pendingEntryId = Number(entryMatch[1]);
     return;
   }
+  if (raw === 'calculator' || raw === 'reimbursements/calculator') {
+    state.page = 'reimbursements';
+    state.reimburseMode = 'calculator';
+    return;
+  }
+  if (raw === 'reimbursements' || raw === 'reimbursements/queue') {
+    state.page = 'reimbursements';
+    state.reimburseMode = 'queue';
+    return;
+  }
+  if (raw === 'members') {
+    state.page = 'settings';
+    state.settingsTab = 'members';
+    return;
+  }
+  if (raw === 'integrations') {
+    state.page = 'settings';
+    state.settingsTab = isOwner() ? 'bots-ai' : 'my-bots';
+    return;
+  }
+  const settingsMatch = /^settings\/([a-z-]+)$/.exec(raw);
+  if (settingsMatch) {
+    state.page = 'settings';
+    const sub = settingsMatch[1];
+    state.settingsTab = sub === 'bots' ? 'bots-ai' : sub;
+    return;
+  }
   state.page = hasOwn(PAGES, raw) ? raw : 'overview';
 }
 
 function render() {
   if (!state.user || !state.conf) return;
-  if (state.page === 'settings' && !isOwner()) state.page = 'overview';
-  const main = $('#main');
-  if (main) main.classList.toggle('is-overview', state.page === 'overview');
   $('#content').innerHTML = renderers[state.page]();
   if (state.page === 'overview') hydrateChart();
-  if (state.page === 'settings') mountBackups();
+  if (state.page === 'settings') {
+    if (state.settingsTab === 'backups') mountBackups();
+    const activeSetting = $('.settings-sidebar .settings-nav-item.active');
+    if (activeSetting && typeof activeSetting.scrollIntoView === 'function') {
+      activeSetting.scrollIntoView({inline: 'nearest', block: 'nearest'});
+    }
+  }
   renderNav();
   const teamName = state.conf.team_name || 'Vanora 财务管理';
-  $('#workspace-name').textContent = teamName;
-  $('#workspace-initial').textContent = [...teamName][0] || 'V';
   const initial = [...state.user.name][0] || 'T';
   $('#my-avatar').textContent = initial;
   $('#menu-avatar').textContent = initial;
   $('#my-name').textContent = state.user.name;
   $('#my-role').textContent = `@${state.user.username} · ${roleName(state.user.role)}`;
-  $('#settings-link').hidden = !isOwner();
+  $('#menu-team-meta').textContent = `${teamName} · ${state.conf.today}`;
+  const accountLink = $('#menu-vanora-account');
+  if (accountLink) {
+    if (state.accountUrl) {
+      accountLink.href = state.accountUrl;
+      accountLink.hidden = false;
+    } else {
+      accountLink.hidden = true;
+    }
+  }
   $('#top-user').textContent = state.user.name;
-  $('#top-date').textContent = new Date(state.conf.today + 'T12:00:00').toLocaleDateString('zh-CN', {year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'});
   $('#footer-brand').textContent = `© ${new Date().getFullYear()} ${teamName} · Vanora 财务管理`;
   document.title = `${PAGES[state.page][0]} · Vanora 财务管理`;
 }
@@ -1656,7 +1757,7 @@ async function refresh(renderAfter = true) {
   if (loadId !== state.loadId) return;
   if (renderAfter) {
     render();
-    if (state.page === 'calculator') await calculateFunds();
+    if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') await calculateFunds();
     if (state.pendingEntryId) {
       const targetId = state.pendingEntryId;
       state.pendingEntryId = null;
@@ -1701,18 +1802,18 @@ async function showAuth(preloadedBoot = null) {
   if (!boot.oidc_configured) {
     page.classList.add('is-wide');
     $('#auth-title').textContent = '尚未配置 Vanora OAuth';
-    $('#auth-subtitle').textContent = '请先使用 Vanora OAuth 的 configure-vanora.py 或管理后台创建机密 OIDC 客户端与客户端角色，并在服务器环境变量中配置后重启服务。';
+    $('#auth-subtitle').textContent = '请先配置机密 OIDC 客户端与环境变量后重启服务。';
     ctx.innerHTML = `
       <div class="auth-card">
-        <div class="auth-card-title"><span>客户端接入与权限同步参数</span><span class="badge warn">待配置</span></div>
-        <p>启用 <strong>Standard Flow</strong>、<strong>PKCE S256</strong>、客户端角色（<code>owner</code> / <code>finance</code> / <code>member</code>）与 <code>vanora.permissions.sync.enabled=true</code>，并配置 <code>VANORA_OIDC_ISSUER</code>、<code>VANORA_OIDC_CLIENT_ID</code> 与 <code>VANORA_OIDC_CLIENT_SECRET</code>。</p>
+        <div class="auth-card-title"><span>客户端接入参数</span><span class="badge warn">待配置</span></div>
+        <p>启用 Standard Flow、PKCE S256、客户端角色（<code>owner</code> / <code>finance</code> / <code>member</code>）与 <code>vanora.permissions.sync.enabled=true</code>。</p>
         <div class="auth-config-list">
           <div class="auth-config-item">
             <span>Valid redirect URI</span>
             <div class="copy-field"><code>${esc(boot.callback_url || '')}</code>${copyButtonHtml(boot.callback_url || '')}</div>
           </div>
           <div class="auth-config-item">
-            <span>Backchannel logout URL（需开启 session required）</span>
+            <span>Backchannel logout URL</span>
             <div class="copy-field"><code>${esc(boot.backchannel_logout_url || '')}</code>${copyButtonHtml(boot.backchannel_logout_url || '')}</div>
           </div>
         </div>
@@ -1720,21 +1821,21 @@ async function showAuth(preloadedBoot = null) {
     ctx.hidden = false;
     submitBtn.hidden = true;
     recheckBtn.hidden = false;
-    noteBox.textContent = '配置完成后重启账本服务，再点击上方「重新检测状态」。';
+    noteBox.textContent = '配置并重启后，点击上方重新检测状态。';
     return;
   }
 
   if (boot.needs_setup) {
     $('#auth-title').textContent = '启用团队账本';
-    $('#auth-subtitle').textContent = '请使用已在 Vanora OAuth 分配本账本客户端角色（owner / finance / member）的 Vanora 账号登录。';
+    $('#auth-subtitle').textContent = '使用已授权的 Vanora 账号登录并完成初始化。';
     teamWrap.hidden = false;
     submitBtn.textContent = '使用 Vanora 账号登录';
-    noteBox.textContent = '拥有 owner 角色的账号首次登录时可一并设定团队名称；兼容邮箱、手机号、微信或 QQ 登录的 Vanora 账号。';
+    noteBox.textContent = '账本所有者首次登录时可一并设定团队名称。';
   } else {
     $('#auth-title').textContent = '欢迎回来';
-    $('#auth-subtitle').textContent = '使用 Vanora 账号登录，继续管理团队的每一笔收支与报销。';
+    $('#auth-subtitle').textContent = '使用 Vanora 账号登录，继续管理团队收支与报销。';
     submitBtn.textContent = '使用 Vanora 账号登录';
-    noteBox.textContent = '成员角色（owner / finance / member）、账号启停与两步验证由 Vanora OAuth 统一管理。';
+    noteBox.textContent = '成员与权限由 Vanora OAuth 统一管理。';
   }
 
   syncAuthExternalLink();
@@ -1802,7 +1903,7 @@ function openEntry(kind = 'expense', data = null) {
   $('#entry-kind').hidden = Boolean(data?.id);
   $$('#entry-kind button').forEach(b => { b.hidden = b.dataset.kind !== 'expense' && !canManage(); });
   $('#entry-error').textContent = '';
-  $('#upload-label').innerHTML = '添加发票或凭证 <small>PNG / JPG / PDF，最多 6 MB</small>';
+  $('#upload-label').innerHTML = '添加发票或凭证 <small>PNG / JPG / PDF，上限 6 MB</small>';
   entryKindChanged();
   $('#entry-dialog').showModal();
   setTimeout(() => form.elements.amount.focus(), 40);
@@ -1815,11 +1916,10 @@ function entryKindChanged() {
     b.classList.toggle('active', active);
     b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
-  $('#entry-title').textContent = state.editing ? '修改账目' : income ? '登记团队收入' : publicExpense ? '记一笔公账支出' : '记一笔成员垫付';
+  $('#entry-title').textContent = state.editing ? '修改账目' : income ? '登记团队收入' : publicExpense ? '记公账支出' : '记成员垫付';
   $('#save-draft').hidden = income;
   $('#payer-label > span').textContent = income || publicExpense ? '经手成员' : '垫付成员';
-  $('#save-entry').textContent = income ? '确认收入入账' : '确认记账';
-  $('#entry-hint').textContent = income ? '收入入账后直接增加公账余额。' : publicExpense ? '入账后直接扣减公账余额，无需报销。' : '记账后进入待报销，实际报销时扣减公账余额。';
+  $('#save-entry').textContent = income ? '确认入账' : '确认记账';
 }
 
 async function saveEntry(status, button) {
@@ -1847,7 +1947,7 @@ async function saveEntry(status, button) {
           });
           await api(`/entries/${entry.id}/receipt`, 'POST', {data, name: file.name});
         } catch (e) {
-          toast(`账目 #${entry.id} 已保存，但凭证未上传：${e.message}。可在详情页补传。`, true);
+          toast(`账目 #${entry.id} 已保存，但凭证上传失败：${e.message}`, true);
         }
       }
       $('#entry-dialog').close();
@@ -1870,10 +1970,10 @@ async function openDetail(id) {
     const manageable = canManageEntry(e);
     const actions = [];
     if (manageable && e.kind === 'expense' && !e.reimbursed_minor && (e.expense_type === 'public' ? ['draft', 'posted'] : ['draft', 'pending']).includes(e.status)) {
-      actions.push(`<button type="button" class="button button-outline" data-edit-entry="${id}">修改账目</button>`);
+      actions.push(`<button type="button" class="button button-outline" data-edit-entry="${id}">修改</button>`);
     }
     if (!e.reimbursed_minor && !['reimbursed', 'voided'].includes(e.status) && manageable) {
-      actions.push(`<button type="button" class="button button-outline button-danger-outline" data-action="void" data-id="${id}">作废账目</button>`);
+      actions.push(`<button type="button" class="button button-outline button-danger-outline" data-action="void" data-id="${id}">作废</button>`);
     }
     if (e.status === 'voided' && canManage()) {
       actions.push(`<button type="button" class="button button-danger" data-delete-entry="${id}">永久删除</button>`);
@@ -1898,41 +1998,41 @@ async function openDetail(id) {
           <button type="button" class="icon-button" data-close aria-label="关闭">${icon('close')}</button>
         </div>
       </div>
-      <div class="drawer-body">
-        <div class="detail-hero">
-          ${entryIcon(e)}
-          <div>
-            <h3>${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency)}</h3>
-            ${settlementDisplay(e)}
-            <p>${esc(entryDescription(e))}</p>
+      <div class="drawer-body drawer-cards-body">
+        <section class="drawer-card drawer-hero-card">
+          <div class="badge-row">
+            ${badge(entryStatus(e))}
+            <span class="badge neutral">${entryType(e)}</span>
           </div>
-        </div>
-        <div class="badge-row">
-          ${badge(entryStatus(e))}
-          <span class="badge neutral">${entryType(e)}</span>
-        </div>
-        ${paymentSummary(e)}
-        <div class="detail-section">
+          <h3 class="detail-amount ${e.kind === 'income' ? 'income' : ''}">${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency)}</h3>
+          ${settlementDisplay(e)}
+          <p class="detail-desc">${esc(entryDescription(e))}</p>
+          ${paymentSummary(e)}
+        </section>
+
+        <section class="drawer-card">
           <h4>基本信息</h4>
           <dl class="detail-list">
             <div><dt>${e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div>
             <div><dt>发生日期</dt><dd class="mono">${esc(e.date)}</dd></div>
             <div><dt>记录来源</dt><dd>${esc(sourceLabel(e.source))} · ${esc(e.creator_name)}</dd></div>
             <div><dt>凭证文件</dt><dd>${e.receipt ? receiptLink(e, e.receipt_name || '查看凭证') : '未附凭证'}</dd></div>
-            <div class="full-span"><dt>备注</dt><dd>${esc(e.note || '—')}</dd></div>
-            ${e.review_note ? `<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>` : ''}
+            <div><dt>备注</dt><dd>${esc(e.note || '—')}</dd></div>
+            ${e.review_note ? `<div><dt>处理备注</dt><dd>${esc(e.review_note)}</dd></div>` : ''}
           </dl>
-        </div>
-        ${manageable && (canManage() || !e.reimbursed_minor) && ['draft', 'pending', 'posted'].includes(e.status) ? `<div class="detail-section"><label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"><span>${e.receipt ? '替换凭证文件' : '补充发票或凭证'} <small>PNG / JPG / PDF，最多 6 MB</small></span></label></div>` : ''}
+          ${manageable && (canManage() || !e.reimbursed_minor) && ['draft', 'pending', 'posted'].includes(e.status) ? `<label class="upload-zone detail-upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"><span>${e.receipt ? '替换凭证文件' : '补充发票或凭证'} <small>PNG / JPG / PDF，上限 6 MB</small></span></label>` : ''}
+        </section>
+
         ${paymentHistory(e)}
-        <div class="detail-section">
+
+        <section class="drawer-card">
           <h4>操作记录</h4>
           <div class="timeline">${events.map(event => `<div class="timeline-item"><strong>${esc(event.name)}</strong> ${esc(actionNames[event.action] || event.action)}${event.detail ? `<br>${esc(event.detail)}` : ''}<small>${esc(event.created_at.replace('T', ' ').slice(0, 19))}</small></div>`).join('')}</div>
-        </div>
+        </section>
       </div>
       ${actions.length ? `<div class="drawer-footer">${actions.join('')}</div>` : ''}`;
   } catch (err) {
-    $('#detail-content').innerHTML = `<div class="modal-heading"><h2>账目详情</h2><button type="button" class="icon-button" data-close aria-label="关闭">${icon('close')}</button></div><div class="drawer-body">${empty('加载失败', err.message)}</div>`;
+    $('#detail-content').innerHTML = `<div class="modal-heading"><h2>账目详情</h2><button type="button" class="icon-button" data-close aria-label="关闭">${icon('close')}</button></div><div class="drawer-body">${empty('加载失败', err.message, '')}</div>`;
   }
 }
 
@@ -1968,13 +2068,13 @@ function openReceipt(id) {
       zoom.disabled = false;
     };
     image.onerror = () => {
-      status.textContent = '图片加载失败，可尝试点击「下载凭证」或在新窗口打开。';
+      status.textContent = '图片加载失败，请尝试下载或在新窗口打开。';
     };
     image.src = url;
   } else if (isPdf) {
     zoom.hidden = true;
     if (feishuEnv.isFeishu && feishuEnv.isMobile) {
-      status.textContent = '移动端内置浏览器可能不支持直接渲染 PDF，请点击下方「下载凭证」或「在新窗口打开」查看。';
+      status.textContent = '移动端内置浏览器不支持直接渲染 PDF，请下载或在新窗口打开。';
       status.hidden = false;
     } else {
       status.hidden = true;
@@ -1983,7 +2083,7 @@ function openReceipt(id) {
     }
   } else {
     zoom.hidden = true;
-    status.textContent = '当前凭证暂不支持页面内预览，请点击下方下载查看。';
+    status.textContent = '暂不支持内嵌预览，请下载查看。';
     status.hidden = false;
   }
   if (!dialog.open) dialog.showModal();
@@ -2012,7 +2112,7 @@ async function openAction(action, ids) {
   confirmBtn.textContent = `确认${labels[action]}`;
   confirmBtn.className = `button ${action === 'void' ? 'button-danger' : 'button-primary'}`;
   $('#action-description').textContent = action === 'pay'
-    ? '逐笔填写本次实际已转账的金额，支持部分报销。可按记账货币或团队结算货币登记，系统不会发起真实转账。'
+    ? '填写本次实际转账金额，支持分次与跨币种登记（不触发自动转账）。'
     : `即将对 ${ids.length} 笔账目执行${labels[action]}。`;
   $('#action-totals').innerHTML = action === 'pay'
     ? `<span>剩余待报销：${groupedTotals(rows, 'remaining_amount')}</span>`
@@ -2020,9 +2120,9 @@ async function openAction(action, ids) {
   $('#action-note-label').hidden = action === 'submit';
   const base = state.conf.reference_currency;
   $('#action-payment-amounts').innerHTML = action === 'pay'
-    ? rows.map(e => `<div class="payment-item"><strong>#${e.id} ${esc(entryDescription(e))}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount, e.currency)} · 累计已报 ${money(e.reimbursed_amount, e.currency)} · 剩余 ${money(e.remaining_amount, e.currency)}</small><label><span>本次付款币种</span><select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">按记账货币 · ${esc(e.currency)}</option>${base !== e.currency ? `<option value="${esc(base)}">按结算货币 · ${esc(base)}</option>` : ''}</select></label><label><span>本次实际已报销金额</span><input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join('')
+    ? rows.map(e => `<div class="payment-item"><strong>#${e.id} ${esc(entryDescription(e))}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount, e.currency)} · 剩余 ${money(e.remaining_amount, e.currency)}</small><label><span>付款币种</span><select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">记账货币 · ${esc(e.currency)}</option>${base !== e.currency ? `<option value="${esc(base)}">结算货币 · ${esc(base)}</option>` : ''}</select></label><label><span>本次实付金额</span><input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join('')
     : '';
-  $('#action-note-label > span').textContent = action === 'pay' ? '付款方式 / 付款参考号' : action === 'void' ? '作废原因' : '备注';
+  $('#action-note-label > span').textContent = action === 'pay' ? '付款方式 / 参考号' : action === 'void' ? '作废原因' : '备注';
   $('#action-form [name=note]').required = ['pay', 'void'].includes(action);
   $('#action-error').textContent = '';
   confirmBtn.disabled = action === 'pay';
@@ -2049,7 +2149,7 @@ async function loadPaymentQuote(id, code) {
     input.value = quote.maximum_amount;
     input.disabled = false;
     input.setAttribute('aria-label', `本次已报销金额 ${quote.currency}`);
-    rateLabel.textContent = `付款币种 ${quote.currency} · 剩余全额 ${quote.maximum_amount} ${quote.currency}` + (quote.currency !== quote.entry_currency ? ` · 1 ${quote.entry_currency} = ${quote.rate} ${quote.currency} · ${quote.rate_date} · 换算有效 30 分钟` : '');
+    rateLabel.textContent = `上限 ${quote.maximum_amount} ${quote.currency}` + (quote.currency !== quote.entry_currency ? ` · 1 ${quote.entry_currency} = ${quote.rate} ${quote.currency} (${quote.rate_date})` : '');
   } catch (e) {
     if (state.action === action) rateLabel.textContent = e.message;
   } finally {
@@ -2068,7 +2168,7 @@ function updatePaymentPreview() {
     const valid = quote && input.value !== '' && Number.isFinite(value) && value > 0 && value <= Number(quote.maximum_amount);
     const allocation = quote ? (value === Number(quote.maximum_amount) ? e.remaining_minor : Math.round(value / Number(quote.rate) * 10 ** e.decimals)) / 10 ** e.decimals : 0;
     $(`[data-payment-after="${e.id}"]`).innerHTML = valid
-      ? `本次抵扣 ${money(allocation, e.currency)} · 登记后累计已报 ${money(Number(e.reimbursed_amount) + allocation, e.currency)} · 剩余 ${money(Math.max(0, Number(e.remaining_amount) - allocation), e.currency)}`
+      ? `抵扣 ${money(allocation, e.currency)} · 登记后剩余 ${money(Math.max(0, Number(e.remaining_amount) - allocation), e.currency)}`
       : '请输入大于 0 且不超过剩余待报销的金额';
   });
 }
@@ -2081,11 +2181,9 @@ $('#action-payment-amounts').addEventListener('change', event => {
 });
 
 /* ============================================================================
- * Global Event Listeners
+ * Backdrop & Dropdown Dismissal
  * ========================================================================== */
 
-// Match Vanora Modal: only drawers & receipt preview allow backdrop click-to-close,
-// and require both pointerdown & click on the backdrop to prevent text-selection misclicks.
 $$('dialog.modal').forEach(dialog => {
   const allowBackdropClose = dialog.classList.contains('modal-drawer') || dialog.id === 'receipt-dialog';
   let backdropDown = false;
@@ -2108,7 +2206,7 @@ document.addEventListener('pointerdown', event => {
 });
 
 /* ============================================================================
- * Excel Export Dialog (Range Filter + Receipt Embedding)
+ * Excel Export Dialog (Preset-First + Collapsible Custom Filters)
  * ========================================================================== */
 
 function localIsoDate(d = new Date()) {
@@ -2179,8 +2277,8 @@ function renderExportPresets() {
     ['month', '本月'],
     ['last_month', '上月'],
     ['last30', '近 30 天'],
-    ['pending', '待报销项目'],
-    ['all_with_voided', '全部（含作废）'],
+    ['pending', '待报销'],
+    ['all_with_voided', '含作废'],
   );
   wrap.innerHTML = presets.map(([key, label]) =>
     `<button type="button" class="export-preset${state.exportState.activePreset === key ? ' active' : ''}" data-export-preset="${key}">${esc(label)}</button>`
@@ -2193,21 +2291,32 @@ function updateExportPreview() {
   const errEl = $('#export-error');
   const previewEl = $('#export-preview');
   const bannerEl = $('#export-selection-banner');
-  const fieldsEl = $('#export-filter-fields');
+  const detailsEl = $('#export-custom-details');
+  const summaryEl = $('#export-custom-summary');
   const submitEl = $('#export-submit');
   const spec = exportSpecFromForm();
   const hasIds = spec.ids.length > 0;
 
   bannerEl.hidden = !hasIds;
-  fieldsEl.hidden = hasIds;
+  if (detailsEl) detailsEl.hidden = hasIds;
   if (hasIds) {
-    $('#export-selection-text').textContent = `当前将仅导出已勾选的 ${spec.ids.length} 笔项目及其关联付款与收据。`;
+    $('#export-selection-text').textContent = `仅导出已勾选的 ${spec.ids.length} 笔项目及其收据。`;
+  } else if (summaryEl) {
+    const activeCount = [
+      Boolean(spec.from || spec.to),
+      spec.kind !== 'all',
+      spec.status !== 'all',
+      spec.currency !== 'all',
+      spec.payer !== 'all',
+      Boolean(spec.q),
+    ].filter(Boolean).length;
+    summaryEl.textContent = activeCount ? `已设 ${activeCount} 项 · ${spec.base}` : `参考 ${spec.base}`;
   }
 
   errEl.textContent = '';
   if (!hasIds && spec.from && spec.to && spec.from > spec.to) {
     errEl.textContent = '开始日期不能晚于结束日期';
-    previewEl.innerHTML = '<strong>范围无效</strong><span>请调整开始日期与结束日期。</span>';
+    previewEl.innerHTML = '<strong>范围无效</strong><span>请调整起止日期。</span>';
     previewEl.classList.add('is-empty');
     if (submitEl) submitEl.disabled = true;
     return;
@@ -2221,14 +2330,14 @@ function updateExportPreview() {
   const currencies = [...new Set(matched.map(e => e.currency))];
   const receiptText = totalReceipts
     ? (spec.include_receipts
-      ? `含 ${totalReceipts} 份收据（内嵌图片 ${imgReceipts} 张${pdfReceipts ? ` · PDF ${pdfReceipts} 份` : ''}）`
-      : `含 ${totalReceipts} 份收据（本次不内嵌图片）`)
-    : '无收据凭证';
+      ? `${totalReceipts} 份收据（图片 ${imgReceipts}${pdfReceipts ? ` · PDF ${pdfReceipts}` : ''}）`
+      : `${totalReceipts} 份收据（不内嵌图片）`)
+    : '无收据';
   previewEl.classList.toggle('is-empty', matched.length === 0);
   if (matched.length === 0) {
-    previewEl.innerHTML = '<strong>当前范围暂无匹配账目（0 笔）</strong><span>仍可导出空报表，或调整上方筛选条件。</span>';
+    previewEl.innerHTML = '<strong>当前范围 0 笔匹配</strong><span>可调整范围或直接导出空报表。</span>';
   } else {
-    previewEl.innerHTML = `<strong>预计导出 ${matched.length} 笔账目</strong><span>${esc(receiptText)}${currencies.length ? ` · 币种 ${esc(currencies.join(' / '))}` : ''}</span>`;
+    previewEl.innerHTML = `<strong>预计导出 ${matched.length} 笔账目</strong><span>${esc(receiptText)}${currencies.length ? ` · ${esc(currencies.join(' / '))}` : ''}</span>`;
   }
 }
 
@@ -2238,6 +2347,16 @@ function applyExportPreset(preset) {
   const now = new Date();
   state.exportState.activePreset = preset;
   if (preset !== 'selected') state.exportState.ids = [];
+
+  const clearFields = () => {
+    form.elements.from.value = '';
+    form.elements.to.value = '';
+    form.elements.kind.value = 'all';
+    form.elements.status.value = 'all';
+    form.elements.currency.value = 'all';
+    form.elements.payer.value = 'all';
+    form.elements.q.value = '';
+  };
 
   if (preset === 'current_filter') {
     const f = state.filter;
@@ -2249,57 +2368,26 @@ function applyExportPreset(preset) {
     form.elements.payer.value = f.payer || 'all';
     form.elements.q.value = f.text || '';
   } else if (preset === 'all') {
-    form.elements.from.value = '';
-    form.elements.to.value = '';
-    form.elements.kind.value = 'all';
-    form.elements.status.value = 'all';
-    form.elements.currency.value = 'all';
-    form.elements.payer.value = 'all';
-    form.elements.q.value = '';
+    clearFields();
   } else if (preset === 'all_with_voided') {
-    form.elements.from.value = '';
-    form.elements.to.value = '';
-    form.elements.kind.value = 'all';
+    clearFields();
     form.elements.status.value = 'all_with_voided';
-    form.elements.currency.value = 'all';
-    form.elements.payer.value = 'all';
-    form.elements.q.value = '';
   } else if (preset === 'month') {
-    const first = new Date(now.getFullYear(), now.getMonth(), 1);
-    form.elements.from.value = localIsoDate(first);
+    clearFields();
+    form.elements.from.value = localIsoDate(new Date(now.getFullYear(), now.getMonth(), 1));
     form.elements.to.value = localIsoDate(now);
-    form.elements.kind.value = 'all';
-    form.elements.status.value = 'all';
-    form.elements.currency.value = 'all';
-    form.elements.payer.value = 'all';
-    form.elements.q.value = '';
   } else if (preset === 'last_month') {
-    const first = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const last = new Date(now.getFullYear(), now.getMonth(), 0);
-    form.elements.from.value = localIsoDate(first);
-    form.elements.to.value = localIsoDate(last);
-    form.elements.kind.value = 'all';
-    form.elements.status.value = 'all';
-    form.elements.currency.value = 'all';
-    form.elements.payer.value = 'all';
-    form.elements.q.value = '';
+    clearFields();
+    form.elements.from.value = localIsoDate(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+    form.elements.to.value = localIsoDate(new Date(now.getFullYear(), now.getMonth(), 0));
   } else if (preset === 'last30') {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
-    form.elements.from.value = localIsoDate(start);
+    clearFields();
+    form.elements.from.value = localIsoDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29));
     form.elements.to.value = localIsoDate(now);
-    form.elements.kind.value = 'all';
-    form.elements.status.value = 'all';
-    form.elements.currency.value = 'all';
-    form.elements.payer.value = 'all';
-    form.elements.q.value = '';
   } else if (preset === 'pending') {
-    form.elements.from.value = '';
-    form.elements.to.value = '';
+    clearFields();
     form.elements.kind.value = 'advance';
     form.elements.status.value = 'pending';
-    form.elements.currency.value = 'all';
-    form.elements.payer.value = 'all';
-    form.elements.q.value = '';
   }
   renderExportPresets();
   updateExportPreview();
@@ -2321,6 +2409,9 @@ function openExportDialog(source = 'overview', explicitIds = null) {
   form.elements.payer.innerHTML = `<option value="all">全部成员</option>${options(state.members, m => m.id, m => m.name, 'all')}`;
   form.elements.base.innerHTML = currencyOptions(state.base || state.conf.reference_currency);
   form.elements.include_receipts.checked = true;
+
+  const detailsEl = $('#export-custom-details');
+  if (detailsEl) detailsEl.open = false;
 
   state.exportState.source = source;
   state.exportState.ids = Array.isArray(explicitIds) && explicitIds.length ? explicitIds.map(Number) : [];
@@ -2377,6 +2468,10 @@ function buildExportUrl(spec) {
   const filename = `team-ledger-${datePart}.xlsx`;
   return {url: `/api/export.xlsx${query ? '?' + query : ''}`, filename};
 }
+
+/* ============================================================================
+ * Global Event Listeners
+ * ========================================================================== */
 
 document.addEventListener('click', async event => {
   const b = event.target.closest('button,a,tr');
@@ -2488,9 +2583,27 @@ document.addEventListener('click', async event => {
     render();
     return;
   }
+  if (b.id === 'toggle-more-filters') {
+    state.filterOpen = !state.filterOpen;
+    const panel = $('#more-filters-panel');
+    if (panel) panel.hidden = !state.filterOpen;
+    syncLedgerChrome();
+    return;
+  }
   if (b.id === 'reset-filters') {
     state.filter = {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''};
+    state.filterOpen = false;
     render();
+    return;
+  }
+  if (b.hasAttribute('data-reimburse-mode')) {
+    const nextMode = b.dataset.reimburseMode;
+    if (['queue', 'calculator'].includes(nextMode) && nextMode !== state.reimburseMode) {
+      state.reimburseMode = nextMode;
+      state.selected.clear();
+      render();
+      if (nextMode === 'calculator') await calculateFunds();
+    }
     return;
   }
   if (b.hasAttribute('data-reimburse-tab')) {
@@ -2501,17 +2614,9 @@ document.addEventListener('click', async event => {
   }
   if (b.hasAttribute('data-settings-tab')) {
     const nextTab = b.dataset.settingsTab;
-    if (['general', 'bots', 'backups'].includes(nextTab)) {
+    if (allowedSettingsTabs().includes(nextTab) && nextTab !== state.settingsTab) {
       state.settingsTab = nextTab;
-      $$('[data-settings-tab]').forEach(btn => {
-        if (btn.dataset.settingsTab === nextTab) btn.setAttribute('aria-current', 'page');
-        else btn.removeAttribute('aria-current');
-      });
-      const form = $('#settings-form');
-      if (form) form.hidden = nextTab === 'backups';
-      $$('[data-settings-panel]').forEach(panel => {
-        panel.hidden = panel.dataset.settingsPanel !== nextTab;
-      });
+      render();
     }
     return;
   }
@@ -2538,7 +2643,7 @@ document.addEventListener('click', async event => {
     if (!e) return;
     const ok = await uiConfirm({
       title: `永久删除账目 #${id}`,
-      message: `确认永久删除「${entryDescription(e)}」？\n账目、操作记录、付款记录和凭证文件将一并清除，无法恢复。`,
+      message: `确认永久删除「${entryDescription(e)}」？\n账目、操作记录、付款记录与凭证将一并清除，无法恢复。`,
       confirmLabel: '确认永久删除',
       danger: true,
     });
@@ -2585,7 +2690,7 @@ document.addEventListener('click', async event => {
       try {
         const res = await api('/members/sync', 'POST');
         await refresh();
-        toast(`已从 Vanora OAuth 同步成员权限（当前 ${res.total} 位成员）`);
+        toast(`已同步成员权限（${res.total} 位成员）`);
       } catch (e) {
         toast(e.message, true);
       }
@@ -2619,7 +2724,7 @@ document.addEventListener('click', async event => {
           return;
         }
         await showAuth();
-        toast('已安全退出登录');
+        toast('已退出登录');
       } catch (e) {
         toast(e.message, true);
       }
@@ -2627,6 +2732,8 @@ document.addEventListener('click', async event => {
     return;
   }
   if (b.id === 'refresh-fx') {
+    event.preventDefault();
+    event.stopPropagation();
     await busy(b, async () => {
       try {
         state.report = await api('/fx/refresh', 'POST');
@@ -2634,7 +2741,7 @@ document.addEventListener('click', async event => {
         ++state.calculator.request;
         state.calculator.report = null;
         render();
-        await calculateFunds();
+        if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') await calculateFunds();
         toast(state.report.complete ? '已更新汇率快照' : '部分汇率尚不可用', !state.report.complete);
       } catch (e) {
         toast(e.message, true);
@@ -2647,7 +2754,7 @@ document.addEventListener('click', async event => {
       try {
         const data = await api('/feishu/link-code', 'POST');
         const cmd = `绑定 ${data.code}`;
-        $('#feishu-link-code-result').innerHTML = `<div class="copy-field"><code>${esc(cmd)}</code>${copyButtonHtml(cmd)}</div><p class="fx-caption">10 分钟内有效，请仅发送给飞书机器人私聊；生成新码后旧码自动失效。</p>`;
+        $('#feishu-link-code-result').innerHTML = `<div class="copy-field"><code>${esc(cmd)}</code>${copyButtonHtml(cmd)}</div><p class="fx-caption">10 分钟内有效，私聊发送给飞书机器人。</p>`;
       } catch (e) {
         toast(e.message, true);
       }
@@ -2657,7 +2764,7 @@ document.addEventListener('click', async event => {
   if (b.id === 'unlink-feishu') {
     const ok = await uiConfirm({
       title: '解除飞书绑定',
-      message: '解除后，当前飞书账号将无法继续记账或操作待确认卡片。确认解除？',
+      message: '解除后，当前飞书账号将无法继续记账。确认解除？',
       confirmLabel: '确认解除',
       danger: true,
     });
@@ -2676,7 +2783,7 @@ document.addEventListener('click', async event => {
       try {
         const data = await api('/telegram/link-code', 'POST');
         const cmd = `/start ${data.code}`;
-        $('#link-code-result').innerHTML = `<div class="copy-field"><code>${esc(cmd)}</code>${copyButtonHtml(cmd)}</div><p class="fx-caption">10 分钟内有效，请仅发送给 Telegram 机器人私聊；生成新码后旧码失效。</p>`;
+        $('#link-code-result').innerHTML = `<div class="copy-field"><code>${esc(cmd)}</code>${copyButtonHtml(cmd)}</div><p class="fx-caption">10 分钟内有效，私聊发送给 Telegram 机器人。</p>`;
       } catch (e) {
         toast(e.message, true);
       }
@@ -2728,7 +2835,7 @@ document.addEventListener('click', async event => {
   if (b.id === 'clear-ai-config') {
     const ok = await uiConfirm({
       title: '清除 AI 配置',
-      message: '确认清除已保存的 API Key 与模型设置并停用 AI 记账引擎？\nWeb 表单与飞书 / Telegram 按钮菜单不受影响。',
+      message: '确认清除已保存的 API Key 与模型设置并停用 AI 记账引擎？',
       confirmLabel: '确认清除',
       danger: true,
     });
@@ -2772,7 +2879,7 @@ document.addEventListener('input', event => {
   if (el.id === 'search-entries') {
     state.filter.text = el.value;
     $('#ledger-results').innerHTML = ledgerResults();
-    syncLedgerExportButton();
+    syncLedgerChrome();
   }
   if (el.closest('#export-form')) {
     if (el.name !== 'include_receipts' && el.name !== 'base') {
@@ -2802,14 +2909,14 @@ document.addEventListener('change', async event => {
     $('#calculator-budget-field').hidden = c.mode !== 'budget';
     $('#calculator-form').elements.budget.required = c.mode === 'budget';
     $('#calculator-selection-hint').hidden = c.mode !== 'manual';
-    $('#plan-table').innerHTML = planTable(c.report || state.report, c.mode === 'manual');
+    $('#plan-table').innerHTML = planGroups(c.report || state.report, c.mode === 'manual');
     await calculateFunds();
     return;
   }
   if (el.hasAttribute('data-calc-select')) {
     const id = Number(el.dataset.calcSelect);
     el.checked ? state.calculator.ids.add(id) : state.calculator.ids.delete(id);
-    $('#calculator-selection-count').textContent = state.calculator.ids.size;
+    if ($('#calculator-selection-count')) $('#calculator-selection-count').textContent = state.calculator.ids.size;
     await calculateFunds();
     return;
   }
@@ -2841,7 +2948,7 @@ document.addEventListener('change', async event => {
   if (el.dataset.filter) {
     state.filter[el.dataset.filter] = el.value;
     $('#ledger-results').innerHTML = ledgerResults();
-    syncLedgerExportButton();
+    syncLedgerChrome();
   }
   if (el.dataset.select) {
     const id = Number(el.dataset.select);
@@ -2887,7 +2994,7 @@ document.addEventListener('change', async event => {
     try {
       state.report = await api('/report?base=' + encodeURIComponent(state.base));
       render();
-      if (state.page === 'calculator') await calculateFunds();
+      if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') await calculateFunds();
     } catch (e) {
       toast(e.message, true);
     }
@@ -2968,7 +3075,7 @@ $('#action-form').addEventListener('submit', async event => {
       $('#detail-dialog').close();
       state.selected.clear();
       await refresh();
-      toast(action === 'pay' ? '已登记本次报销，余额和剩余待报销已更新' : '账目状态已更新');
+      toast(action === 'pay' ? '已登记本次报销' : '账目状态已更新');
     } catch (e) {
       $('#action-error').textContent = e.message;
     }
@@ -2996,12 +3103,6 @@ document.addEventListener('submit', async event => {
     event.preventDefault();
     await submitAi(form);
   }
-  if (form.id === 'ai-quick-form') {
-    event.preventDefault();
-    const text = form.elements.quick_text.value.trim();
-    form.elements.quick_text.value = '';
-    openAi(text);
-  }
   if (form.id === 'ai-config-form') {
     event.preventDefault();
     await busy($('#save-ai-config'), async () => {
@@ -3010,7 +3111,7 @@ document.addEventListener('submit', async event => {
       try {
         const saved = await api('/ai/config', 'PUT', aiConfigPayload(form));
         await refresh();
-        toast(saved.enabled ? 'AI 配置已保存并生效' : 'AI 已停用，配置已保存');
+        toast(saved.enabled ? 'AI 配置已保存' : 'AI 已停用');
       } catch (e) {
         if (errBox) errBox.textContent = e.message;
         toast(e.message, true);
@@ -3035,6 +3136,25 @@ document.addEventListener('submit', async event => {
       }
     });
   }
+  if (form.id === 'allowlist-form') {
+    event.preventDefault();
+    await busy($('#save-allowlist'), async () => {
+      const errBox = $('#allowlist-error');
+      if (errBox) errBox.textContent = '';
+      try {
+        const raw = Object.fromEntries(new FormData(form));
+        await api('/settings', 'PUT', {
+          feishu_allowed_chats: String(raw.feishu_allowed_chats || '').split('\n').map(s => s.trim()).filter(Boolean),
+          telegram_allowed_chats: String(raw.telegram_allowed_chats || '').split('\n').map(s => s.trim()).filter(Boolean),
+        });
+        await refresh();
+        toast('群组白名单已保存');
+      } catch (e) {
+        if (errBox) errBox.textContent = e.message;
+        toast(e.message, true);
+      }
+    });
+  }
   if (form.id === 'calculator-form') {
     event.preventDefault();
     await busy($('button[type=submit]', form), calculateFunds);
@@ -3045,15 +3165,18 @@ document.addEventListener('submit', async event => {
     await busy(submitBtn, async () => {
       try {
         $('#settings-error').textContent = '';
-        const body = Object.fromEntries(new FormData(form));
-        body.telegram_allowed_chats = body.telegram_allowed_chats.split('\n').map(s => s.trim()).filter(Boolean);
-        body.feishu_allowed_chats = body.feishu_allowed_chats.split('\n').map(s => s.trim()).filter(Boolean);
-        body.currencies = $$('.currency-edit-row', form).map(row => ({
-          code: $('[data-cur=code]', row).value.trim().toUpperCase(),
-          name: $('[data-cur=name]', row).value.trim(),
-          symbol: $('[data-cur=symbol]', row).value.trim(),
-          decimals: Number($('[data-cur=decimals]', row).value),
-        }));
+        const raw = Object.fromEntries(new FormData(form));
+        const body = {
+          team_name: raw.team_name,
+          default_currency: raw.default_currency,
+          reference_currency: raw.reference_currency,
+          currencies: $$('.currency-edit-row', form).map(row => ({
+            code: $('[data-cur=code]', row).value.trim().toUpperCase(),
+            name: $('[data-cur=name]', row).value.trim(),
+            symbol: $('[data-cur=symbol]', row).value.trim(),
+            decimals: Number($('[data-cur=decimals]', row).value),
+          })),
+        };
         await api('/settings', 'PUT', body);
         state.base = null;
         await refresh();
@@ -3065,29 +3188,12 @@ document.addEventListener('submit', async event => {
   }
 });
 
-document.addEventListener('invalid', event => {
-  const panel = event.target?.closest?.('#settings-form [data-settings-panel]');
-  if (panel && panel.hidden) {
-    const targetTab = panel.dataset.settingsPanel;
-    state.settingsTab = targetTab;
-    $$('[data-settings-tab]').forEach(btn => {
-      if (btn.dataset.settingsTab === targetTab) btn.setAttribute('aria-current', 'page');
-      else btn.removeAttribute('aria-current');
-    });
-    const form = $('#settings-form');
-    if (form) form.hidden = false;
-    $$('[data-settings-panel]').forEach(p => {
-      p.hidden = p.dataset.settingsPanel !== targetTab;
-    });
-  }
-}, true);
-
 window.addEventListener('hashchange', () => {
   parseHashRoute();
   state.selected.clear();
   setAccountMenuOpen(false);
   render();
-  if (state.page === 'calculator') calculateFunds();
+  if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') calculateFunds();
   $('#main')?.scrollTo({top: 0, behavior: 'auto'});
   if (state.pendingEntryId) {
     const targetId = state.pendingEntryId;

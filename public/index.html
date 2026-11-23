@@ -34,7 +34,6 @@
           <span class="vanora-boot-tab"></span>
           <span class="vanora-boot-tab"></span>
           <span class="vanora-boot-tab"></span>
-          <span class="vanora-boot-tab"></span>
         </div>
         <div class="vanora-boot-content">
           <div class="vanora-boot-line vanora-boot-title"></div>
@@ -54,7 +53,7 @@
         </div>
         <div class="auth-welcome">
           <h1 id="auth-title">欢迎回来</h1>
-          <p id="auth-subtitle">使用 Vanora 账号登录，继续管理团队的每一笔收支与报销。</p>
+          <p id="auth-subtitle">使用 Vanora 账号登录，继续管理团队收支与报销。</p>
         </div>
       </header>
       <section class="auth-form-panel">
@@ -68,7 +67,7 @@
           <button class="button button-primary full-width auth-submit" type="submit" id="auth-submit">使用 Vanora 账号登录</button>
           <button class="button button-outline full-width" type="button" id="auth-recheck" hidden>重新检测状态</button>
           <p class="auth-embed-hint" id="auth-embed-hint" hidden>若嵌入窗口未自动跳转，请点击 <a id="auth-external-link" class="console-inline-link" href="/api/auth/oidc/login" target="_blank" rel="noreferrer">在新窗口中打开登录</a>。</p>
-          <p class="auth-note" id="auth-note">成员与权限由 Vanora OAuth 集中管理，授权成员使用 Vanora 账号登录后即可进入团队账本。</p>
+          <p class="auth-note" id="auth-note">成员与权限由 Vanora OAuth 统一管理。</p>
         </form>
       </section>
     </main>
@@ -88,10 +87,6 @@
           </a>
           <span class="workspace-divider" aria-hidden="true"></span>
           <a class="workspace-product" href="#overview">财务管理</a>
-          <a class="workspace-pill" href="#settings" title="团队设置">
-            <span class="workspace-initial" id="workspace-initial">V</span>
-            <span class="workspace-name" id="workspace-name">我的团队</span>
-          </a>
           <span class="client-env-badge" id="feishu-env-badge" hidden>飞书端</span>
         </div>
         <div class="console-workspace-right">
@@ -99,7 +94,7 @@
             <span class="trigger-icon" id="ai-launcher-icon" aria-hidden="true"></span>
             <span class="trigger-label">AI 助手</span>
           </button>
-          <button type="button" class="icon-button" id="refresh-ledger" aria-label="刷新团队账本" title="刷新团队账本"></button>
+          <button type="button" class="icon-button" id="refresh-ledger" aria-label="刷新账本" title="刷新账本"></button>
           <div class="console-dropdown account-dropdown" id="account-dropdown" data-open="false">
             <button type="button" class="console-dropdown-trigger" id="account-trigger" aria-label="账户菜单" aria-expanded="false" aria-haspopup="menu" aria-controls="account-menu">
               <span class="workspace-initial user-initial" id="my-avatar"></span>
@@ -114,16 +109,14 @@
                   <span id="my-role"></span>
                 </div>
               </div>
-              <div class="console-dropdown-meta" id="top-date" role="none"></div>
-              <div class="console-dropdown-divider" role="separator"></div>
-              <div class="console-dropdown-group" role="none">
-                <button type="button" role="menuitem" data-new="expense" id="menu-new-entry">记一笔账目</button>
-                <a href="#integrations" role="menuitem" id="menu-integrations">机器人与 AI</a>
-                <a href="#settings" role="menuitem" id="settings-link">团队设置</a>
-              </div>
+              <div class="console-dropdown-meta" id="menu-team-meta" role="none"></div>
               <div class="console-dropdown-divider" role="separator"></div>
               <div class="console-dropdown-group" role="none">
                 <button type="button" role="menuitem" id="profile-button">个人资料</button>
+                <a href="#" role="menuitem" id="menu-vanora-account" target="_blank" rel="noreferrer" hidden>Vanora 账户中心</a>
+              </div>
+              <div class="console-dropdown-divider" role="separator"></div>
+              <div class="console-dropdown-group" role="none">
                 <button type="button" role="menuitem" class="console-dropdown-danger" id="menu-logout">退出登录</button>
               </div>
             </div>
@@ -168,8 +161,8 @@
         </label>
       </div>
       <label>
-        <span>用途 / 收入说明 <small class="optional">选填</small></span>
-        <input name="description" placeholder="这笔钱用在了哪里？（可留空）" maxlength="120">
+        <span>用途 / 说明 <small class="optional">选填</small></span>
+        <input name="description" placeholder="例如：服务器续费、团队聚餐" maxlength="120">
       </label>
       <div class="form-grid">
         <label>
@@ -187,15 +180,12 @@
       </label>
       <label class="upload-zone">
         <input type="file" name="receipt" accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf">
-        <span id="upload-label">添加发票或凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span>
+        <span id="upload-label">添加发票或凭证 <small>PNG / JPG / PDF，上限 6 MB</small></span>
       </label>
       <div class="form-error" id="entry-error" role="alert"></div>
-      <div class="modal-footer-stack">
-        <span class="modal-hint" id="entry-hint">记账后直接加入待报销，付款后标记已报销。</span>
-        <div class="modal-actions">
-          <button type="button" class="button button-outline" id="save-draft">保存草稿</button>
-          <button type="submit" class="button button-primary" id="save-entry">确认记账</button>
-        </div>
+      <div class="modal-actions">
+        <button type="button" class="button button-outline" id="save-draft">保存草稿</button>
+        <button type="submit" class="button button-primary" id="save-entry">确认记账</button>
       </div>
     </form>
   </dialog>
@@ -253,9 +243,9 @@
     <div class="ai-dialog-body">
       <div id="ai-transcript" class="ai-transcript" aria-live="polite"></div>
       <form id="ai-form" class="ai-compose">
-        <textarea name="text" rows="3" maxlength="4000" placeholder="例如：昨天我垫了打车 35 元，老王垫的聚餐 240 元，收到客户尾款 2000 美元；公账支付服务器费 100 元，看看现在能报多少。" aria-label="用自然语言描述记账、修改、报销或查询" required></textarea>
+        <textarea name="text" rows="3" maxlength="4000" placeholder="例如：昨天我垫了打车 35 元，收到客户尾款 2000 美元，看看现在能报多少。" aria-label="用自然语言描述记账、修改、报销或查询" required></textarea>
         <div class="ai-compose-foot">
-          <span class="ai-hint">支持多笔新增、修改、作废、报销与查询，核对后才执行 · Ctrl Enter 发送</span>
+          <span class="ai-hint">写入前需核对确认 · Ctrl Enter 发送</span>
           <button class="button button-primary" type="submit">解析指令</button>
         </div>
         <div class="form-error" id="ai-error" role="alert"></div>
@@ -269,7 +259,6 @@
         <h2 id="profile-dialog-title">个人资料</h2>
         <button type="button" class="icon-button" data-close aria-label="关闭"></button>
       </div>
-      <p class="modal-description">可修改你在团队账本中的显示名称；密码、手机号、两步验证与登录记录由 Vanora 账户中心统一管理。</p>
       <div id="profile-identity" class="profile-identity"></div>
       <label>
         <span>显示名称</span>
@@ -283,7 +272,7 @@
         <button type="button" class="button button-outline button-danger-outline" id="logout">退出登录</button>
         <div class="modal-actions-group">
           <button type="button" class="button button-outline" data-close>取消</button>
-          <button class="button button-primary" type="submit">保存资料</button>
+          <button class="button button-primary" type="submit">保存</button>
         </div>
       </div>
     </form>
@@ -292,73 +281,78 @@
   <dialog id="export-dialog" class="modal export-dialog" aria-labelledby="export-title">
     <form id="export-form" class="modal-form">
       <div class="modal-heading">
-        <h2 id="export-title">导出 Excel 报表</h2>
+        <h2 id="export-title">导出 Excel</h2>
         <button type="button" class="icon-button" data-close aria-label="关闭"></button>
       </div>
-      <p class="modal-description">导出多工作表 Excel（.xlsx），包含资金汇总、收支明细、逐次报销付款、成员待报销及收据凭证。</p>
       <div class="export-presets" id="export-presets" role="group" aria-label="快捷导出范围"></div>
       <div class="export-selection-banner" id="export-selection-banner" hidden>
         <span id="export-selection-text"></span>
-        <button type="button" class="button button-quiet button-small" id="export-clear-ids">切换为按条件筛选</button>
+        <button type="button" class="button button-quiet button-small" id="export-clear-ids">改按条件筛选</button>
       </div>
-      <div id="export-filter-fields" class="export-filter-fields">
-        <div class="form-grid">
-          <label>
-            <span>开始日期 <small class="optional">选填</small></span>
-            <input type="date" name="from">
-          </label>
-          <label>
-            <span>结束日期 <small class="optional">选填</small></span>
-            <input type="date" name="to">
-          </label>
+      <details id="export-custom-details" class="disclosure-box export-custom-details">
+        <summary>
+          <span>自定义筛选条件</span>
+          <span class="disclosure-meta" id="export-custom-summary">默认</span>
+        </summary>
+        <div id="export-filter-fields" class="export-filter-fields">
+          <div class="form-grid">
+            <label>
+              <span>开始日期 <small class="optional">选填</small></span>
+              <input type="date" name="from">
+            </label>
+            <label>
+              <span>结束日期 <small class="optional">选填</small></span>
+              <input type="date" name="to">
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>业务类型</span>
+              <select name="kind">
+                <option value="all">全部类型</option>
+                <option value="public">公账支出</option>
+                <option value="advance">成员垫付</option>
+                <option value="income">团队收入</option>
+              </select>
+            </label>
+            <label>
+              <span>账目状态</span>
+              <select name="status"></select>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>币种</span>
+              <select name="currency"></select>
+            </label>
+            <label>
+              <span>成员 / 经手人</span>
+              <select name="payer"></select>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>关键词 <small class="optional">选填</small></span>
+              <input name="q" maxlength="120" placeholder="按用途、备注或成员筛选">
+            </label>
+            <label>
+              <span>汇总参考币种</span>
+              <select name="base"></select>
+            </label>
+          </div>
         </div>
-        <div class="form-grid">
-          <label>
-            <span>业务类型</span>
-            <select name="kind">
-              <option value="all">全部类型</option>
-              <option value="public">公账支出</option>
-              <option value="advance">成员垫付</option>
-              <option value="income">团队收入</option>
-            </select>
-          </label>
-          <label>
-            <span>账目状态</span>
-            <select name="status"></select>
-          </label>
-        </div>
-        <div class="form-grid">
-          <label>
-            <span>币种</span>
-            <select name="currency"></select>
-          </label>
-          <label>
-            <span>成员 / 经手人</span>
-            <select name="payer"></select>
-          </label>
-        </div>
-        <div class="form-grid">
-          <label>
-            <span>关键词 <small class="optional">选填</small></span>
-            <input name="q" maxlength="120" placeholder="按用途、备注或成员筛选">
-          </label>
-          <label>
-            <span>汇总参考币种</span>
-            <select name="base"></select>
-          </label>
-        </div>
-      </div>
+      </details>
       <label class="export-check-row">
         <input type="checkbox" name="include_receipts" checked>
         <span>
           <strong>内嵌收据凭证</strong>
-          <small>在「收支明细」显示收据缩略图，并附带「收据凭证」大图工作表（PDF 凭证保留文件名与链接）</small>
+          <small>包含图片缩略图与收据工作表（PDF 保留链接）</small>
         </span>
       </label>
       <div class="export-preview-box" id="export-preview" aria-live="polite"></div>
       <div class="form-error" id="export-error" role="alert"></div>
       <div class="modal-actions modal-actions-split">
-        <button type="button" class="button button-quiet" id="export-reset">重置范围</button>
+        <button type="button" class="button button-quiet" id="export-reset">重置</button>
         <div class="modal-actions-group">
           <button type="button" class="button button-outline" data-close>取消</button>
           <button type="submit" class="button button-primary" id="export-submit">导出 Excel</button>
