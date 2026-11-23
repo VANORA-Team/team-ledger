@@ -130,7 +130,7 @@
   width: 16px;
   height: 16px;
   flex: 0 0 16px;
-  accent-color: #303030;
+  accent-color: var(--accent-control);
   margin: 0;
   cursor: pointer;
 }

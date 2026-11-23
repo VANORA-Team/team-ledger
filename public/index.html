@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#fafafa">
+  <script>(function(){var k="vanora.theme.v1",c="vanora_theme",p="";try{var s="; "+document.cookie,i=s.indexOf("; "+c+"=");if(i!==-1){var v=decodeURIComponent(s.slice(i+c.length+3).split(";")[0].trim());if(v==="light"||v==="dark"||v==="system")p=v;}}catch(_e){}if(!p){try{var l=localStorage.getItem(k);if(l==="light"||l==="dark"||l==="system")p=l;}catch(_e){}}if(!p)p="system";var d=p==="dark"||(p==="system"&&typeof matchMedia==="function"&&matchMedia("(prefers-color-scheme: dark)").matches);var t=d?"dark":"light";var r=document.documentElement;r.dataset.theme=t;r.dataset.themePreference=p;r.style.colorScheme=t;var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#111111":"#fafafa");var cs=document.querySelector('meta[name="color-scheme"]');if(cs)cs.setAttribute("content",t);})();</script>
   <title>Vanora 财务管理</title>
   <link rel="icon" href="/static/vanora-logo.png" type="image/png">
   <link rel="stylesheet" href="/static/style.css">
@@ -45,6 +46,12 @@
   </div>
 
   <section id="auth" class="auth-site" hidden>
+    <div class="auth-theme-bar">
+      <div class="theme-switcher" data-theme-switcher="auth" data-open="false">
+        <button type="button" class="icon-button theme-switcher-trigger" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false" aria-controls="auth-theme-menu"></button>
+        <div class="theme-switcher-menu" id="auth-theme-menu" role="menu" aria-label="界面外观主题" data-open="false" inert></div>
+      </div>
+    </div>
     <main class="auth-page" id="auth-page">
       <header class="auth-heading">
         <div class="auth-brand" aria-label="vanora. 财务管理">
@@ -95,6 +102,10 @@
             <span class="trigger-label">AI 助手</span>
           </button>
           <button type="button" class="icon-button" id="refresh-ledger" aria-label="刷新账本" title="刷新账本"></button>
+          <div class="theme-switcher" data-theme-switcher="topbar" data-open="false">
+            <button type="button" class="icon-button theme-switcher-trigger" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false" aria-controls="topbar-theme-menu"></button>
+            <div class="theme-switcher-menu" id="topbar-theme-menu" role="menu" aria-label="界面外观主题" data-open="false" inert></div>
+          </div>
           <div class="console-dropdown account-dropdown" id="account-dropdown" data-open="false">
             <button type="button" class="console-dropdown-trigger" id="account-trigger" aria-label="账户菜单" aria-expanded="false" aria-haspopup="menu" aria-controls="account-menu">
               <span class="workspace-initial user-initial" id="my-avatar"></span>

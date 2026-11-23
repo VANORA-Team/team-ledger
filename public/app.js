@@ -64,6 +64,9 @@ const paths = {
   user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8',
   shield: 'M12 2 4 5v6c0 5.25 3.4 10.1 8 11 4.6-.9 8-5.75 8-11V5l-8-3z',
   database: 'M12 3c4.97 0 9 1.34 9 3s-4.03 3-9 3-9-1.34-9-3 4.03-3 9-3z M3 6v6c0 1.66 4.03 3 9 3s9-1.34 9-3V6 M3 12v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6',
+  sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 1 0 0-8 M12 2v2 M12 20v2 M4.93 4.93l1.41 1.41 M17.66 17.66l1.41 1.41 M2 12h2 M20 12h2 M6.34 17.66l-1.41 1.41 M19.07 4.93l-1.41 1.41',
+  moon: 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z',
+  monitor: 'M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M8 21h8 M12 17v4',
 };
 
 const icon = (name, cls = '') =>
@@ -1521,11 +1524,204 @@ function scrollActiveNavIntoView() {
   navInitialized = true;
 }
 
+/* ============================================================================
+ * Vanora Unified Theme Manager (Light / Dark / System + Cross-Subdomain Sync)
+ * ========================================================================== */
+
+const THEME_STORAGE_KEY = 'vanora.theme.v1';
+const THEME_COOKIE_NAME = 'vanora_theme';
+const THEME_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+const THEME_COLOR_LIGHT = '#fafafa';
+const THEME_COLOR_DARK = '#111111';
+const THEME_OPTIONS = [
+  {value: 'light', label: '浅色', icon: 'sun'},
+  {value: 'dark', label: '深色', icon: 'moon'},
+  {value: 'system', label: '跟随系统', icon: 'monitor'},
+];
+const THEME_LABELS = {light: '浅色', dark: '深色', system: '跟随系统'};
+const THEME_SECOND_LEVEL_SUFFIXES = new Set([
+  'ac.cn', 'com.cn', 'edu.cn', 'gov.cn', 'net.cn', 'org.cn',
+  'co.jp', 'ne.jp', 'or.jp', 'co.uk', 'org.uk', 'ac.uk',
+  'com.au', 'net.au', 'org.au', 'com.hk', 'com.tw', 'com.sg', 'co.kr',
+]);
+
+let themePreference = 'system';
+let themeMediaQuery = null;
+
+function parseThemePreference(value) {
+  return value === 'light' || value === 'dark' || value === 'system' ? value : null;
+}
+
+function readThemeCookie() {
+  if (typeof document === 'undefined' || !document.cookie) return null;
+  const padded = `; ${document.cookie}`;
+  const prefix = `; ${THEME_COOKIE_NAME}=`;
+  const idx = padded.indexOf(prefix);
+  if (idx === -1) return null;
+  const raw = padded.slice(idx + prefix.length).split(';', 1)[0].trim();
+  try {
+    return parseThemePreference(decodeURIComponent(raw));
+  } catch {
+    return parseThemePreference(raw);
+  }
+}
+
+function resolveThemeCookieDomain(hostname) {
+  const lower = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!lower || lower === 'localhost' || lower.endsWith('.localhost')) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(lower) || lower.includes(':')) return null;
+  const parts = lower.split('.').filter(Boolean);
+  if (parts.length < 2) return null;
+  const lastTwo = parts.slice(-2).join('.');
+  const root = THEME_SECOND_LEVEL_SUFFIXES.has(lastTwo)
+    ? (parts.length >= 3 ? parts.slice(-3).join('.') : null)
+    : lastTwo;
+  if (!root) return null;
+  if (lower !== root && lower.endsWith(`.${root}`)) return `.${root}`;
+  return null;
+}
+
+function writeThemeCookie(pref) {
+  if (typeof document === 'undefined' || typeof location === 'undefined') return;
+  const secureFlag = location.protocol === 'https:' ? '; Secure' : '';
+  const sharedDomain = resolveThemeCookieDomain(location.hostname);
+  try {
+    if (sharedDomain) {
+      document.cookie = `${THEME_COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax${secureFlag}`;
+      document.cookie = `${THEME_COOKIE_NAME}=${encodeURIComponent(pref)}; Path=/; Domain=${sharedDomain}; Max-Age=${THEME_COOKIE_MAX_AGE}; SameSite=Lax${secureFlag}`;
+    } else {
+      document.cookie = `${THEME_COOKIE_NAME}=${encodeURIComponent(pref)}; Path=/; Max-Age=${THEME_COOKIE_MAX_AGE}; SameSite=Lax${secureFlag}`;
+    }
+  } catch {
+    // ignore cookie errors
+  }
+}
+
+function readThemePreference() {
+  const fromCookie = readThemeCookie();
+  if (fromCookie) return fromCookie;
+  try {
+    const fromStorage = parseThemePreference(localStorage.getItem(THEME_STORAGE_KEY));
+    if (fromStorage) return fromStorage;
+  } catch {
+    // ignore storage errors
+  }
+  return 'system';
+}
+
+function isSystemDark() {
+  return Boolean(typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+function resolveTheme(pref = themePreference) {
+  if (pref === 'dark') return 'dark';
+  if (pref === 'light') return 'light';
+  return isSystemDark() ? 'dark' : 'light';
+}
+
+function renderThemeSwitchers() {
+  const resolved = resolveTheme(themePreference);
+  const triggerIcon = resolved === 'dark' ? 'moon' : 'sun';
+  const label = `切换主题（当前：${THEME_LABELS[themePreference] || '跟随系统'}）`;
+  $$('[data-theme-switcher]').forEach(root => {
+    const trigger = $('.theme-switcher-trigger', root);
+    const menu = $('.theme-switcher-menu', root);
+    if (trigger) {
+      trigger.innerHTML = icon(triggerIcon);
+      trigger.setAttribute('aria-label', label);
+      trigger.setAttribute('title', label);
+    }
+    if (menu) {
+      menu.innerHTML = THEME_OPTIONS.map(opt => {
+        const selected = themePreference === opt.value;
+        return `<button type="button" role="menuitemradio" aria-checked="${selected}" class="theme-switcher-option" data-theme-option="${opt.value}">${icon(opt.icon)}<span>${opt.label}</span>${selected ? icon('check', 'theme-switcher-check') : ''}</button>`;
+      }).join('');
+    }
+  });
+}
+
+function applyThemeToDocument(pref = themePreference) {
+  themePreference = parseThemePreference(pref) || 'system';
+  const resolved = resolveTheme(themePreference);
+  const root = document.documentElement;
+  root.dataset.theme = resolved;
+  root.dataset.themePreference = themePreference;
+  root.style.colorScheme = resolved;
+  const themeColorMeta = $('meta[name="theme-color"]');
+  if (themeColorMeta) themeColorMeta.setAttribute('content', resolved === 'dark' ? THEME_COLOR_DARK : THEME_COLOR_LIGHT);
+  const colorSchemeMeta = $('meta[name="color-scheme"]');
+  if (colorSchemeMeta) colorSchemeMeta.setAttribute('content', resolved);
+  renderThemeSwitchers();
+  return resolved;
+}
+
+function setThemePreference(next) {
+  const pref = parseThemePreference(next) || 'system';
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, pref);
+  } catch {
+    // ignore storage errors
+  }
+  writeThemeCookie(pref);
+  applyThemeToDocument(pref);
+}
+
+function setThemeMenuOpen(root, open) {
+  if (!root) return;
+  const trigger = $('.theme-switcher-trigger', root);
+  const menu = $('.theme-switcher-menu', root);
+  if (!trigger || !menu) return;
+  if (open) {
+    closeAllThemeMenus(root);
+    setAccountMenuOpen(false);
+  }
+  root.dataset.open = open ? 'true' : 'false';
+  menu.dataset.open = open ? 'true' : 'false';
+  trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  menu.inert = !open;
+}
+
+function closeAllThemeMenus(except = null) {
+  $$('[data-theme-switcher][data-open="true"]').forEach(root => {
+    if (root !== except) setThemeMenuOpen(root, false);
+  });
+}
+
+function initThemeManager() {
+  const pref = readThemePreference();
+  try {
+    if (localStorage.getItem(THEME_STORAGE_KEY) !== pref) {
+      localStorage.setItem(THEME_STORAGE_KEY, pref);
+    }
+  } catch {
+    // ignore storage errors
+  }
+  applyThemeToDocument(pref);
+  if (typeof matchMedia === 'function' && !themeMediaQuery) {
+    themeMediaQuery = matchMedia('(prefers-color-scheme: dark)');
+    const onMediaChange = () => {
+      if (themePreference === 'system') applyThemeToDocument('system');
+    };
+    if (typeof themeMediaQuery.addEventListener === 'function') {
+      themeMediaQuery.addEventListener('change', onMediaChange);
+    } else if (typeof themeMediaQuery.addListener === 'function') {
+      themeMediaQuery.addListener(onMediaChange);
+    }
+  }
+  window.addEventListener('storage', event => {
+    if (event.key !== THEME_STORAGE_KEY) return;
+    const next = parseThemePreference(event.newValue) || 'system';
+    writeThemeCookie(next);
+    applyThemeToDocument(next);
+  });
+}
+
 function setAccountMenuOpen(open) {
   const root = $('#account-dropdown');
   const trigger = $('#account-trigger');
   const menu = $('#account-menu');
   if (!root || !trigger || !menu) return;
+  if (open) closeAllThemeMenus();
   root.dataset.open = open ? 'true' : 'false';
   menu.dataset.open = open ? 'true' : 'false';
   trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1533,6 +1729,7 @@ function setAccountMenuOpen(open) {
 }
 
 function hydrateStaticChrome() {
+  initThemeManager();
   $('#ai-launcher-icon').innerHTML = icon('spark');
   $('#refresh-ledger').innerHTML = icon('refresh', 'ico-refresh');
   $('#account-chevron').innerHTML = icon('chevronDown');
@@ -1775,6 +1972,7 @@ async function showAuth(preloadedBoot = null) {
   state.boot = boot;
   document.documentElement.classList.remove('app-shell-active');
   setAccountMenuOpen(false);
+  closeAllThemeMenus();
   $('#loading').hidden = true;
   $('#app').hidden = true;
   $('#auth').hidden = false;
@@ -2203,6 +2401,9 @@ document.addEventListener('pointerdown', event => {
   if (dropdown?.dataset.open === 'true' && !dropdown.contains(event.target)) {
     setAccountMenuOpen(false);
   }
+  $$('[data-theme-switcher][data-open="true"]').forEach(switcher => {
+    if (!switcher.contains(event.target)) setThemeMenuOpen(switcher, false);
+  });
 });
 
 /* ============================================================================
@@ -2479,6 +2680,20 @@ document.addEventListener('click', async event => {
   if (b.id === 'account-trigger') {
     const isOpen = $('#account-dropdown').dataset.open === 'true';
     setAccountMenuOpen(!isOpen);
+    return;
+  }
+  if (b.classList.contains('theme-switcher-trigger')) {
+    const switcher = b.closest('[data-theme-switcher]');
+    if (switcher) {
+      const isOpen = switcher.dataset.open === 'true';
+      setThemeMenuOpen(switcher, !isOpen);
+    }
+    return;
+  }
+  if (b.hasAttribute('data-theme-option')) {
+    const switcher = b.closest('[data-theme-switcher]');
+    setThemePreference(b.dataset.themeOption);
+    if (switcher) setThemeMenuOpen(switcher, false);
     return;
   }
   if (b.closest('#account-menu')) {
@@ -2858,6 +3073,11 @@ document.addEventListener('keydown', e => {
     setAccountMenuOpen(false);
     $('#account-trigger')?.focus();
   }
+  const openTheme = $('[data-theme-switcher][data-open="true"]');
+  if (e.key === 'Escape' && openTheme) {
+    setThemeMenuOpen(openTheme, false);
+    $('.theme-switcher-trigger', openTheme)?.focus();
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && state.user) {
     e.preventDefault();
     const dialog = $('#ai-dialog');
@@ -3192,6 +3412,7 @@ window.addEventListener('hashchange', () => {
   parseHashRoute();
   state.selected.clear();
   setAccountMenuOpen(false);
+  closeAllThemeMenus();
   render();
   if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') calculateFunds();
   $('#main')?.scrollTo({top: 0, behavior: 'auto'});
