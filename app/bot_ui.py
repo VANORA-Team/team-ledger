@@ -18,9 +18,9 @@ DELIVERY = ContextVar('telegram_delivery', default={})
 PLATFORM = ContextVar('bot_platform', default='telegram')
 PAGE_SIZE = 5
 STATUS = {'pending': '待报销', 'reimbursed': '已报销', 'draft': '草稿', 'posted': '已入账', 'voided': '已作废'}
-COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'), ('expense', '记录公账支出'), ('income', '记录团队收入'),
-            ('ai', '自然语言记账'), ('recent', '最近账目与详情'), ('summary', '我的待报销明细'),
-            ('team', '团队待报销明细'), ('funds', '资金计算、模拟进账与一键报销'), ('today', '今日收支'),
+COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'), ('expense', '记录公账支出'), ('income', '记录营业收入'),
+            ('capital', '记录股东出资转入'), ('ai', '自然语言记账'), ('recent', '最近账目与详情'), ('summary', '我的待报销明细'),
+            ('team', '团队待报销明细'), ('funds', '公户结余、资金计算与一键报销'), ('today', '今日收支'),
             ('month', '本月收支'), ('export', '导出 Excel 账本报表'), ('cancel', '取消当前填写'), ('help', '使用帮助')]
 
 
@@ -86,6 +86,12 @@ def entry_description(entry):
     return entry.get('description') or '未填写说明'
 
 
+def entry_type_label(entry):
+    if entry.get('kind') == 'income':
+        return '股东出资转入' if entry.get('income_type') == 'capital' else '营业收入'
+    return '公账支出' if entry.get('expense_type') == 'public' else '成员垫付'
+
+
 def payment_totals(entry, conf):
     return f'累计已报：{amount_text(entry["reimbursed_amount"],entry["currency"],conf)}\n剩余待报：{amount_text(entry["remaining_amount"],entry["currency"],conf)}'
 
@@ -112,7 +118,7 @@ def menu(conn, user, chat_id):
             [button('📊 资金与付款项目', 'funds'), button('📅 今日收支', 'period:today')],
             bottom_row]
     if is_finance(user):
-        rows.insert(0, [button('🏦 公账支出', 'newpublic'), button('💰 团队收入', 'newincome')])
+        rows.insert(0, [button('🏦 公账支出', 'newpublic'), button('💰 营业收入', 'newincome'), button('🏛️ 股东出资', 'newcapital')])
     draft = conn.execute("SELECT token FROM tg_drafts WHERE user_id=? AND chat_id=? AND expires>? AND step<>'funds_receipt'",
                          (user['id'], chat_id, int(time.time()))).fetchone()
     if draft:
@@ -129,10 +135,10 @@ def help_menu(conn, chat_id):
                   if PLATFORM.get() == 'feishu' else
                   '群聊：请回复机器人弹出的输入提示，普通聊天不会触发记账。成员草稿互相独立。\n')
     say(conn, chat_id, '📖 使用帮助\n\n'
-        '记账：点公账支出 / 成员垫付 / 团队收入，选币种、输入金额即可预览；用途、备注选填。预览可修改金额、币种、日期、用途、备注和成员，编辑用途或备注时发送 - 清空。\n'
+        '记账：点公账支出 / 成员垫付 / 营业收入 / 股东出资，选币种、输入金额即可预览；用途、备注选填。收入预览支持一键切换营业收入或股东出资转入，编辑用途或备注时发送 - 清空。\n'
         '🤖 AI：私聊直接说「昨天打车花了35元」，群里使用 /ai 记账内容；也可以一次说一段话，核对清单后才入账。\n'
         '查账：最近账目、个人与团队待报销均可翻页，点项目查看详情。\n'
-        '账本所有者和财务管理员可登记公账支出、收入与报销，并使用 /export 导出含收据的 Excel（.xlsx）报表（支持按月、待报销或自定义日期范围）。/funds 可模拟进账、查看具体项目。\n'
+        '账本所有者和财务管理员可登记公账支出、营业收入、股东出资与报销，并使用 /export 导出含收据的 Excel（.xlsx）报表（支持按月、待报销或自定义日期范围）。/funds 可查看公户结余、模拟进账与具体报销项目。\n'
         '一键报销：选择记账 / 结算货币，核对全部项目后确认已转账。模拟收入不会自动入账，也不会用于实际付款。\n'
         + group_help +
         '取消：/cancel；返回菜单：/start。凭证文件请到 Web 上传。', [nav()], edit=True)
@@ -210,6 +216,8 @@ def new_draft(conn, user, telegram_id, chat_id, payload=None, step=None):
     payload = dict(payload) if payload else {'kind': 'expense', 'date': config.today(), 'note': '', 'status': 'pending'}
     if payload.get('kind') == 'expense':
         payload.setdefault('expense_type', 'advance')
+    elif payload.get('kind') == 'income':
+        payload.setdefault('income_type', 'operating')
     payload.setdefault('description', '')
     payload.setdefault('payer_id', user['id'])
     conn.execute('INSERT INTO tg_drafts VALUES (?,?,?,?,?,?,?)',
@@ -249,18 +257,23 @@ def show_currencies(conn, chat_id, token, conf):
 def preview(conn, user, chat_id, token, data, rates=None):
     conf = settings(conn)
     payer = conn.execute('SELECT name FROM users WHERE id=?', (data.get('payer_id'),)).fetchone()
-    kind = '团队收入' if data['kind'] == 'income' else '公账支出 · 直接扣款' if data.get('expense_type') == 'public' else '成员垫付 · 待报销'
+    kind = ('股东出资转入 · 计入公户' if data.get('income_type') == 'capital' else '营业收入 · 计入公户') if data['kind'] == 'income' else '公账支出 · 直接扣款' if data.get('expense_type') == 'public' else '成员垫付 · 待报销'
+    member_label = '出资股东' if (data['kind'] == 'income' and data.get('income_type') == 'capital') else '成员'
     lines = [f'🧾 确认{kind}', f'用途：{entry_description(data)}', f'金额：{amount_text(data["amount"],data["currency"],conf)}']
     converted = reference(data['amount'], data['currency'], conf, rates)
     if converted:
         lines.append(converted)
-    lines += [f'日期：{data["date"]}', f'成员：{payer["name"] if payer else "当前成员"}', f'备注：{data.get("note") or "未填写"}', '\n核对后确认才入账。']
-    say(conn, chat_id, '\n'.join(lines),
-        [[button('✅ 保存修改' if data.get('_edit_id') else '✅ 确认入账', f'd:{token}:save')],
-         [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('用途', f'd:{token}:edit:description')],
-         [button('日期', f'd:{token}:edit:date'), button('备注', f'd:{token}:edit:note')]
-         + ([button('成员', f'd:{token}:edit:payer')] if is_finance(user) else []),
-         [button('取消', f'd:{token}:cancel'), button('主菜单', 'home')]], edit=True)
+    lines += [f'日期：{data["date"]}', f'{member_label}：{payer["name"] if payer else "当前成员"}', f'备注：{data.get("note") or "未填写"}', '\n核对后确认才入账。']
+    rows = [
+        [button('✅ 保存修改' if data.get('_edit_id') else '✅ 确认入账', f'd:{token}:save')],
+        [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('用途', f'd:{token}:edit:description')],
+        [button('日期', f'd:{token}:edit:date'), button('备注', f'd:{token}:edit:note')]
+        + ([button('成员', f'd:{token}:edit:payer')] if is_finance(user) else []),
+    ]
+    if data['kind'] == 'income':
+        rows.append([button('切换为营业收入' if data.get('income_type') == 'capital' else '切换为股东出资转入', f'd:{token}:inctype')])
+    rows.append([button('取消', f'd:{token}:cancel'), button('主菜单', 'home')])
+    say(conn, chat_id, '\n'.join(lines), rows, edit=True)
 
 
 def list_entries(conn, user, chat_id, scope='recent', page=0, rates=None):
@@ -315,7 +328,7 @@ def list_entries(conn, user, chat_id, scope='recent', page=0, rates=None):
 
 def detail(conn, user, chat_id, entry_id, rates=None):
     conf, entry = settings(conn), entry_view(conn, entry_id)
-    lines = [f'🧾 #{entry_id} · {entry_status(entry)} · ' + ('团队收入' if entry['kind'] == 'income' else '公账支出' if entry['expense_type'] == 'public' else '成员垫付'), entry_description(entry), original(entry, conf)]
+    lines = [f'🧾 #{entry_id} · {entry_status(entry)} · {entry_type_label(entry)}', entry_description(entry), original(entry, conf)]
     converted = reference(entry['amount'], entry['currency'], conf, rates)
     if converted:
         lines.append(converted)
@@ -324,7 +337,8 @@ def detail(conn, user, chat_id, entry_id, rates=None):
         remaining_reference = reference(entry['remaining_amount'], entry['currency'], conf, rates)
         if remaining_reference:
             lines.append('剩余待报 ' + remaining_reference)
-    lines += [f'成员：{entry["payer_name"]}', f'日期：{entry["date"]}', f'备注：{entry["note"] or "未填写"}',
+    member_label = '出资股东' if (entry['kind'] == 'income' and entry.get('income_type') == 'capital') else '成员'
+    lines += [f'{member_label}：{entry["payer_name"]}', f'日期：{entry["date"]}', f'备注：{entry["note"] or "未填写"}',
               f'凭证：{"已上传，Web 可查看" if entry["receipt"] else "未上传"}']
     if entry['review_note']:
         lines.append('处理备注：' + entry['review_note'])
@@ -335,7 +349,9 @@ def detail(conn, user, chat_id, entry_id, rates=None):
                          f'抵扣 {amount_text(payment["entry_amount"],entry["currency"],conf)} · {payment["note"][:60]}')
     rows = []
     manageable = can_manage_entry(user, entry)
-    if manageable and entry['kind'] == 'expense' and entry['status'] in (('draft', 'posted') if entry['expense_type'] == 'public' else ('pending', 'draft')) and not entry['reimbursed_minor']:
+    editable_income = entry['kind'] == 'income' and entry['status'] == 'posted'
+    editable_expense = (entry['kind'] == 'expense' and entry['status'] in (('draft', 'posted') if entry['expense_type'] == 'public' else ('pending', 'draft')) and not entry['reimbursed_minor'])
+    if manageable and (editable_income or editable_expense):
         rows.append([button('✏️ 修改账目', f'edit:{entry_id}')])
     if entry['status'] == 'pending' and is_finance(user):
         rows.append([button('💳 继续报销' if entry['reimbursed_minor'] else '💳 登记已付款', f'pay:{entry_id}')])
@@ -357,10 +373,19 @@ def period_summary(conn, chat_id, period):
         fail('时间范围无效')
     conf, today = settings(conn), config.today()
     start = today if period == 'today' else today[:7] + '-01'
-    rows = conn.execute("SELECT kind,expense_type,currency,decimals,SUM(amount_minor) amount,COUNT(*) count FROM entries WHERE date>=? AND date<=? AND status NOT IN ('draft','voided') GROUP BY kind,expense_type,currency,decimals", (start, today)).fetchall()
+    rows = conn.execute("SELECT kind,expense_type,income_type,currency,decimals,SUM(amount_minor) amount,COUNT(*) count FROM entries WHERE date>=? AND date<=? AND status NOT IN ('draft','voided') GROUP BY kind,expense_type,income_type,currency,decimals", (start, today)).fetchall()
     lines = [f'📅 {"今日" if period == "today" else "本月"}收支 · {start} 至 {today}', '按发生日期统计，原币种分别列示。']
-    for kind, expense_type, label in [('income', '', '收入'), ('expense', 'public', '公账支出'), ('expense', 'advance', '成员垫付')]:
-        selected = [r for r in rows if r['kind'] == kind and r['expense_type'] == expense_type]
+    for kind, expense_type, income_type, label in [
+        ('income', '', 'operating', '营业收入'),
+        ('income', '', 'capital', '股东出资转入'),
+        ('expense', 'public', '', '公账支出'),
+        ('expense', 'advance', '', '成员垫付'),
+    ]:
+        selected = [
+            r for r in rows
+            if r['kind'] == kind and r['expense_type'] == expense_type
+            and (kind != 'income' or (r['income_type'] or 'operating') == income_type)
+        ]
         lines.append(f'\n{label} · {sum(r["count"] for r in selected)} 笔\n' +
                      ('\n'.join(amount_text(Decimal(r['amount']) / (10 ** r['decimals']), r['currency'], conf) for r in selected) or '暂无'))
     say(conn, chat_id, '\n'.join(lines), [[button('今日', 'period:today'), button('本月', 'period:month')], nav()], edit=True)
@@ -429,6 +454,11 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
         if parts[3] == 'payer':
             admin(user)
         show_field(conn, chat_id, draft, parts[3])
+    elif action == 'inctype' and step == 'confirm' and payload.get('kind') == 'income':
+        admin(user)
+        payload['income_type'] = 'operating' if payload.get('income_type') == 'capital' else 'capital'
+        persist(conn, token, payload, 'confirm')
+        preview(conn, user, chat_id, token, payload, rates)
     elif action == 'resume':
         if payload.get('_flow') == 'funds':
             from . import bot_funds
@@ -623,12 +653,15 @@ def handle(conn, update, ai_result=None, ai_error=None, rates=None, ai_context=N
             show_export_menu(conn, user, chat_id)
     elif data.startswith('x:'):
         export_callback(conn, user, telegram_id, chat_id, data)
-    elif command in ('/book', '/income', '/expense') or data in ('new', 'newincome', 'newpublic'):
-        if command in ('/income', '/expense') or data in ('newincome', 'newpublic'):
+    elif command in ('/book', '/income', '/capital', '/expense') or data in ('new', 'newincome', 'newcapital', 'newpublic'):
+        if command in ('/income', '/capital', '/expense') or data in ('newincome', 'newcapital', 'newpublic'):
             admin(user)
         token, payload = new_draft(conn, user, telegram_id, chat_id)
         if command == '/income' or data == 'newincome':
-            payload.update(kind='income', status='posted')
+            payload.update(kind='income', income_type='operating', status='posted')
+            persist(conn, token, payload, 'currency')
+        elif command == '/capital' or data == 'newcapital':
+            payload.update(kind='income', income_type='capital', status='posted')
             persist(conn, token, payload, 'currency')
         elif command == '/expense' or data == 'newpublic':
             payload.update(expense_type='public', status='posted')
@@ -681,9 +714,12 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
             [[button('📋 最近账目', 'list:recent:0')], nav()], edit=True)
         return
     if action == 'edit':
-        if entry['kind'] != 'expense' or entry['status'] not in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')) or entry['reimbursed_minor']:
+        if entry['kind'] == 'income':
+            if entry['status'] != 'posted':
+                fail('仅已入账的收入可以修改')
+        elif entry['status'] not in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')) or entry['reimbursed_minor']:
             fail('只可修改没有报销记录的支出')
-        body = {k: entry[k] for k in ('kind', 'expense_type', 'amount', 'currency', 'description', 'date', 'note', 'payer_id', 'status')}
+        body = {k: entry[k] for k in ('kind', 'expense_type', 'income_type', 'amount', 'currency', 'description', 'date', 'note', 'payer_id', 'status')}
         body.update(_edit_id=entry['id'], _snapshot=entry_snapshot(conn, entry['id']))
         token, body = new_draft(conn, user, telegram_id, chat_id, body)
         preview(conn, user, chat_id, token, body, rates)
@@ -824,11 +860,22 @@ def ai_query_line(card, conf):
         return f'📊 共 {card.get("count", 0)} 笔' + (f' · {" / ".join(parts)}' if parts else '')
     if kind in ('balance', 'due', 'funds'):
         if not card.get('complete'):
-            return '📊 ' + (card.get('warning') or '资金数据暂不可用')
-        lines = [f'💰 可用 {amount_text(card["cash"], card["base"], conf)}'
+            lines = ['📊 ' + (card.get('warning') or '资金数据暂不可用')]
+            accounts = card.get('currency_accounts') or []
+            if accounts:
+                lines.append('各币种公户结余：' + ' / '.join(amount_text(a['balance'], a['code'], conf) for a in accounts[:6]))
+            return '\n'.join(lines)
+        lines = [f'💰 公户结余（可用）{amount_text(card["cash"], card["base"], conf)}'
                  f' · 待报销 {amount_text(card["due"], card["base"], conf)}'
                  f' · 可安排 {amount_text(card["payable"], card["base"], conf)}'
                  f' · 公账支出 {amount_text(card["public_paid"], card["base"], conf)}']
+        if card.get('operating_income') is not None and card.get('capital_income') is not None:
+            lines.append(f'📥 营业收入 {amount_text(card["operating_income"], card["base"], conf)}'
+                         f' · 股东出资 {amount_text(card["capital_income"], card["base"], conf)}'
+                         f' · 扣全额待报后 {amount_text(card.get("net_after_due", card["remaining"]), card["base"], conf)}')
+        accounts = card.get('currency_accounts') or []
+        if len(accounts) > 1:
+            lines.append('💱 各币种结余：' + ' / '.join(amount_text(a['balance'], a['code'], conf) for a in accounts[:6]))
         for member in (card.get('members') or [])[:5]:
             if Decimal(str(member.get('due', '0'))) > 0:
                 lines.append(f'🙋 {member["name"]} · 待报销 {amount_text(member["due"], card["base"], conf)}'

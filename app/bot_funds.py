@@ -44,11 +44,18 @@ def show(conn, user, chat_id, token, payload, rates, page=0):
         scenario = payload['scenario']
         lines += ['⚗️ 模拟进账：' + amount_text(scenario['amount'], scenario['currency'], conf) + ' ≈ ' + fmt(result['extra']),
                   '以下含模拟收入，仅作试算；尚未入账。', '原账本可用资金：' + fmt(Decimal(result['cash']) - Decimal(result['extra']))]
-    for key, label in [('cash', '当前可用资金' if not payload.get('scenario') else '模拟后可用资金'),
-                       ('due', '全部待报销'), ('reserve', '本次安排报销'), ('payable', '当前可安排付款'),
+    for key, label in [('cash', '当前可用资金（公户结余）' if not payload.get('scenario') else '模拟后可用资金（公户结余）'),
+                       ('operating_income', '累计营业收入'), ('capital_income', '累计股东出资转入'),
+                       ('public_paid', '累计公账支出'), ('paid', '累计已报销付款'),
+                       ('due', '全部待报销'), ('net_after_due', '扣全额待报销后公户结余'),
+                       ('operating_net', '经营净额（不含股东出资）'),
+                       ('reserve', '本次安排报销'), ('payable', '当前可安排付款'),
                        ('remaining', '本次安排后结余'), ('unplanned', '本次安排后仍待报销'),
-                       ('public_paid', '累计公账支出'), ('shortage', '还需补充的资金')]:
+                       ('shortage', '还需补充的资金')]:
         lines.append(label + '：' + fmt(result[key]))
+    accounts = result.get('currency_accounts') or []
+    if len(accounts) > 1:
+        lines.append('各币种公户结余：' + ' / '.join(amount_text(a['balance'], a['code'], conf) for a in accounts[:6]))
     projects = sorted([(m, e) for m in result['members'] for e in m['entries'] if Decimal(e['suggested']) > 0], key=lambda pair: (pair[1]['date'], pair[1]['id']))
     page, total, selected = pages(projects, page)
     lines.append(f'\n📌 建议付款项目 · 第 {page+1}/{total} 页 · 共 {len(projects)} 笔（最早发生优先）')
@@ -61,7 +68,7 @@ def show(conn, user, chat_id, token, payload, rates, page=0):
     if not projects:
         lines.append('暂无可安排的付款项目。')
     dates = sorted({r['date'] for r in result['fx']['rates'].values() if r.get('date')})
-    lines.append('\n可用资金 = 团队收入 − 公账支出 − 已报销；成员垫付仅在实际报销后扣减公账余额。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
+    lines.append('\n公户结余 = 营业收入 + 股东出资转入 − 公账支出 − 已报销；成员垫付仅在实际报销后扣减公户结余。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
     if result['fx'].get('warning'):
         lines.append(result['fx']['warning'])
     rows += paging(token, 'view', page, total)
@@ -250,7 +257,7 @@ def callback(conn, user, telegram_id, chat_id, data, rates):
     elif action == 'income' and payload.get('scenario') and step == 'funds_view':
         from .bot_ui import preview
         from .config import today
-        body = {'kind': 'income', 'amount': payload['scenario']['amount'], 'currency': payload['scenario']['currency'],
+        body = {'kind': 'income', 'income_type': 'operating', 'amount': payload['scenario']['amount'], 'currency': payload['scenario']['currency'],
                 'description': '团队进账', 'date': today(), 'note': '', 'status': 'posted'}
         new_token, body = new_draft(conn, user, telegram_id, chat_id, body)
         preview(conn, user, chat_id, new_token, body, rates)

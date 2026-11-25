@@ -646,6 +646,26 @@ def calculate(body: dict, request: Request):
     return fx.report(body.get('base'), scenario, reimbursement=body.get('reimbursement'))
 
 
+@app.get('/api/public-balance')
+def get_public_balance(request: Request, base: str | None = None, as_of: str = ''):
+    current(request)
+    return fx.public_balance_report(base=base, as_of=as_of)
+
+
+@app.post('/api/public-balance/calculate')
+def calculate_public_balance(body: dict, request: Request):
+    current(request)
+    if not isinstance(body, dict):
+        fail('计算参数格式不正确')
+    return fx.public_balance_report(
+        base=body.get('base'),
+        as_of=body.get('as_of', ''),
+        adjustments=body.get('adjustments'),
+        bank_actual=body.get('bank_actual'),
+        include_pending=body.get('include_pending', True),
+    )
+
+
 @app.post('/api/fx/refresh')
 def refresh_fx(request: Request):
     current(request)

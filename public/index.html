@@ -161,6 +161,13 @@
         <button type="button" data-kind="expense" class="active" aria-pressed="true">成员垫付</button>
         <button type="button" data-kind="income" aria-pressed="false">团队收入</button>
       </div>
+      <div class="income-type-group" id="income-type-wrap" hidden>
+        <span class="income-type-label">收入性质</span>
+        <div class="segmented segmented-compact" id="entry-income-type" role="group" aria-label="收入性质">
+          <button type="button" data-income-type="operating" class="active" aria-pressed="true">营业收入</button>
+          <button type="button" data-income-type="capital" aria-pressed="false">股东出资转入</button>
+        </div>
+      </div>
       <div class="form-grid">
         <label class="amount-field">
           <span>金额</span>
@@ -323,7 +330,9 @@
                 <option value="all">全部类型</option>
                 <option value="public">公账支出</option>
                 <option value="advance">成员垫付</option>
-                <option value="income">团队收入</option>
+                <option value="income">全部收入</option>
+                <option value="operating">营业收入</option>
+                <option value="capital">股东出资转入</option>
               </select>
             </label>
             <label>

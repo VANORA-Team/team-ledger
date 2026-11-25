@@ -21,7 +21,7 @@ from .domain import currency, entry_view, fail, receipt_media_type
 
 EXCEL_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
-KIND_FILTER_VALUES = ('all', 'public', 'advance', 'income', 'expense')
+KIND_FILTER_VALUES = ('all', 'public', 'advance', 'income', 'operating', 'capital', 'expense')
 STATUS_FILTER_VALUES = ('all', 'all_with_voided', 'draft', 'pending', 'partial', 'reimbursed', 'posted', 'voided')
 
 STATUS_LABELS = {
@@ -45,7 +45,9 @@ KIND_LABELS = {
     'all': '全部类型',
     'public': '公账支出',
     'advance': '成员垫付',
-    'income': '团队收入',
+    'income': '全部收入',
+    'operating': '营业收入',
+    'capital': '股东出资转入',
     'expense': '全部支出',
 }
 
@@ -123,7 +125,7 @@ def _display_status(entry):
 
 def _entry_type_label(entry):
     if entry['kind'] == 'income':
-        return '团队收入'
+        return '股东出资转入' if entry.get('income_type') == 'capital' else '营业收入'
     if entry['expense_type'] == 'public':
         return '公账支出'
     return '成员垫付'
@@ -273,6 +275,10 @@ def _matches_filters(entry, filters):
 
     kind = filters['kind']
     if kind == 'income' and entry['kind'] != 'income':
+        return False
+    if kind == 'operating' and not (entry['kind'] == 'income' and (entry.get('income_type') or 'operating') == 'operating'):
+        return False
+    if kind == 'capital' and not (entry['kind'] == 'income' and entry.get('income_type') == 'capital'):
         return False
     if kind == 'expense' and entry['kind'] != 'expense':
         return False
@@ -506,12 +512,15 @@ def _currency_breakdown(entries, payments, conf):
         code: {
             'code': code,
             'decimals': cur_meta.get(code, {}).get('decimals', 2),
+            'operating_income': Decimal(0),
+            'capital_income': Decimal(0),
             'income': Decimal(0),
             'public': Decimal(0),
             'advance_total': Decimal(0),
             'paid_actual': Decimal(0),
             'advance_due': Decimal(0),
             'net_cash': Decimal(0),
+            'net_after_due': Decimal(0),
             'entry_count': 0,
         }
         for code in codes
@@ -525,6 +534,10 @@ def _currency_breakdown(entries, payments, conf):
         if e['status'] == 'voided' or e['status'] == 'draft':
             continue
         if e['kind'] == 'income' and e['status'] == 'posted':
+            if e.get('income_type') == 'capital':
+                bucket['capital_income'] += amt
+            else:
+                bucket['operating_income'] += amt
             bucket['income'] += amt
             bucket['net_cash'] += amt
         elif e['kind'] == 'expense' and e['expense_type'] == 'public' and e['status'] == 'posted':
@@ -541,6 +554,9 @@ def _currency_breakdown(entries, payments, conf):
         amt = _minor_to_decimal(p['amount_minor'], p['decimals'])
         bucket['paid_actual'] += amt
         bucket['net_cash'] -= amt
+
+    for item in stats.values():
+        item['net_after_due'] = item['net_cash'] - item['advance_due']
 
     return [stats[c] for c in codes]
 
@@ -599,8 +615,12 @@ def parse_export_shortcut(raw_text):
         return {'kind': 'public', 'include_receipts': include_receipts}
     if low in ('advance', '垫付', '成员垫付'):
         return {'kind': 'advance', 'include_receipts': include_receipts}
-    if low in ('income', '收入', '团队收入'):
+    if low in ('income', '收入', '团队收入', '全部收入'):
         return {'kind': 'income', 'include_receipts': include_receipts}
+    if low in ('operating', '营业收入', '营收'):
+        return {'kind': 'operating', 'include_receipts': include_receipts}
+    if low in ('capital', '股东出资', '股东出资转入', '出资'):
+        return {'kind': 'capital', 'include_receipts': include_receipts}
     if low in ('today', '今日', '今天'):
         iso = today_date.isoformat()
         return {'date_from': iso, 'date_to': iso, 'include_receipts': include_receipts}
@@ -784,14 +804,14 @@ def build_excel_export(
     _apply_print_setup(ws_summary, landscape=True)
 
     team_name = conf.get('team_name') or 'Vanora 财务管理'
-    ws_summary.merge_cells('A1:H1')
+    ws_summary.merge_cells('A1:I1')
     title_cell = ws_summary['A1']
     _set_text(title_cell, f'{team_name} · 财务导出报表')
     title_cell.font = Font(name=FONT_FAMILY, size=16, bold=True, color=COLOR_INK)
     title_cell.alignment = Alignment(horizontal='left', vertical='center')
     ws_summary.row_dimensions[1].height = 32
 
-    ws_summary.merge_cells('A2:H2')
+    ws_summary.merge_cells('A2:I2')
     sub_cell = ws_summary['A2']
     _set_text(sub_cell, f'导出范围：{scope_label}    |    导出时间：{exported_at}    |    参考币种：{base_code}')
     sub_cell.font = Font(name=FONT_FAMILY, size=9.5, color=COLOR_MUTED)
@@ -813,7 +833,7 @@ def build_excel_export(
     for l1, v1, l2, v2 in meta_rows:
         ws_summary.row_dimensions[row_cursor].height = 22
         ws_summary.merge_cells(start_row=row_cursor, start_column=2, end_row=row_cursor, end_column=4)
-        ws_summary.merge_cells(start_row=row_cursor, start_column=6, end_row=row_cursor, end_column=8)
+        ws_summary.merge_cells(start_row=row_cursor, start_column=6, end_row=row_cursor, end_column=9)
         c1 = _set_text(ws_summary.cell(row=row_cursor, column=1), l1)
         c1.font = label_font
         c1.fill = label_fill
@@ -828,18 +848,18 @@ def build_excel_export(
         c6 = _set_text(ws_summary.cell(row=row_cursor, column=6), v2)
         c6.font = val_font
         c6.alignment = Alignment(horizontal='left', vertical='center')
-        for col_i in range(1, 9):
+        for col_i in range(1, 10):
             ws_summary.cell(row=row_cursor, column=col_i).border = border_thin
         row_cursor += 1
 
     # Section A: Reference-currency summary
     row_cursor += 1
-    _style_section_banner(ws_summary, row_cursor, 8, f'一、参考币种资金汇总（{base_code} · 规划参考口径）')
+    _style_section_banner(ws_summary, row_cursor, 9, f'一、参考币种公户结余与资金汇总（{base_code} · 规划参考口径）')
     row_cursor += 1
 
     if report_data['complete']:
         if report_data['fx'].get('warning'):
-            ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=8)
+            ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=9)
             warn_cell = _set_text(ws_summary.cell(row=row_cursor, column=1), f'汇率提示：{report_data["fx"]["warning"]}')
             warn_cell.font = Font(name=FONT_FAMILY, size=9.5, color=COLOR_WARN_FG)
             warn_cell.fill = PatternFill('solid', fgColor=COLOR_WARN_BG)
@@ -847,44 +867,49 @@ def build_excel_export(
             ws_summary.row_dimensions[row_cursor].height = 22
             row_cursor += 1
 
-        _style_table_header(ws_summary, row_cursor, ['指标项', f'金额（{base_code}）', '计算口径说明', '', '', '', '', ''])
-        ws_summary.merge_cells(start_row=row_cursor, start_column=3, end_row=row_cursor, end_column=8)
+        _style_table_header(ws_summary, row_cursor, ['指标项', f'金额（{base_code}）', '计算口径说明', '', '', '', '', '', ''])
+        ws_summary.merge_cells(start_row=row_cursor, start_column=3, end_row=row_cursor, end_column=9)
         row_cursor += 1
 
         kpi_rows = [
-            ('团队收入', report_data['income'], '范围内已入账团队收入合计'),
-            ('公账支出', report_data['public_paid'], '范围内已入账公账支出合计（直接扣减余额）'),
+            ('营业收入', report_data['operating_income'], '范围内已入账营业收入合计（主营 / 客户回款等）'),
+            ('股东出资转入', report_data['capital_income'], '范围内已入账股东出资转入公户合计'),
+            ('公户总入账（收入合计）', report_data['income'], '营业收入 + 股东出资转入'),
+            ('公账支出', report_data['public_paid'], '范围内已入账公账支出合计（直接扣减公户结余）'),
             ('已报销付款', report_data['paid'], '范围内实际登记的报销付款合计'),
-            ('可用资金 / 净额', report_data['actual_cash'], '团队收入 − 公账支出 − 已报销付款'),
+            ('公户结余（可用资金）', report_data['actual_cash'], '营业收入 + 股东出资转入 − 公账支出 − 已报销付款'),
             ('待报销总额', report_data['due'], '范围内待报销成员垫付的未报销余额'),
-            ('可安排报销', report_data['payable'], 'min(max(可用资金, 0), 待报销总额)'),
-            ('安排后结余', report_data['remaining'], '可用资金 − 可安排报销'),
+            ('扣除全部待报销后结余', report_data['actual_net_after_due'], '公户结余 − 待报销总额（清偿全部垫付后预计公户结余）'),
+            ('经营收支净额（不含股东出资）', report_data['operating_net'], '营业收入 − 公账支出 − 已报销付款（不含股东出资）'),
+            ('可安排报销', report_data['payable'], 'min(max(公户结余, 0), 待报销总额)'),
+            ('安排后结余', report_data['remaining'], '公户结余 − 可安排报销'),
             ('资金缺口', report_data['shortage'], '覆盖全部待报销所需补足金额'),
         ]
         for idx, (label, amount_str, desc) in enumerate(kpi_rows):
             ws_summary.row_dimensions[row_cursor].height = 22
-            ws_summary.merge_cells(start_row=row_cursor, start_column=3, end_row=row_cursor, end_column=8)
+            ws_summary.merge_cells(start_row=row_cursor, start_column=3, end_row=row_cursor, end_column=9)
             row_fill = PatternFill('solid', fgColor=COLOR_ZEBRA_BG if idx % 2 else 'FFFFFF')
-            is_key = label in ('可用资金 / 净额', '待报销总额', '资金缺口')
+            is_key = label in ('公户结余（可用资金）', '扣除全部待报销后结余', '待报销总额', '资金缺口')
             c_label = _set_text(ws_summary.cell(row=row_cursor, column=1), label)
             c_label.font = Font(name=FONT_FAMILY, size=10, bold=is_key, color=COLOR_INK)
             c_label.alignment = Alignment(horizontal='left', vertical='center')
 
             c_val = _set_money(ws_summary.cell(row=row_cursor, column=2), amount_str, base_decimals)
-            c_val.font = Font(name=FONT_FAMILY, size=10, bold=is_key, color='991B1B' if (label == '资金缺口' and Decimal(amount_str) > 0) else COLOR_INK)
+            is_neg_alert = (label == '资金缺口' and Decimal(amount_str) > 0) or (label in ('公户结余（可用资金）', '扣除全部待报销后结余') and Decimal(amount_str) < 0)
+            c_val.font = Font(name=FONT_FAMILY, size=10, bold=is_key, color='991B1B' if is_neg_alert else COLOR_INK)
             c_val.alignment = Alignment(horizontal='right', vertical='center')
 
             c_desc = _set_text(ws_summary.cell(row=row_cursor, column=3), desc)
             c_desc.font = Font(name=FONT_FAMILY, size=9.5, color=COLOR_MUTED)
             c_desc.alignment = Alignment(horizontal='left', vertical='center')
 
-            for col_i in range(1, 9):
+            for col_i in range(1, 10):
                 cell = ws_summary.cell(row=row_cursor, column=col_i)
                 cell.fill = row_fill
                 cell.border = border_thin
             row_cursor += 1
     else:
-        ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=8)
+        ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=9)
         missing = '、'.join(report_data['fx'].get('missing') or [])
         warn_msg = (report_data['fx'].get('warning') or '缺少有效汇率，跨币种换算暂不可用。') + (f'（缺少币种：{missing}）' if missing else '')
         warn_cell = _set_text(ws_summary.cell(row=row_cursor, column=1), warn_msg)
@@ -896,12 +921,12 @@ def build_excel_export(
 
     # Section B: Original-currency breakdown (always exact, no FX dependency)
     row_cursor += 1
-    _style_section_banner(ws_summary, row_cursor, 8, '二、按原币种精确统计（未换算）')
+    _style_section_banner(ws_summary, row_cursor, 9, '二、按原币种精确统计（公户原币结余，未换算）')
     row_cursor += 1
     _style_table_header(
         ws_summary,
         row_cursor,
-        ['币种', '团队收入', '公账支出', '成员垫付总额', '已报销实付', '剩余待报销', '公账原币净变动', '账目笔数'],
+        ['币种', '营业收入', '股东出资转入', '公账支出', '已报销实付', '公户原币结余', '剩余待报销', '扣待报后结余', '账目笔数'],
     )
     row_cursor += 1
 
@@ -916,30 +941,31 @@ def build_excel_export(
             c_code.alignment = Alignment(horizontal='center', vertical='center')
 
             money_cols = [
-                (2, item['income']),
-                (3, item['public']),
-                (4, item['advance_total']),
+                (2, item['operating_income']),
+                (3, item['capital_income']),
+                (4, item['public']),
                 (5, item['paid_actual']),
-                (6, item['advance_due']),
-                (7, item['net_cash']),
+                (6, item['net_cash']),
+                (7, item['advance_due']),
+                (8, item['net_after_due']),
             ]
             for col_i, val in money_cols:
                 cell = _set_money(ws_summary.cell(row=row_cursor, column=col_i), val, dec)
-                cell.font = Font(name=FONT_FAMILY, size=10, bold=(col_i == 7), color=COLOR_INK)
+                cell.font = Font(name=FONT_FAMILY, size=10, bold=(col_i in (6, 8)), color='991B1B' if (col_i in (6, 8) and val < 0) else COLOR_INK)
                 cell.alignment = Alignment(horizontal='right', vertical='center')
 
-            c_cnt = ws_summary.cell(row=row_cursor, column=8, value=item['entry_count'])
+            c_cnt = ws_summary.cell(row=row_cursor, column=9, value=item['entry_count'])
             c_cnt.font = val_font
             c_cnt.number_format = '#,##0'
             c_cnt.alignment = Alignment(horizontal='right', vertical='center')
 
-            for col_i in range(1, 9):
+            for col_i in range(1, 10):
                 cell = ws_summary.cell(row=row_cursor, column=col_i)
                 cell.fill = row_fill
                 cell.border = border_thin
             row_cursor += 1
     else:
-        ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=8)
+        ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=9)
         empty_cell = _set_text(ws_summary.cell(row=row_cursor, column=1), '当前导出范围内暂无账目记录')
         empty_cell.font = Font(name=FONT_FAMILY, size=10, color=COLOR_MUTED)
         empty_cell.alignment = Alignment(horizontal='center', vertical='center')
@@ -954,15 +980,15 @@ def build_excel_export(
     ]
     if used_rates:
         row_cursor += 1
-        _style_section_banner(ws_summary, row_cursor, 8, '三、本次报表参考汇率')
+        _style_section_banner(ws_summary, row_cursor, 9, '三、本次报表参考汇率')
         row_cursor += 1
-        _style_table_header(ws_summary, row_cursor, ['原币种', '换算币种', '参考汇率（1 原币 = ?）', '汇率日期', '汇率来源', '', '', ''])
-        ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=8)
+        _style_table_header(ws_summary, row_cursor, ['原币种', '换算币种', '参考汇率（1 原币 = ?）', '汇率日期', '汇率来源', '', '', '', ''])
+        ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=9)
         row_cursor += 1
         fx_source = report_data['fx'].get('source') or 'Frankfurter · 每日参考汇率'
         for idx, (code, rate_info) in enumerate(used_rates):
             ws_summary.row_dimensions[row_cursor].height = 21
-            ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=8)
+            ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=9)
             row_fill = PatternFill('solid', fgColor=COLOR_ZEBRA_BG if idx % 2 else 'FFFFFF')
             c1 = _set_text(ws_summary.cell(row=row_cursor, column=1), code)
             c1.alignment = Alignment(horizontal='center', vertical='center')
@@ -975,7 +1001,7 @@ def build_excel_export(
             c4.alignment = Alignment(horizontal='center', vertical='center')
             c5 = _set_text(ws_summary.cell(row=row_cursor, column=5), fx_source)
             c5.alignment = Alignment(horizontal='left', vertical='center')
-            for col_i in range(1, 9):
+            for col_i in range(1, 10):
                 cell = ws_summary.cell(row=row_cursor, column=col_i)
                 cell.font = val_font
                 cell.fill = row_fill
@@ -1357,8 +1383,8 @@ def build_excel_export(
     # Auto-fit column widths across sheets (keeping image columns fixed to fit thumbnails cleanly).
     _auto_fit_columns(
         ws_summary,
-        min_widths={1: 18, 2: 18, 3: 18, 4: 18, 5: 18, 6: 18, 7: 18, 8: 12},
-        max_widths={1: 24, 2: 22, 3: 24, 4: 24, 5: 22, 6: 22, 7: 22, 8: 14},
+        min_widths={1: 24, 2: 16, 3: 16, 4: 16, 5: 16, 6: 16, 7: 16, 8: 16, 9: 12},
+        max_widths={1: 30, 2: 22, 3: 22, 4: 22, 5: 22, 6: 22, 7: 22, 8: 22, 9: 14},
     )
     _auto_fit_columns(
         ws_entries,

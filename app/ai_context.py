@@ -22,6 +22,7 @@ def _amount(row, units):
 def _compact(row):
     item = {
         'id': row['id'], 'date': row['date'], 'kind': row['kind'], 'expense_type': row['expense_type'],
+        'income_type': row['income_type'],
         'amount': _amount(row, row['amount_minor']), 'currency': row['currency'],
         'description': row['description'][:120], 'payer': row['payer_name'],
         'status': row['status'],
@@ -36,7 +37,7 @@ def _compact(row):
 
 
 def _rows(conn, where='', params=(), limit=None):
-    sql = ('SELECT e.id,e.kind,e.expense_type,e.amount_minor,e.currency,e.decimals,e.description,e.date,'
+    sql = ('SELECT e.id,e.kind,e.expense_type,e.income_type,e.amount_minor,e.currency,e.decimals,e.description,e.date,'
            'e.status,e.reimbursed_minor,e.note,u.name payer_name '
            'FROM entries e JOIN users u ON u.id=e.payer_id ' + where +
            ' ORDER BY e.date DESC,e.id DESC')
@@ -78,8 +79,9 @@ def funds(conf):
     if not report.get('complete'):
         return {'complete': False, 'base': report.get('base'),
                 'warning': report.get('fx', {}).get('warning') or '汇率不完整'}
-    keys = ('base', 'income', 'paid', 'public_paid', 'cash', 'due',
-            'reserve', 'payable', 'remaining', 'shortage')
+    keys = ('base', 'income', 'operating_income', 'capital_income', 'paid', 'public_paid',
+            'total_outflow', 'public_balance', 'cash', 'due', 'net_after_due', 'operating_net',
+            'reserve', 'payable', 'remaining', 'shortage', 'balances')
     return {key: report.get(key) for key in keys}
 
 

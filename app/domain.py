@@ -82,6 +82,27 @@ def minor_amount(value, decimals, *, allow_zero=False):
         fail('金额格式不正确')
 
 
+INCOME_TYPES = ('operating', 'capital')
+
+
+def income_type_label(income_type):
+    return '股东出资转入' if income_type == 'capital' else '营业收入'
+
+
+def signed_minor_amount(value, decimals):
+    value = str(value).strip()
+    if not re.fullmatch(r'-?\d{1,12}(?:\.\d{1,4})?', value):
+        fail('金额格式不正确，不支持千分位或科学计数法')
+    try:
+        amount = Decimal(value)
+        scaled = amount * (10 ** decimals)
+        if scaled != scaled.to_integral_value() or abs(scaled) > 9_000_000_000_000:
+            fail(f'金额超出范围或小数超过 {decimals} 位')
+        return int(scaled)
+    except InvalidOperation:
+        fail('金额格式不正确')
+
+
 def normalized_entry(conn, user, body):
     conf = settings(conn)
     kind = body.get('kind', 'expense')
@@ -90,6 +111,9 @@ def normalized_entry(conn, user, body):
     expense_type = body.get('expense_type', 'advance') if kind == 'expense' else ''
     if kind == 'expense' and expense_type not in ('public', 'advance'):
         fail('支出请选择公账支出或成员垫付')
+    income_type = body.get('income_type', 'operating') if kind == 'income' else ''
+    if kind == 'income' and income_type not in INCOME_TYPES:
+        fail('收入请选择营业收入或股东出资转入')
     if kind == 'income' or expense_type == 'public':
         admin(user)
     cur = currency(conf, body.get('currency', conf['default_currency']))
@@ -117,7 +141,7 @@ def normalized_entry(conn, user, body):
     allowed = ('posted',) if kind == 'income' else ('draft', 'posted') if direct else ('draft', 'pending')
     if status not in allowed:
         fail('成员垫付请选择草稿或待报销；公账支出请选择草稿或已入账；收入正常入账')
-    return {'kind': kind, 'expense_type': expense_type, 'amount_minor': amount, 'currency': cur['code'], 'decimals': cur['decimals'],
+    return {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount_minor': amount, 'currency': cur['code'], 'decimals': cur['decimals'],
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
 
@@ -288,10 +312,19 @@ def delete_entry(conn, user, entry_id):
 def edit_entry(conn, user, entry_id, body):
     old = entry_view(conn, entry_id)
     require_entry_access(user, old)
-    allowed = ('draft', 'posted') if old['expense_type'] == 'public' else ('draft', 'pending')
-    if old['kind'] != 'expense' or old['status'] not in allowed or old['reimbursed_minor']:
-        fail('仅没有报销记录的支出可以修改', 409)
-    data = normalized_entry(conn, user, {**body, 'expense_type': body.get('expense_type', old['expense_type'])})
+    if old['kind'] == 'income':
+        if old['status'] != 'posted':
+            fail('仅已入账的收入可以修改', 409)
+    else:
+        allowed = ('draft', 'posted') if old['expense_type'] == 'public' else ('draft', 'pending')
+        if old['status'] not in allowed or old['reimbursed_minor']:
+            fail('仅没有报销记录的支出可以修改', 409)
+    merged = dict(body)
+    if old['kind'] == 'expense':
+        merged['expense_type'] = body.get('expense_type', old['expense_type'])
+    else:
+        merged['income_type'] = body.get('income_type', old.get('income_type') or 'operating')
+    data = normalized_entry(conn, user, merged)
     if data['kind'] != old['kind']:
         fail('不支持更改账目类型')
     conn.execute('UPDATE entries SET ' + ','.join(f'{k}=?' for k in data) + ',review_note=?,updated_at=? WHERE id=?',

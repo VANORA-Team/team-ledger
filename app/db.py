@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS oidc_revoked_jti (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS entries (
  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, expense_type TEXT NOT NULL DEFAULT 'advance',
+ income_type TEXT NOT NULL DEFAULT '',
  amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
  currency TEXT NOT NULL, decimals INTEGER NOT NULL, description TEXT NOT NULL,
  category TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, payer_id INTEGER NOT NULL REFERENCES users(id),
@@ -188,10 +189,13 @@ def _init_db():
         conn.executescript(SCHEMA)
         # Both processes can initialize concurrently; serialize the additive migration.
         conn.execute('BEGIN IMMEDIATE')
-        if 'reimbursed_minor' not in {r[1] for r in conn.execute('PRAGMA table_info(entries)')}:
+        entry_cols = {r[1] for r in conn.execute('PRAGMA table_info(entries)')}
+        if 'reimbursed_minor' not in entry_cols:
             conn.execute('ALTER TABLE entries ADD COLUMN reimbursed_minor INTEGER NOT NULL DEFAULT 0 CHECK(reimbursed_minor>=0 AND reimbursed_minor<=amount_minor)')
-        if 'expense_type' not in {r[1] for r in conn.execute('PRAGMA table_info(entries)')}:
+        if 'expense_type' not in entry_cols:
             conn.execute("ALTER TABLE entries ADD COLUMN expense_type TEXT NOT NULL DEFAULT 'advance'")
+        if 'income_type' not in entry_cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN income_type TEXT NOT NULL DEFAULT ''")
         if 'domain' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_config)')}:
             conn.execute("ALTER TABLE feishu_config ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
         if 'attempts' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_outbox)')}:
@@ -211,6 +215,8 @@ def _init_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_oidc_sid ON sessions(oidc_sid) WHERE oidc_sid<>''")
         conn.execute("UPDATE entries SET expense_type='' WHERE kind='income' AND expense_type<>''")
+        conn.execute("UPDATE entries SET income_type='operating' WHERE kind='income' AND (income_type IS NULL OR income_type='')")
+        conn.execute("UPDATE entries SET income_type='' WHERE kind='expense' AND income_type<>''")
         # Earlier versions only supported full payments. Preserve their dates and notes,
         # and create exactly one payment record without rewriting their audit history.
         conn.execute("""INSERT OR IGNORE INTO payments(entry_id,user_id,amount_minor,currency,decimals,note,entry_amount_minor,fx_rate,fx_date,source_key,created_at)

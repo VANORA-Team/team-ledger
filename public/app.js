@@ -81,7 +81,7 @@ const PAGES = {
 
 const STATUS = {draft: '草稿', pending: '待报销', partial: '部分报销', reimbursed: '已报销', posted: '已入账', voided: '已作废'};
 const entryStatus = e => e.status === 'pending' && e.reimbursed_minor > 0 ? 'partial' : e.status;
-const entryType = e => e.kind === 'income' ? '团队收入' : e.expense_type === 'public' ? '公账支出' : '成员垫付';
+const entryType = e => e.kind === 'income' ? (e.income_type === 'capital' ? '股东出资转入' : '营业收入') : e.expense_type === 'public' ? '公账支出' : '成员垫付';
 const entryDescription = e => e.description || '未填写说明';
 const ROLES = {owner: '账本所有者', finance: '财务管理员', member: '普通成员'};
 const roleName = role => ROLES[role] || '未识别角色';
@@ -107,10 +107,19 @@ const state = {
   reimburseMode: 'queue',
   reimburseTab: 'pending',
   settingsTab: 'members',
-  selected: new Set(), entryKind: 'expense', editing: null, entryKey: null,
+  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', editing: null, entryKey: null,
   action: null, base: null, loadId: 0,
   exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
+  publicBalance: {
+    as_of: '',
+    operating_amount: '', operating_currency: null,
+    capital_amount: '', capital_currency: null,
+    public_amount: '', public_currency: null,
+    include_pending: true,
+    bank_amount: '', bank_currency: null, bank_scope: 'currency',
+    report: null, request: 0,
+  },
   ai: {busy: false, conversation: [], plan: null, selected: new Set(), error: ''},
 };
 
@@ -124,7 +133,9 @@ const money = (amount, code, withCode = true) => {
   const c = cur(code);
   const num = Number(amount);
   if (!Number.isFinite(num)) return '—';
-  return `${esc(c.symbol)}${num.toLocaleString('zh-CN', {minimumFractionDigits: c.decimals, maximumFractionDigits: c.decimals})}${withCode ? ` <span class="money-code">${esc(code)}</span>` : ''}`;
+  const neg = num < 0;
+  const abs = Math.abs(num);
+  return `${neg ? '−' : ''}${esc(c.symbol)}${abs.toLocaleString('zh-CN', {minimumFractionDigits: c.decimals, maximumFractionDigits: c.decimals})}${withCode ? ` <span class="money-code">${esc(code)}</span>` : ''}`;
 };
 
 const badge = status => `<span class="badge ${esc(status)}">${esc(STATUS[status] || status)}</span>`;
@@ -402,7 +413,7 @@ function sourceLabel(source) {
 }
 
 function entryKindDot(entry) {
-  const cls = entry.kind === 'income' ? 'income' : entry.expense_type === 'public' ? 'public' : 'advance';
+  const cls = entry.kind === 'income' ? (entry.income_type === 'capital' ? 'capital' : 'income') : entry.expense_type === 'public' ? 'public' : 'advance';
   return `<span class="kind-dot ${cls}" aria-hidden="true"></span>`;
 }
 
@@ -456,7 +467,7 @@ function aiFieldRows(action) {
     add('类型', entryType(r)); add('金额', `${r.amount} ${r.currency}`); add('用途', entryDescription(r));
     add('日期', r.date); add('成员', r.payer_name || r.payer_id); add('状态', AI_STATUS[r.status] || r.status); add('备注', r.note);
   } else if (action.type === 'edit_entry') {
-    add('编号', `#${r.id}`); add('金额', `${r.amount} ${r.currency}`); add('用途', entryDescription(r)); add('日期', r.date); add('备注', r.note);
+    add('编号', `#${r.id}`); add('类型', r.kind ? entryType(r) : ''); add('金额', `${r.amount} ${r.currency}`); add('用途', entryDescription(r)); add('日期', r.date); add('备注', r.note);
   } else if (['void_entry', 'submit_entry'].includes(action.type)) {
     add('编号', `#${r.id}`); add('备注', r.note);
   } else if (action.type === 'pay_entry') {
@@ -500,13 +511,20 @@ function aiQueryCard(card) {
     return `<div class="ai-query-card"><div class="ai-query-head">查询结果 <span>共 ${esc(card.total)} 笔 · ${totals}</span></div>${table(card.entries || [], {emptyCta: false})}</div>`;
   }
   if (card.kind === 'summary') {
-    const slots = [...(card.by_kind?.expense || []).map(x => ({...x, kind: 'expense'})), ...(card.by_kind?.income || []).map(x => ({...x, kind: 'income'}))];
-    return `<div class="ai-query-card"><div class="ai-query-head">统计汇总 <span>${esc(card.count)} 笔${card.from ? ` · ${esc(card.from)}${card.to ? ` 至 ${esc(card.to)}` : ''}` : ''}</span></div><div class="ai-metrics">${slots.length ? slots.map(x => `<span>${x.kind === 'income' ? '收入' : '支出'} ${money(x.amount, x.currency)} · ${esc(x.count)} 笔</span>`).join('') : '<span>没有符合条件的数据</span>'}</div></div>`;
+    const incomeSlots = [
+      ...(card.by_income_type?.operating || []).map(x => ({...x, label: '营业收入'})),
+      ...(card.by_income_type?.capital || []).map(x => ({...x, label: '股东出资转入'})),
+    ];
+    const slots = [
+      ...(card.by_kind?.expense || []).map(x => ({...x, label: '支出'})),
+      ...(incomeSlots.length ? incomeSlots : (card.by_kind?.income || []).map(x => ({...x, label: '收入'}))),
+    ];
+    return `<div class="ai-query-card"><div class="ai-query-head">统计汇总 <span>${esc(card.count)} 笔${card.from ? ` · ${esc(card.from)}${card.to ? ` 至 ${esc(card.to)}` : ''}` : ''}</span></div><div class="ai-metrics">${slots.length ? slots.map(x => `<span>${esc(x.label)} ${money(x.amount, x.currency)} · ${esc(x.count)} 笔</span>`).join('') : '<span>没有符合条件的数据</span>'}</div></div>`;
   }
   if (['balance', 'due', 'funds'].includes(card.kind)) {
     if (!card.complete) return `<div class="ai-query-card warn">${esc(card.warning || '资金数据暂不可用')}</div>`;
     const base = card.base;
-    return `<div class="ai-query-card"><div class="ai-query-head">资金概览 <span class="mono">${esc(base)}</span></div><div class="ai-metrics"><span>可用 ${money(card.cash, base)}</span><span>在账收入 ${money(card.income, base)}</span><span>已报销 ${money(card.paid, base)}</span><span>公账支出 ${money(card.public_paid, base)}</span><span>待报销 ${money(card.due, base)}</span><span>可安排 ${money(card.payable, base)}</span><span>缺口 ${money(card.shortage, base)}</span></div>${card.members?.length ? `<div class="ai-batch-items">${card.members.filter(m => Number(m.due) > 0).slice(0, 8).map(m => `<div>${esc(m.name)} · 待报销 ${money(m.due, base)} · 建议 ${money(m.suggested, base)}</div>`).join('')}</div>` : ''}${card.warning ? `<div class="ai-action-warning">${esc(card.warning)}</div>` : ''}</div>`;
+    return `<div class="ai-query-card"><div class="ai-query-head">公户结余与资金概览 <span class="mono">${esc(base)}</span></div><div class="ai-metrics"><span>公户结余 ${money(card.cash, base)}</span>${card.operating_income !== undefined ? `<span>营业收入 ${money(card.operating_income, base)}</span><span>股东出资 ${money(card.capital_income, base)}</span>` : `<span>在账收入 ${money(card.income, base)}</span>`}<span>公账支出 ${money(card.public_paid, base)}</span><span>已报销 ${money(card.paid, base)}</span><span>待报销 ${money(card.due, base)}</span>${card.net_after_due !== undefined ? `<span>扣全额待报后 ${money(card.net_after_due, base)}</span>` : ''}<span>可安排 ${money(card.payable, base)}</span><span>缺口 ${money(card.shortage, base)}</span></div>${card.members?.length ? `<div class="ai-batch-items">${card.members.filter(m => Number(m.due) > 0).slice(0, 8).map(m => `<div>${esc(m.name)} · 待报销 ${money(m.due, base)} · 建议 ${money(m.suggested, base)}</div>`).join('')}</div>` : ''}${card.warning ? `<div class="ai-action-warning">${esc(card.warning)}</div>` : ''}</div>`;
   }
   if (card.kind === 'simulation') {
     if (!card.complete) return `<div class="ai-query-card warn">${esc(card.warning || '模拟暂不可用')}</div>`;
@@ -685,7 +703,7 @@ function aiEditInForm(index) {
   state.ai.selected.delete(index);
   closeAi();
   openEntry(r.kind, {
-    kind: r.kind, expense_type: r.expense_type, amount: r.amount, currency: r.currency,
+    kind: r.kind, expense_type: r.expense_type, income_type: r.income_type, amount: r.amount, currency: r.currency,
     description: r.description, date: r.date, payer_id: r.payer_id, note: r.note, status: r.status,
   });
   toast('已在表单中打开，保存后不会重复执行此项');
@@ -814,6 +832,9 @@ function renderOverview() {
   const metric = k => ok ? money(r[k], base) : '—';
   const memberRows = ok ? r.members : [];
   const teamLabel = state.conf.team_name ? `<span class="heading-team-tag">${esc(state.conf.team_name)}</span>` : '';
+  const currencyAccounts = r?.currency_accounts || [];
+  const showCurrencyChips = currencyAccounts.length > 1 || (!ok && currencyAccounts.length > 0);
+  const cashNegative = ok && Number(r.actual_cash) < 0;
 
   return heading(
     '团队总览',
@@ -824,23 +845,24 @@ function renderOverview() {
     <div class="activity-summary-grid">
       <section class="summary-card">
         <div class="summary-card-head">
-          <h2>团队可用余额</h2>
+          <h2>公户结余</h2>
           <span class="mono muted">${esc(base)}</span>
         </div>
-        <div class="summary-card-value">${metric('cash')}</div>
+        <div class="summary-card-value${cashNegative ? ' is-negative' : ''}">${metric('actual_cash')}</div>
+        ${showCurrencyChips ? `<div class="summary-currency-chips">${currencyAccounts.slice(0, 4).map(a => `<span class="summary-currency-chip${Number(a.balance) < 0 ? ' is-negative' : ''}">${esc(a.code)} ${money(a.balance, a.code, false)}</span>`).join('')}</div>` : ''}
         <div class="summary-card-foot">
-          <span>${ok && Number(r.shortage) > 0 ? `缺口 ${money(r.shortage, base, false)}` : ok ? `报销后结余 ${money(r.remaining, base, false)}` : '参考换算'}</span>
-          <a class="activity-summary-link" href="#reimbursements/calculator">资金测算 ${icon('arrow', 'icon-sm')}</a>
+          <span>${ok && Number(r.shortage) > 0 ? `缺口 ${money(r.shortage, base, false)}` : ok ? `扣待报后 ${money(r.actual_net_after_due, base, false)}` : '原币结余见公户核算'}</span>
+          <a class="activity-summary-link" href="#reimbursements/balance">公户结余计算 ${icon('arrow', 'icon-sm')}</a>
         </div>
       </section>
       <section class="summary-card">
         <div class="summary-card-head">
-          <h2>累计团队收入</h2>
+          <h2>累计公户入账</h2>
           <span class="mono muted">${ok ? `今日 ${money(r.today_income, base, false)}` : ''}</span>
         </div>
         <div class="summary-card-value">${metric('income')}</div>
         <div class="summary-card-foot">
-          <span>累计已报销 ${ok ? money(r.paid, base, false) : '—'}</span>
+          <span>营收 ${ok ? money(r.operating_income, base, false) : '—'} · 出资 ${ok ? money(r.capital_income, base, false) : '—'}</span>
           ${canManage() ? `<a class="activity-summary-link" href="#ledger" data-income-link>登记收入 ${icon('arrow', 'icon-sm')}</a>` : '<span></span>'}
         </div>
       </section>
@@ -851,7 +873,7 @@ function renderOverview() {
         </div>
         <div class="summary-card-value">${metric('due')}</div>
         <div class="summary-card-foot">
-          <span>可安排 ${ok ? money(r.payable, base, false) : '—'}</span>
+          <span>公账 ${ok ? money(r.public_paid, base, false) : '—'} · 已报 ${ok ? money(r.paid, base, false) : '—'}</span>
           <a class="activity-summary-link" href="#reimbursements">去处理 ${icon('arrow', 'icon-sm')}</a>
         </div>
       </section>
@@ -892,7 +914,9 @@ function filteredEntries() {
   const f = state.filter;
   return state.entries.filter(e =>
     (!f.text || [e.description, e.note, e.payer_name].join(' ').toLowerCase().includes(f.text.toLowerCase())) &&
-    (f.kind === 'all' || e.kind === f.kind || (e.kind === 'expense' && e.expense_type === f.kind)) &&
+    (f.kind === 'all' || e.kind === f.kind ||
+      (e.kind === 'expense' && e.expense_type === f.kind) ||
+      (e.kind === 'income' && (e.income_type || 'operating') === f.kind)) &&
     (f.currency === 'all' || e.currency === f.currency) &&
     (f.payer === 'all' || e.payer_id === Number(f.payer)) &&
     (f.status === 'all' ? e.status !== 'voided' : f.status === 'partial' ? entryStatus(e) === 'partial' : e.status === f.status) &&
@@ -949,7 +973,7 @@ function renderLedger() {
   ) + `
     <section class="panel">
       <div class="filter-tabs" role="tablist" aria-label="收支类型筛选">
-        ${[['all', '全部记录'], ['public', '公账支出'], ['advance', '成员垫付'], ['income', '团队收入']].map(([value, label]) => `<button type="button" role="tab" aria-selected="${f.kind === value}" data-filter-kind="${value}" class="${f.kind === value ? 'active' : ''}">${label}</button>`).join('')}
+        ${[['all', '全部记录'], ['public', '公账支出'], ['advance', '成员垫付'], ['income', '全部收入'], ['operating', '营业收入'], ['capital', '股东出资转入']].map(([value, label]) => `<button type="button" role="tab" aria-selected="${f.kind === value}" data-filter-kind="${value}" class="${f.kind === value ? 'active' : ''}">${label}</button>`).join('')}
       </div>
       <div class="filters">
         <div class="search-box">
@@ -993,16 +1017,150 @@ function calcSummary(report, scenario = false) {
       </div>
       <div class="calc-amount">${money(report.reserve, b)}</div>
       <div class="calc-rows">
-        <div class="calc-row"><span>${scenario ? '模拟后' : '当前'}可用资金</span><strong>${money(report.cash, b)}</strong></div>
+        <div class="calc-row"><span>${scenario ? '模拟后' : '当前'}公户结余（可用资金）</span><strong>${money(report.cash, b)}</strong></div>
+        <div class="calc-row"><span>其中：营业收入 / 股东出资</span><strong>${money(report.operating_income, b, false)} / ${money(report.capital_income, b, false)} ${esc(b)}</strong></div>
+        <div class="calc-row"><span>公账支出 / 已报销付款</span><strong>${money(report.public_paid, b, false)} / ${money(report.paid, b, false)} ${esc(b)}</strong></div>
         <div class="calc-row"><span>全部待报销</span><strong>${money(report.due, b)}</strong></div>
         ${mode === 'manual' ? `<div class="calc-row"><span>已选项目待报销</span><strong>${money(report.selected_due, b)}</strong></div>` : ''}
         ${mode === 'budget' ? `<div class="calc-row"><span>指定预算</span><strong>${money(report.reimbursement.budget, b)}</strong></div>` : ''}
         <div class="calc-row"><span>本次可安排付款</span><strong>${money(report.payable, b)}</strong></div>
         <div class="calc-row highlight"><span>安排后结余</span><strong>${money(report.remaining, b)}</strong></div>
+        <div class="calc-row ${Number(report.net_after_due) < 0 ? 'danger' : ''}"><span>扣全额待报后结余</span><strong>${money(report.net_after_due, b)}</strong></div>
         <div class="calc-row"><span>安排后仍待报销</span><strong>${money(report.unplanned, b)}</strong></div>
         <div class="calc-row ${Number(report.shortage) > 0 ? 'shortage' : ''}"><span>覆盖全部待报销缺口</span><strong>${money(report.shortage, b)}</strong></div>
       </div>
     </div>`;
+}
+
+function publicBalanceStrip(report) {
+  const ok = Boolean(report?.complete);
+  const base = report?.base || state.conf.reference_currency;
+  const metric = k => ok ? money(report[k], base) : '—';
+  const balNeg = ok && Number(report.public_balance ?? report.actual_cash) < 0;
+  const afterNeg = ok && Number(report.actual_net_after_due) < 0;
+  const opNetNeg = ok && Number(report.operating_net) < 0;
+  const shareholders = report?.shareholder_contributions || [];
+  return `
+    <div class="metric-strip metric-strip-4" id="public-balance-strip">
+      <div class="metric-cell">
+        <small>账面公户结余${report?.as_of ? ` · 截至 ${esc(report.as_of)}` : ''}</small>
+        <strong class="${balNeg ? 'is-negative' : ''}">${metric('actual_cash')}</strong>
+        <span class="metric-cell-sub">公户入账 ${ok ? money(report.income, base, false) : '—'} − 支出 ${ok ? money(report.total_outflow, base, false) : '—'}</span>
+      </div>
+      <div class="metric-cell">
+        <small>扣全额待报后结余</small>
+        <strong class="${afterNeg ? 'is-negative' : ''}">${metric('actual_net_after_due')}</strong>
+        <span class="metric-cell-sub">当前待报销 ${ok ? money(report.due, base, false) : '—'}</span>
+      </div>
+      <div class="metric-cell">
+        <small>累计营业收入</small>
+        <strong>${metric('operating_income')}</strong>
+        <span class="metric-cell-sub${opNetNeg ? ' money-negative' : ''}">经营净额 ${ok ? money(report.operating_net, base, false) : '—'}（不含出资）</span>
+      </div>
+      <div class="metric-cell">
+        <small>累计股东出资转入</small>
+        <strong>${metric('capital_income')}</strong>
+        <span class="metric-cell-sub">${shareholders.length ? `${shareholders.length} 位成员出资` : '暂无股东出资记录'}</span>
+      </div>
+    </div>`;
+}
+
+function reconciliationCard(rec) {
+  if (!rec) return '';
+  const statusMap = {
+    matched: ['账实相符', 'good', 'is-matched'],
+    surplus: ['银行多出', 'warn', 'is-surplus'],
+    deficit: ['账面多出', 'danger', 'is-deficit'],
+    unavailable: ['等待汇率', 'neutral', ''],
+  };
+  const [label, badgeCls, cardCls] = statusMap[rec.status] || ['核对结果', 'neutral', ''];
+  const diffNum = rec.difference !== null && rec.difference !== undefined ? Number(rec.difference) : null;
+  const diffPrefix = diffNum !== null && diffNum > 0 ? '+' : '';
+  return `
+    <div class="reconcile-card ${cardCls}">
+      <div class="reconcile-head">
+        <strong>银行公户实盘对账 · ${rec.scope === 'consolidated' ? `折算汇总（${esc(rec.currency)}）` : `${esc(rec.currency)} 原币精确`}</strong>
+        <span class="badge ${badgeCls}">${esc(label)}</span>
+      </div>
+      <div class="calc-rows">
+        <div class="calc-row"><span>银行公户实际余额</span><strong>${money(rec.bank_balance, rec.currency)}</strong></div>
+        <div class="calc-row"><span>系统账面公户结余</span><strong>${rec.book_balance !== null && rec.book_balance !== undefined ? money(rec.book_balance, rec.currency) : '—'}</strong></div>
+        ${diffNum !== null ? `<div class="calc-row ${diffNum === 0 ? 'highlight' : diffNum < 0 ? 'danger' : 'shortage'}"><span>账实差额（银行 − 账面）</span><strong>${diffPrefix}${money(rec.difference, rec.currency)}</strong></div>` : ''}
+      </div>
+      <p class="reconcile-msg">${esc(rec.message)}</p>
+    </div>`;
+}
+
+function publicBalanceSummary(report) {
+  if (!report) {
+    return `<div class="calc-summary"><span class="calc-summary-kicker">公户结余核算</span><div class="calc-amount">正在计算…</div><p>正在汇总公户账面结余与待报销数据。</p></div>`;
+  }
+  const recHtml = reconciliationCard(report.reconciliation);
+  if (!report.complete) {
+    return `<div class="calc-summary"><div class="calc-summary-top"><span class="calc-summary-kicker">公户结余核算</span><span class="calc-summary-mode">原币结余仍可用</span></div><div class="calc-amount">等待汇率</div><p>缺少可靠汇率时暂停跨币种汇总，下方「按原币种公户结余明细」仍为精确账面结余。</p></div>${recHtml}${reportWarning(report)}`;
+  }
+  const b = report.base;
+  const sim = report.simulation || {};
+  const hasSim = Boolean(sim.has_adjustments);
+  const includePending = sim.include_pending !== false;
+  const headlineAmount = hasSim
+    ? (includePending ? sim.projected_after_due : sim.projected_balance)
+    : (includePending ? report.actual_net_after_due : report.actual_cash);
+  const headlineNeg = Number(headlineAmount) < 0;
+  const kicker = hasSim
+    ? (includePending ? '模拟并扣待报后公户结余' : '模拟后公户预计结余')
+    : (includePending ? '扣全额待报后公户结余' : '当前账面公户结余');
+  const modeText = [report.as_of ? `截至 ${report.as_of}` : '全部已入账', hasSim ? '含试算变动' : '实时账面'].join(' · ');
+  const deltaNum = hasSim ? Number(sim.sim_net_delta) : 0;
+  const opNetVal = hasSim ? sim.projected_operating_net : report.operating_net;
+  const opNetAfterVal = hasSim ? sim.projected_operating_net_after_due : report.operating_net_after_due;
+
+  return `
+    <div class="calc-summary">
+      <div class="calc-summary-top">
+        <span class="calc-summary-kicker">${esc(kicker)}</span>
+        <span class="calc-summary-mode">${esc(modeText)}</span>
+      </div>
+      <div class="calc-amount${headlineNeg ? ' is-negative' : ''}">${money(headlineAmount, b)}</div>
+      <div class="calc-rows">
+        <div class="calc-row"><span>+ 营业收入</span><strong>${money(report.operating_income, b)}</strong></div>
+        <div class="calc-row"><span>+ 股东出资转入</span><strong>${money(report.capital_income, b)}</strong></div>
+        <div class="calc-row subtotal"><span>= 公户总入账</span><strong>${money(report.income, b)}</strong></div>
+        <div class="calc-row"><span>− 公账支出</span><strong>${money(report.public_paid, b)}</strong></div>
+        <div class="calc-row"><span>− 已报销付款</span><strong>${money(report.paid, b)}</strong></div>
+        <div class="calc-row subtotal ${Number(report.actual_cash) < 0 ? 'danger' : 'highlight'}"><span>= 账面公户结余</span><strong>${money(report.actual_cash, b)}</strong></div>
+        ${hasSim ? `
+          ${Number(sim.sim_operating) > 0 ? `<div class="calc-row"><span>+ 模拟营业收入</span><strong>${money(sim.sim_operating, b)}</strong></div>` : ''}
+          ${Number(sim.sim_capital) > 0 ? `<div class="calc-row"><span>+ 模拟股东出资转入</span><strong>${money(sim.sim_capital, b)}</strong></div>` : ''}
+          ${Number(sim.sim_public_expense) > 0 ? `<div class="calc-row"><span>− 模拟公账支出</span><strong>${money(sim.sim_public_expense, b)}</strong></div>` : ''}
+          <div class="calc-row subtotal ${Number(sim.projected_balance) < 0 ? 'danger' : 'highlight'}"><span>= 模拟后公户结余（变动 ${deltaNum >= 0 ? '+' : ''}${money(sim.sim_net_delta, b, false)}）</span><strong>${money(sim.projected_balance, b)}</strong></div>
+        ` : ''}
+        <div class="calc-row"><span>− 全部待报销垫付</span><strong>${money(report.due, b)}</strong></div>
+        <div class="calc-row subtotal ${Number(hasSim ? sim.projected_after_due : report.actual_net_after_due) < 0 ? 'danger' : 'highlight'}"><span>= 结清待报后公户结余</span><strong>${money(hasSim ? sim.projected_after_due : report.actual_net_after_due, b)}</strong></div>
+        <div class="calc-row section-divider ${Number(opNetVal) < 0 ? 'danger' : ''}"><span>经营净现金流（不含股东出资）</span><strong>${money(opNetVal, b)}</strong></div>
+        <div class="calc-row ${Number(opNetAfterVal) < 0 ? 'danger' : ''}"><span>全口径经营净额（营业收入 − 全部支出）</span><strong>${money(opNetAfterVal, b)}</strong></div>
+      </div>
+      <p class="pb-formula-note">公户结余 = 营业收入 + 股东出资转入 − 公账支出 − 已报销付款；成员垫付仅在实际报销后扣减账面结余。模拟试算与银行对账均不会写入账本。</p>
+    </div>${recHtml}`;
+}
+
+function publicCurrencyTable(report) {
+  const accounts = report?.currency_accounts || [];
+  if (!accounts.length) {
+    return empty('暂无公户资金变动', '登记营业收入、股东出资转入、公账支出或报销付款后，这里会按各原币种精确核算公户结余。', '');
+  }
+  const hasSim = Boolean(report?.simulation?.has_adjustments);
+  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="按原币种公户结余明细" tabindex="0"><table class="data-table"><thead><tr><th>币种</th><th class="money">营业收入</th><th class="money">股东出资转入</th><th class="money">公账支出</th><th class="money">已报销实付</th><th class="money">账面公户结余</th>${hasSim ? '<th class="money">模拟后结余</th>' : ''}<th class="money">剩余待报销</th><th class="money">扣待报后结余</th></tr></thead><tbody>${accounts.map(a => `<tr><td><strong class="mono">${esc(a.code)}</strong></td><td class="money">${money(a.operating_income, a.code, false)}</td><td class="money">${money(a.capital_income, a.code, false)}</td><td class="money">${money(a.public_paid, a.code, false)}</td><td class="money">${money(a.paid, a.code, false)}</td><td class="money ${Number(a.balance) < 0 ? 'money-negative' : ''}"><strong>${money(a.balance, a.code, false)}</strong></td>${hasSim ? `<td class="money ${Number(a.projected_balance) < 0 ? 'money-negative' : ''}"><strong>${money(a.projected_balance, a.code, false)}</strong></td>` : ''}<td class="money">${money(a.due, a.code, false)}</td><td class="money ${Number(hasSim ? a.projected_after_due : a.net_after_due) < 0 ? 'money-negative' : ''}"><strong>${money(hasSim ? a.projected_after_due : a.net_after_due, a.code, false)}</strong></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function shareholderTable(report) {
+  const rows = report?.shareholder_contributions || [];
+  if (!rows.length) {
+    return empty('暂无股东出资转入记录', '登记收入时选择「股东出资转入」即可自动统计每位股东的累计出资与占比。', '');
+  }
+  const base = report?.base || state.conf.reference_currency;
+  const ok = Boolean(report?.complete);
+  return `<div class="table-wrap" role="region" aria-label="股东出资转入汇总" tabindex="0"><table class="data-table"><thead><tr><th>出资股东 / 经手人</th><th>笔数</th><th>原币种出资明细</th><th class="money">折合参考（${esc(base)}）</th><th class="money">出资占比</th></tr></thead><tbody>${rows.map(s => `<tr><td><div class="member-table-cell">${avatar(s.name, s.id)}<strong>${esc(s.name)}</strong></div></td><td class="mono">${s.count} 笔</td><td class="mono">${Object.entries(s.by_currency || {}).map(([code, amt]) => money(amt, code)).join(' <span class="muted">/</span> ') || '—'}</td><td class="money"><strong>${ok && s.total !== null ? money(s.total, base) : '—'}</strong></td><td class="money mono">${ok && s.share !== null ? `${esc(s.share)}%` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function planGroups(report, selectable = false) {
@@ -1039,9 +1197,10 @@ function planGroups(report, selectable = false) {
 }
 
 function renderReimbursements() {
-  const mode = state.reimburseMode === 'calculator' ? 'calculator' : 'queue';
+  const mode = ['balance', 'calculator'].includes(state.reimburseMode) ? state.reimburseMode : 'queue';
   const c = state.calculator;
-  const r = mode === 'calculator' ? (c.report || state.report) : state.report;
+  const pb = state.publicBalance;
+  const r = mode === 'calculator' ? (c.report || state.report) : mode === 'balance' ? (pb.report || state.report) : state.report;
   const base = r?.base || state.conf.reference_currency;
   const metric = k => r?.complete ? money(r[k], base) : '—';
   const rows = reimbursementRows();
@@ -1049,12 +1208,108 @@ function renderReimbursements() {
   const modeSwitch = `
     <div class="segmented segmented-compact" role="tablist" aria-label="报销与资金视图">
       <button type="button" role="tab" aria-selected="${mode === 'queue'}" class="${mode === 'queue' ? 'active' : ''}" data-reimburse-mode="queue">报销处理</button>
+      <button type="button" role="tab" aria-selected="${mode === 'balance'}" class="${mode === 'balance' ? 'active' : ''}" data-reimburse-mode="balance">公户结余</button>
       <button type="button" role="tab" aria-selected="${mode === 'calculator'}" class="${mode === 'calculator' ? 'active' : ''}" data-reimburse-mode="calculator">资金测算</button>
     </div>`;
 
-  const actions = mode === 'calculator'
-    ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
-    : `${canManage() ? `<button type="button" class="button button-outline" data-export-open="reimbursements">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`;
+  const actions = mode === 'balance'
+    ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-new="capital">${icon('plus', 'ico-plus')}股东出资</button><button type="button" class="button button-outline" data-export-open="balance">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
+    : mode === 'calculator'
+      ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
+      : `${canManage() ? `<button type="button" class="button button-outline" data-export-open="reimbursements">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`;
+
+  if (mode === 'balance') {
+    const defCur = state.conf.default_currency;
+    const fxIssue = Boolean(!r?.complete || r?.fx?.warning);
+    const fxCount = r?.fx?.rates ? Object.keys(r.fx.rates).filter(code => code !== r.base).length : 0;
+    const bankCurrencyLocked = pb.bank_scope === 'consolidated';
+    const bankCurSelected = bankCurrencyLocked ? base : (pb.bank_currency || base);
+    return heading('报销与资金', actions, modeSwitch) + publicBalanceStrip(r) + `
+      <div class="calculator-grid">
+        <section class="panel"><div class="panel-inner">
+          <h3>公户结余计算与银行对账</h3>
+          <form id="public-balance-form">
+            <div class="pb-section-label">
+              <span>核算截止日期 <small class="optional">选填，留空按全部记录</small></span>
+              <div class="pb-quick-dates">
+                <button type="button" class="pb-quick-btn" data-pb-as-of="all">全部</button>
+                <button type="button" class="pb-quick-btn" data-pb-as-of="today">截至今日</button>
+                <button type="button" class="pb-quick-btn" data-pb-as-of="last_month">上月末</button>
+              </div>
+            </div>
+            <label>
+              <span>截止日期</span>
+              <input type="date" name="as_of" value="${esc(pb.as_of)}">
+            </label>
+
+            <div class="pb-section-label"><span>模拟公户变动 <small class="optional">试算不入账</small></span></div>
+            <div class="form-grid">
+              <label><span>模拟新增营业收入</span><input name="operating_amount" value="${esc(pb.operating_amount)}" inputmode="decimal" placeholder="0.00"></label>
+              <label><span>币种</span><select name="operating_currency">${currencyOptions(pb.operating_currency || defCur)}</select></label>
+            </div>
+            <div class="form-grid">
+              <label><span>模拟股东出资转入</span><input name="capital_amount" value="${esc(pb.capital_amount)}" inputmode="decimal" placeholder="0.00"></label>
+              <label><span>币种</span><select name="capital_currency">${currencyOptions(pb.capital_currency || defCur)}</select></label>
+            </div>
+            <div class="form-grid">
+              <label><span>模拟新增公账支出</span><input name="public_amount" value="${esc(pb.public_amount)}" inputmode="decimal" placeholder="0.00"></label>
+              <label><span>币种</span><select name="public_currency">${currencyOptions(pb.public_currency || defCur)}</select></label>
+            </div>
+            <label class="pb-check-row">
+              <input type="checkbox" name="include_pending" ${pb.include_pending ? 'checked' : ''}>
+              <span>主结果扣除当前全部待报销垫付</span>
+            </label>
+
+            <div class="pb-section-label"><span>银行公户实盘对账 <small class="optional">选填</small></span></div>
+            <label>
+              <span>对账口径</span>
+              <select name="bank_scope" id="pb-bank-scope">
+                <option value="currency" ${pb.bank_scope === 'currency' ? 'selected' : ''}>按单个原币种精确核对（推荐）</option>
+                <option value="consolidated" ${pb.bank_scope === 'consolidated' ? 'selected' : ''}>按汇总参考币种（${esc(base)}）折算核对</option>
+              </select>
+            </label>
+            <div class="form-grid">
+              <label><span>银行公户实际余额</span><input name="bank_amount" value="${esc(pb.bank_amount)}" inputmode="decimal" placeholder="输入网银当前余额"></label>
+              <label><span>核对币种</span><select name="bank_currency" id="pb-bank-currency" ${bankCurrencyLocked ? 'disabled' : ''}>${currencyOptions(bankCurSelected)}</select></label>
+            </div>
+
+            <div class="integration-actions">
+              <button class="button button-primary" type="submit">${icon('calc')}计算公户结余</button>
+              <button class="button button-outline" type="button" id="pb-reset">重置参数</button>
+            </div>
+            <div class="form-error" id="pb-error" role="alert"></div>
+          </form>
+        </div></section>
+        <section id="public-balance-result" aria-live="polite">${publicBalanceSummary(r)}</section>
+      </div>
+
+      <section class="panel recent-panel">
+        <div class="panel-heading">
+          <h3>按原币种公户结余明细 <span class="panel-meta">未换算 · 精确账面</span></h3>
+          <button type="button" class="console-inline-link" data-reimburse-mode="calculator">前往报销测算 ${icon('arrow', 'icon-sm')}</button>
+        </div>
+        <div id="public-currency-table">${publicCurrencyTable(r)}</div>
+      </section>
+
+      <section class="panel recent-panel">
+        <div class="panel-heading">
+          <h3>股东出资转入汇总 <span class="panel-meta mono">${esc(base)}</span></h3>
+          ${canManage() ? `<button type="button" class="console-inline-link" data-new="capital">登记股东出资 ${icon('arrow', 'icon-sm')}</button>` : ''}
+        </div>
+        <div id="shareholder-table">${shareholderTable(r)}</div>
+      </section>
+
+      <details class="panel fx-disclosure recent-panel" ${fxIssue ? 'open' : ''}>
+        <summary class="fx-disclosure-summary">
+          <div class="fx-disclosure-title">
+            <h3>参考汇率</h3>
+            <span class="badge ${fxIssue ? 'warn' : 'neutral'}">${fxIssue ? '需要检查' : fxCount ? `${fxCount} 组汇率` : '单币种'}</span>
+          </div>
+          <button type="button" class="button button-outline button-small" id="refresh-fx">${icon('refresh', 'ico-refresh')}刷新汇率</button>
+        </summary>
+        <div class="panel-inner fx-disclosure-body" id="fx-details">${rateDetails(r)}${reportWarning(r)}</div>
+      </details>`;
+  }
 
   const summaryBar = `
     <div class="metric-strip">
@@ -1118,6 +1373,55 @@ function renderReimbursements() {
       </summary>
       <div class="panel-inner fx-disclosure-body" id="fx-details">${rateDetails(r)}${reportWarning(r)}</div>
     </details>`;
+}
+
+async function calculatePublicBalance() {
+  const form = $('#public-balance-form');
+  if (!form) return;
+  const pb = state.publicBalance;
+  const base = state.base || state.conf.reference_currency;
+  pb.as_of = form.elements.as_of.value.trim();
+  pb.operating_amount = form.elements.operating_amount.value.trim();
+  pb.operating_currency = form.elements.operating_currency.value;
+  pb.capital_amount = form.elements.capital_amount.value.trim();
+  pb.capital_currency = form.elements.capital_currency.value;
+  pb.public_amount = form.elements.public_amount.value.trim();
+  pb.public_currency = form.elements.public_currency.value;
+  pb.include_pending = Boolean(form.elements.include_pending.checked);
+  pb.bank_scope = form.elements.bank_scope.value || 'currency';
+  pb.bank_amount = form.elements.bank_amount.value.trim();
+  pb.bank_currency = pb.bank_scope === 'consolidated' ? base : form.elements.bank_currency.value;
+  $('#pb-error').textContent = '';
+
+  const request = ++pb.request;
+  $('#public-balance-result')?.setAttribute('aria-busy', 'true');
+  try {
+    const data = await api('/public-balance/calculate', 'POST', {
+      base,
+      as_of: pb.as_of,
+      include_pending: pb.include_pending,
+      adjustments: {
+        operating_income: pb.operating_amount ? {amount: pb.operating_amount, currency: pb.operating_currency} : null,
+        capital_income: pb.capital_amount ? {amount: pb.capital_amount, currency: pb.capital_currency} : null,
+        public_expense: pb.public_amount ? {amount: pb.public_amount, currency: pb.public_currency} : null,
+      },
+      bank_actual: pb.bank_amount !== '' ? {amount: pb.bank_amount, currency: pb.bank_currency, scope: pb.bank_scope} : null,
+    });
+    if (request !== pb.request || !$('#public-balance-form')) return;
+    pb.report = data;
+    const stripEl = $('#public-balance-strip');
+    if (stripEl) stripEl.outerHTML = publicBalanceStrip(data);
+    $('#public-balance-result').innerHTML = publicBalanceSummary(data);
+    $('#public-currency-table').innerHTML = publicCurrencyTable(data);
+    $('#shareholder-table').innerHTML = shareholderTable(data);
+    $('#fx-details').innerHTML = rateDetails(data) + reportWarning(data);
+  } catch (e) {
+    if (request !== pb.request || !$('#public-balance-form')) return;
+    pb.report = null;
+    $('#pb-error').textContent = e.message;
+  } finally {
+    if (request === pb.request) $('#public-balance-result')?.setAttribute('aria-busy', 'false');
+  }
 }
 
 async function calculateFunds() {
@@ -1796,6 +2100,11 @@ function parseHashRoute() {
     state.pendingEntryId = Number(entryMatch[1]);
     return;
   }
+  if (raw === 'public-balance' || raw === 'reimbursements/balance') {
+    state.page = 'reimbursements';
+    state.reimburseMode = 'balance';
+    return;
+  }
   if (raw === 'calculator' || raw === 'reimbursements/calculator') {
     state.page = 'reimbursements';
     state.reimburseMode = 'calculator';
@@ -1935,6 +2244,8 @@ async function refresh(renderAfter = true) {
   const loadId = ++state.loadId;
   ++state.calculator.request;
   state.calculator.report = null;
+  ++state.publicBalance.request;
+  state.publicBalance.report = null;
   const [conf, members, entries, integrations] = await Promise.all([
     api('/settings'), api('/members'), api('/entries'), api('/integrations'),
   ]);
@@ -1955,6 +2266,7 @@ async function refresh(renderAfter = true) {
   if (renderAfter) {
     render();
     if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') await calculateFunds();
+    if (state.page === 'reimbursements' && state.reimburseMode === 'balance') await calculatePublicBalance();
     if (state.pendingEntryId) {
       const targetId = state.pendingEntryId;
       state.pendingEntryId = null;
@@ -2090,7 +2402,16 @@ function openEntry(kind = 'expense', data = null) {
   form.reset();
   state.editing = data?.id || null;
   state.entryKey = randomId();
-  state.entryKind = data?.kind === 'expense' && data.expense_type === 'public' ? 'public' : data?.kind || kind;
+  if (data) {
+    state.entryKind = data.kind === 'expense' && data.expense_type === 'public' ? 'public' : data.kind;
+    state.entryIncomeType = data.kind === 'income' ? (data.income_type === 'capital' ? 'capital' : 'operating') : 'operating';
+  } else if (kind === 'capital') {
+    state.entryKind = 'income';
+    state.entryIncomeType = 'capital';
+  } else {
+    state.entryKind = kind;
+    state.entryIncomeType = 'operating';
+  }
   form.elements.currency.innerHTML = currencyOptions(data?.currency || state.conf.default_currency);
   form.elements.payer_id.innerHTML = options(state.members.filter(m => m.active), m => m.id, m => m.name, data?.payer_id || state.user.id);
   form.elements.payer_id.disabled = !canManage();
@@ -2109,15 +2430,27 @@ function openEntry(kind = 'expense', data = null) {
 
 function entryKindChanged() {
   const income = state.entryKind === 'income', publicExpense = state.entryKind === 'public';
+  const isCapital = income && state.entryIncomeType === 'capital';
   $$('#entry-kind button').forEach(b => {
     const active = b.dataset.kind === state.entryKind;
     b.classList.toggle('active', active);
     b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
-  $('#entry-title').textContent = state.editing ? '修改账目' : income ? '登记团队收入' : publicExpense ? '记公账支出' : '记成员垫付';
+  const incomeWrap = $('#income-type-wrap');
+  if (incomeWrap) incomeWrap.hidden = !income;
+  $$('#entry-income-type button').forEach(b => {
+    const active = b.dataset.incomeType === state.entryIncomeType;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  $('#entry-title').textContent = state.editing ? '修改账目' : isCapital ? '登记股东出资转入' : income ? '登记营业收入' : publicExpense ? '记公账支出' : '记成员垫付';
   $('#save-draft').hidden = income;
-  $('#payer-label > span').textContent = income || publicExpense ? '经手成员' : '垫付成员';
-  $('#save-entry').textContent = income ? '确认入账' : '确认记账';
+  $('#payer-label > span').textContent = isCapital ? '出资股东 / 经手人' : (income || publicExpense ? '经手成员' : '垫付成员');
+  const descInput = $('#entry-form input[name="description"]');
+  if (descInput) {
+    descInput.placeholder = isCapital ? '例如：首期注册资本、股东增资转入' : income ? '例如：客户尾款、项目服务费' : '例如：服务器续费、团队聚餐';
+  }
+  $('#save-entry').textContent = state.editing ? '保存修改' : income ? '确认入账' : '确认记账';
 }
 
 async function saveEntry(status, button) {
@@ -2133,6 +2466,7 @@ async function saveEntry(status, button) {
       body.payer_id = Number(form.elements.payer_id.value);
       body.kind = state.entryKind === 'income' ? 'income' : 'expense';
       body.expense_type = state.entryKind === 'public' ? 'public' : state.entryKind === 'expense' ? 'advance' : '';
+      body.income_type = state.entryKind === 'income' ? state.entryIncomeType : '';
       body.status = state.entryKind === 'income' || (state.entryKind === 'public' && status !== 'draft') ? 'posted' : status;
       const entry = await api(state.editing ? `/entries/${state.editing}` : '/entries', state.editing ? 'PUT' : 'POST', body, {'Idempotency-Key': state.entryKey});
       if (file) {
@@ -2149,7 +2483,8 @@ async function saveEntry(status, button) {
         }
       }
       $('#entry-dialog').close();
-      toast(`已${state.entryKind === 'income' ? '登记收入' : status === 'draft' ? '保存草稿' : '记账'} · #${entry.id}`);
+      const actionLabel = state.editing ? '保存修改' : state.entryKind === 'income' ? (state.entryIncomeType === 'capital' ? '登记股东出资' : '登记营业收入') : status === 'draft' ? '保存草稿' : '记账';
+      toast(`已${actionLabel} · #${entry.id}`);
       await refresh();
     } catch (e) {
       $('#entry-error').textContent = e.message;
@@ -2167,7 +2502,9 @@ async function openDetail(id) {
     const events = await api(`/entries/${id}/events`);
     const manageable = canManageEntry(e);
     const actions = [];
-    if (manageable && e.kind === 'expense' && !e.reimbursed_minor && (e.expense_type === 'public' ? ['draft', 'posted'] : ['draft', 'pending']).includes(e.status)) {
+    const editableIncome = e.kind === 'income' && e.status === 'posted';
+    const editableExpense = e.kind === 'expense' && !e.reimbursed_minor && (e.expense_type === 'public' ? ['draft', 'posted'] : ['draft', 'pending']).includes(e.status);
+    if (manageable && (editableIncome || editableExpense)) {
       actions.push(`<button type="button" class="button button-outline" data-edit-entry="${id}">修改</button>`);
     }
     if (!e.reimbursed_minor && !['reimbursed', 'voided'].includes(e.status) && manageable) {
@@ -2200,7 +2537,7 @@ async function openDetail(id) {
         <section class="drawer-card drawer-hero-card">
           <div class="badge-row">
             ${badge(entryStatus(e))}
-            <span class="badge neutral">${entryType(e)}</span>
+            <span class="badge ${e.kind === 'income' && e.income_type === 'capital' ? 'info' : 'neutral'}">${entryType(e)}</span>
           </div>
           <h3 class="detail-amount ${e.kind === 'income' ? 'income' : ''}">${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency)}</h3>
           ${settlementDisplay(e)}
@@ -2211,7 +2548,7 @@ async function openDetail(id) {
         <section class="drawer-card">
           <h4>基本信息</h4>
           <dl class="detail-list">
-            <div><dt>${e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div>
+            <div><dt>${e.kind === 'income' && e.income_type === 'capital' ? '出资股东 / 经手人' : (e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员')}</dt><dd>${esc(e.payer_name)}</dd></div>
             <div><dt>发生日期</dt><dd class="mono">${esc(e.date)}</dd></div>
             <div><dt>记录来源</dt><dd>${esc(sourceLabel(e.source))} · ${esc(e.creator_name)}</dd></div>
             <div><dt>凭证文件</dt><dd>${e.receipt ? receiptLink(e, e.receipt_name || '查看凭证') : '未附凭证'}</dd></div>
@@ -2440,6 +2777,8 @@ function exportMatchingEntries(spec) {
   return state.entries.filter(e => {
     if (idSet) return idSet.has(e.id);
     if (spec.kind === 'income' && e.kind !== 'income') return false;
+    if (spec.kind === 'operating' && !(e.kind === 'income' && (e.income_type || 'operating') === 'operating')) return false;
+    if (spec.kind === 'capital' && !(e.kind === 'income' && e.income_type === 'capital')) return false;
     if (spec.kind === 'public' && !(e.kind === 'expense' && e.expense_type === 'public')) return false;
     if (spec.kind === 'advance' && !(e.kind === 'expense' && e.expense_type === 'advance')) return false;
     if (spec.currency !== 'all' && e.currency !== spec.currency) return false;
@@ -2643,6 +2982,12 @@ function openExportDialog(source = 'overview', explicitIds = null) {
     } else {
       applyExportPreset('pending');
     }
+  } else if (source === 'balance' && state.publicBalance.as_of) {
+    applyExportPreset('all');
+    state.exportState.activePreset = '';
+    form.elements.to.value = state.publicBalance.as_of;
+    renderExportPresets();
+    updateExportPreview();
   } else {
     applyExportPreset('all');
   }
@@ -2793,6 +3138,44 @@ document.addEventListener('click', async event => {
     entryKindChanged();
     return;
   }
+  if (b.hasAttribute('data-income-type')) {
+    state.entryIncomeType = b.dataset.incomeType === 'capital' ? 'capital' : 'operating';
+    entryKindChanged();
+    return;
+  }
+  if (b.hasAttribute('data-pb-as-of')) {
+    const form = $('#public-balance-form');
+    if (form) {
+      const mode = b.dataset.pbAsOf;
+      if (mode === 'all') {
+        form.elements.as_of.value = '';
+      } else if (mode === 'today') {
+        form.elements.as_of.value = state.conf.today;
+      } else if (mode === 'last_month') {
+        const d = new Date(state.conf.today + 'T12:00:00Z');
+        d.setUTCDate(0);
+        form.elements.as_of.value = d.toISOString().slice(0, 10);
+      }
+      await calculatePublicBalance();
+    }
+    return;
+  }
+  if (b.id === 'pb-reset') {
+    const defCur = state.conf.default_currency;
+    const base = state.base || state.conf.reference_currency;
+    Object.assign(state.publicBalance, {
+      as_of: '',
+      operating_amount: '', operating_currency: defCur,
+      capital_amount: '', capital_currency: defCur,
+      public_amount: '', public_currency: defCur,
+      include_pending: true,
+      bank_amount: '', bank_currency: base, bank_scope: 'currency',
+      report: null,
+    });
+    render();
+    await calculatePublicBalance();
+    return;
+  }
   if (b.hasAttribute('data-filter-kind')) {
     state.filter.kind = b.dataset.filterKind;
     render();
@@ -2813,11 +3196,12 @@ document.addEventListener('click', async event => {
   }
   if (b.hasAttribute('data-reimburse-mode')) {
     const nextMode = b.dataset.reimburseMode;
-    if (['queue', 'calculator'].includes(nextMode) && nextMode !== state.reimburseMode) {
+    if (['queue', 'balance', 'calculator'].includes(nextMode) && nextMode !== state.reimburseMode) {
       state.reimburseMode = nextMode;
       state.selected.clear();
       render();
       if (nextMode === 'calculator') await calculateFunds();
+      if (nextMode === 'balance') await calculatePublicBalance();
     }
     return;
   }
@@ -2955,8 +3339,11 @@ document.addEventListener('click', async event => {
         state.base = null;
         ++state.calculator.request;
         state.calculator.report = null;
+        ++state.publicBalance.request;
+        state.publicBalance.report = null;
         render();
         if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') await calculateFunds();
+        if (state.page === 'reimbursements' && state.reimburseMode === 'balance') await calculatePublicBalance();
         toast(state.report.complete ? '已更新汇率快照' : '部分汇率尚不可用', !state.report.complete);
       } catch (e) {
         toast(e.message, true);
@@ -3140,6 +3527,20 @@ document.addEventListener('change', async event => {
     await calculateFunds();
     return;
   }
+  if (el.id === 'pb-bank-scope') {
+    const curSel = $('#pb-bank-currency');
+    const base = state.base || state.conf.reference_currency;
+    if (curSel) {
+      curSel.disabled = el.value === 'consolidated';
+      if (el.value === 'consolidated') curSel.value = base;
+    }
+    await calculatePublicBalance();
+    return;
+  }
+  if (el.closest('#public-balance-form')) {
+    await calculatePublicBalance();
+    return;
+  }
   if (el.closest('#calculator-form')) {
     await calculateFunds();
     return;
@@ -3211,10 +3612,13 @@ document.addEventListener('change', async event => {
     ++state.calculator.request;
     state.calculator.report = null;
     state.calculator.budget = '';
+    ++state.publicBalance.request;
+    state.publicBalance.report = null;
     try {
       state.report = await api('/report?base=' + encodeURIComponent(state.base));
       render();
       if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') await calculateFunds();
+      if (state.page === 'reimbursements' && state.reimburseMode === 'balance') await calculatePublicBalance();
     } catch (e) {
       toast(e.message, true);
     }
@@ -3379,6 +3783,10 @@ document.addEventListener('submit', async event => {
     event.preventDefault();
     await busy($('button[type=submit]', form), calculateFunds);
   }
+  if (form.id === 'public-balance-form') {
+    event.preventDefault();
+    await busy($('button[type=submit]', form), calculatePublicBalance);
+  }
   if (form.id === 'settings-form') {
     event.preventDefault();
     const submitBtn = event.submitter || $('button[type=submit]', form);
@@ -3415,6 +3823,7 @@ window.addEventListener('hashchange', () => {
   closeAllThemeMenus();
   render();
   if (state.page === 'reimbursements' && state.reimburseMode === 'calculator') calculateFunds();
+  if (state.page === 'reimbursements' && state.reimburseMode === 'balance') calculatePublicBalance();
   $('#main')?.scrollTo({top: 0, behavior: 'auto'});
   if (state.pendingEntryId) {
     const targetId = state.pendingEntryId;

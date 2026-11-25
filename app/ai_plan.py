@@ -235,6 +235,10 @@ def _resolve_create(conn, user, conf, action):
     expense_type = action.get('expense_type', 'advance') if kind == 'expense' else ''
     if kind == 'expense' and expense_type not in ('public', 'advance'):
         card['errors'].append('支出请选择公账支出或成员垫付')
+    raw_income_type = action.get('income_type')
+    income_type = ('operating' if raw_income_type in (None, '') else raw_income_type) if kind == 'income' else ''
+    if kind == 'income' and income_type not in ('operating', 'capital'):
+        card['errors'].append('收入请选择营业收入或股东出资转入')
     requested_status = action.get('status')
     if kind == 'income':
         status = 'posted'
@@ -248,19 +252,19 @@ def _resolve_create(conn, user, conf, action):
     except PlanQuestion as exc:
         card['errors'].append(str(exc))
         note = ''
-    body = {'kind': kind, 'expense_type': expense_type, 'amount': amount or '', 'currency': code, 'description': description,
+    body = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount': amount or '', 'currency': code, 'description': description,
             'date': entry_date, 'payer_id': payer_id, 'status': status, 'note': note}
     if not card['errors']:
         try:
             normalized_entry(conn, user, body)
         except HTTPException as exc:
             _error(card, exc)
-    label = '新增收入' if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
+    label = ('股东出资转入' if income_type == 'capital' else '营业收入') if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
     card['label'] = label
-    card['resolved'] = {'kind': kind, 'expense_type': expense_type, 'amount': amount or '', 'currency': code, 'description': description,
+    card['resolved'] = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount': amount or '', 'currency': code, 'description': description,
                         'date': entry_date, 'payer_id': payer_id, 'payer_name': payer_name,
                         'status': status, 'note': note}
-    state = '草稿' if status == 'draft' else '团队在账' if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
+    state = '草稿' if status == 'draft' else ('股东出资 · 计入公户' if income_type == 'capital' else '营业收入 · 计入公户') if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
     card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)} · {entry_date} · {payer_name} · {state}'
     return card
 
@@ -271,20 +275,26 @@ def _resolve_edit(conn, user, conf, action, context_ids):
     require_entry_access(user, entry)
     if warning:
         card['warnings'].append(warning)
-    if entry['kind'] != 'expense' or entry['status'] not in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')) or entry['reimbursed_minor']:
-        card['errors'].append('仅没有报销记录的支出可以修改')
+    editable_income = entry['kind'] == 'income' and entry['status'] == 'posted'
+    editable_expense = (entry['kind'] == 'expense' and not entry['reimbursed_minor']
+                        and entry['status'] in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')))
+    if not (editable_income or editable_expense):
+        card['errors'].append('仅已入账收入或尚无报销记录的支出可以修改')
         card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · 当前状态不允许修改'
         card['resolved'] = {'id': entry['id'], 'version': entry['version']}
         return card
     if action.get('kind') and action.get('kind') != entry['kind']:
         card['errors'].append('不支持更改账目类型')
     body = {'kind': entry['kind'], 'amount': entry['amount'], 'currency': entry['currency'],
-            'expense_type': entry['expense_type'], 'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
+            'expense_type': entry['expense_type'], 'income_type': entry.get('income_type', '') if entry['kind'] == 'income' else '',
+            'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
             'note': entry['note'], 'status': entry['status']}
-    if 'expense_type' in action:
+    if entry['kind'] == 'expense' and 'expense_type' in action:
         body['expense_type'] = action['expense_type']
         if body['status'] != 'draft':
             body['status'] = 'posted' if action['expense_type'] == 'public' else 'pending'
+    if entry['kind'] == 'income' and 'income_type' in action and action['income_type'] not in (None, ''):
+        body['income_type'] = action['income_type']
     if 'amount' in action:
         amount = _amount_value(action.get('amount'))
         if amount == 'FULL' or amount is None:
@@ -501,6 +511,10 @@ def _query_clauses(conn, user, conf, action, default_status=True):
     if expense_type in ('public', 'advance'):
         clauses.append("e.kind='expense' AND e.expense_type=?")
         params.append(expense_type)
+    income_type = action.get('filter_income_type')
+    if income_type in ('operating', 'capital'):
+        clauses.append("e.kind='income' AND e.income_type=?")
+        params.append(income_type)
     status = action.get('filter_status')
     if status == 'partial':
         clauses.append("e.status='pending' AND e.reimbursed_minor>0")
@@ -564,15 +578,21 @@ def _summary_query(conn, user, conf, action):
     clauses, params = _query_clauses(conn, user, conf, action)
     where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     rows = conn.execute(
-        'SELECT e.kind,e.currency,e.decimals,e.amount_minor,e.payer_id,u.name payer_name '
+        'SELECT e.kind,e.income_type,e.currency,e.decimals,e.amount_minor,e.payer_id,u.name payer_name '
         'FROM entries e JOIN users u ON u.id=e.payer_id' + where + ' ORDER BY e.date,e.id', params).fetchall()
-    by_kind, by_member = {}, {}
+    by_kind, by_member, by_income_type = {}, {}, {}
     for row in rows:
         amount = Decimal(row['amount_minor']) / (10 ** row['decimals'])
         slot = by_kind.setdefault(row['kind'], {}).setdefault(
             row['currency'], {'currency': row['currency'], 'decimals': row['decimals'], 'amount': Decimal(0), 'count': 0})
         slot['amount'] += amount
         slot['count'] += 1
+        if row['kind'] == 'income':
+            it = 'capital' if row['income_type'] == 'capital' else 'operating'
+            islot = by_income_type.setdefault(it, {}).setdefault(
+                row['currency'], {'currency': row['currency'], 'decimals': row['decimals'], 'amount': Decimal(0), 'count': 0})
+            islot['amount'] += amount
+            islot['count'] += 1
         person = by_member.setdefault((row['payer_id'], row['currency'], row['kind']), {
             'id': row['payer_id'], 'name': row['payer_name'], 'currency': row['currency'],
             'decimals': row['decimals'], 'kind': row['kind'], 'amount': Decimal(0), 'count': 0})
@@ -589,6 +609,7 @@ def _summary_query(conn, user, conf, action):
 
     card = {'kind': 'summary', 'from': action.get('date_from'), 'to': action.get('date_to'), 'count': len(rows),
             'by_kind': {kind: format_slots(slots.values()) for kind, slots in by_kind.items()},
+            'by_income_type': {it: format_slots(slots.values()) for it, slots in by_income_type.items()},
             'by_member': format_slots(by_member.values())}
     total = {}
     for kind, slots in card['by_kind'].items():
@@ -630,11 +651,19 @@ def _funds_card(kind, conf, action, conn):
     if not report:
         return {'kind': kind, 'complete': False, 'base': base, 'warning': '汇率或资金数据暂不可用，请稍后重试。'}
     card = {'kind': kind, 'complete': bool(report.get('complete')), 'base': base,
-            'cash': report.get('cash'), 'income': report.get('income'), 'paid': report.get('paid'),
-            'public_paid': report.get('public_paid'),
-            'due': report.get('due'), 'reserve': report.get('reserve'), 'payable': report.get('payable'),
+            'cash': report.get('cash'), 'public_balance': report.get('public_balance'),
+            'income': report.get('income'), 'operating_income': report.get('operating_income'),
+            'capital_income': report.get('capital_income'), 'paid': report.get('paid'),
+            'public_paid': report.get('public_paid'), 'total_outflow': report.get('total_outflow'),
+            'due': report.get('due'), 'net_after_due': report.get('net_after_due'),
+            'actual_net_after_due': report.get('actual_net_after_due'),
+            'operating_net': report.get('operating_net'),
+            'operating_net_after_due': report.get('operating_net_after_due'),
+            'reserve': report.get('reserve'), 'payable': report.get('payable'),
             'remaining': report.get('remaining'), 'shortage': report.get('shortage'),
-            'balances': report.get('balances', {})}
+            'balances': report.get('balances', {}),
+            'currency_accounts': report.get('currency_accounts', []),
+            'shareholder_contributions': report.get('shareholder_contributions', [])}
     if not report.get('complete'):
         card['warning'] = report.get('fx', {}).get('warning') or '汇率不完整，跨币种金额暂不可用。'
     elif report.get('fx', {}).get('stale'):
@@ -827,6 +856,7 @@ def load(conn, user, plan_id):
 def _create_body(resolved):
     body = {key: resolved.get(key) for key in ('kind', 'amount', 'currency', 'description', 'date', 'payer_id', 'status', 'note')}
     body['expense_type'] = resolved.get('expense_type', 'advance') if body['kind'] == 'expense' else ''
+    body['income_type'] = (resolved.get('income_type') or 'operating') if body['kind'] == 'income' else ''
     return body
 
 
