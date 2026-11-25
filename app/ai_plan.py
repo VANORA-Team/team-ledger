@@ -111,6 +111,28 @@ def _amount_value(value):
     return text or None
 
 
+def _rate_value(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return format(Decimal(str(value)), 'f')
+    text = str(value).strip().translate(str.maketrans('０１２３４５６７８９．％', '0123456789.%'))
+    if not text:
+        return ''
+    text = text.rstrip('%').strip()
+    return text
+
+
+def _fee_summary_text(kind, fee_mode, fee_rate, fee_amount, effective_amount, code, conf):
+    if fee_mode == 'rate' and fee_rate:
+        label = '实收' if kind == 'income' else '实付'
+        return f'（手续费 {fee_rate}% = {_money(fee_amount, code, conf)}，{label} {_money(effective_amount, code, conf)}）'
+    if fee_mode == 'fixed' and Decimal(str(fee_amount or 0)) > 0:
+        label = '实收' if kind == 'income' else '实付'
+        return f'（手动手续费 {_money(fee_amount, code, conf)}，{label} {_money(effective_amount, code, conf)}）'
+    return ''
+
+
 def _money(amount, code, conf):
     cur = next((c for c in conf['currencies'] if c['code'] == code), None)
     if not cur:
@@ -238,7 +260,7 @@ def _resolve_create(conn, user, conf, action):
     raw_income_type = action.get('income_type')
     income_type = ('operating' if raw_income_type in (None, '') else raw_income_type) if kind == 'income' else ''
     if kind == 'income' and income_type not in ('operating', 'capital'):
-        card['errors'].append('收入请选择营业收入或股东出资转入')
+        card['errors'].append('收入请选择营业收入或公户转入')
     requested_status = action.get('status')
     if kind == 'income':
         status = 'posted'
@@ -252,20 +274,46 @@ def _resolve_create(conn, user, conf, action):
     except PlanQuestion as exc:
         card['errors'].append(str(exc))
         note = ''
+    raw_fee_mode = action.get('fee_mode')
+    fee_rate = _rate_value(action.get('fee_rate')) if action.get('fee_rate') not in (None, '') else ''
+    raw_fee_amount = action.get('fee_amount')
+    fee_amount_in = ''
+    if raw_fee_amount not in (None, ''):
+        parsed_fee = _amount_value(raw_fee_amount)
+        if parsed_fee in (None, 'FULL'):
+            card['errors'].append('手续费金额格式不正确')
+        else:
+            fee_amount_in = parsed_fee
     body = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount': amount or '', 'currency': code, 'description': description,
             'date': entry_date, 'payer_id': payer_id, 'status': status, 'note': note}
+    if raw_fee_mode not in (None, ''):
+        body['fee_mode'] = raw_fee_mode
+    if fee_rate != '':
+        body['fee_rate'] = fee_rate
+    if fee_amount_in != '':
+        body['fee_amount'] = fee_amount_in
+    norm = None
     if not card['errors']:
         try:
-            normalized_entry(conn, user, body)
+            norm = normalized_entry(conn, user, body)
         except HTTPException as exc:
             _error(card, exc)
-    label = ('股东出资转入' if income_type == 'capital' else '营业收入') if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
+    eff_fee_mode = norm['fee_mode'] if norm else (raw_fee_mode or 'none')
+    eff_fee_rate = norm['fee_rate'] if norm else fee_rate
+    eff_fee_amount = format(Decimal(norm['fee_minor']) / (10 ** cur['decimals']), f'.{cur["decimals"]}f') if norm else fee_amount_in
+    eff_amount = format(Decimal(norm['amount_minor']) / (10 ** cur['decimals']), f'.{cur["decimals"]}f') if norm else (amount or '')
+    resolved_amount = eff_amount if eff_fee_mode != 'none' else (amount or '')
+    label = ('公户转入' if income_type == 'capital' else '营业收入') if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
     card['label'] = label
-    card['resolved'] = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount': amount or '', 'currency': code, 'description': description,
+    card['resolved'] = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type,
+                        'amount': resolved_amount, 'gross_amount': amount or '',
+                        'fee_mode': eff_fee_mode, 'fee_rate': eff_fee_rate, 'fee_amount': eff_fee_amount if eff_fee_mode != 'none' else '',
+                        'currency': code, 'description': description,
                         'date': entry_date, 'payer_id': payer_id, 'payer_name': payer_name,
                         'status': status, 'note': note}
-    state = '草稿' if status == 'draft' else ('股东出资 · 计入公户' if income_type == 'capital' else '营业收入 · 计入公户') if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
-    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)} · {entry_date} · {payer_name} · {state}'
+    state = '草稿' if status == 'draft' else ('公户转入 · 计入公户/不计利润' if income_type == 'capital' else '营业收入 · 计入公户与利润') if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
+    fee_text = _fee_summary_text(kind, eff_fee_mode, eff_fee_rate, eff_fee_amount, eff_amount, code, conf) if norm else ''
+    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)}{fee_text} · {entry_date} · {payer_name} · {state}'
     return card
 
 
@@ -285,8 +333,11 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         return card
     if action.get('kind') and action.get('kind') != entry['kind']:
         card['errors'].append('不支持更改账目类型')
-    body = {'kind': entry['kind'], 'amount': entry['amount'], 'currency': entry['currency'],
+    body = {'kind': entry['kind'], 'amount': entry['gross_amount'], 'currency': entry['currency'],
             'expense_type': entry['expense_type'], 'income_type': entry.get('income_type', '') if entry['kind'] == 'income' else '',
+            'fee_mode': entry.get('fee_mode') or 'none',
+            'fee_rate': entry.get('fee_rate') or '',
+            'fee_amount': entry['fee_amount'] if entry.get('fee_mode') == 'fixed' else '',
             'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
             'note': entry['note'], 'status': entry['status']}
     if entry['kind'] == 'expense' and 'expense_type' in action:
@@ -306,6 +357,27 @@ def _resolve_edit(conn, user, conf, action, context_ids):
             body['currency'] = currency(conf, action['currency'])['code']
         except HTTPException as exc:
             _error(card, exc)
+    has_mode = 'fee_mode' in action and action.get('fee_mode') not in (None, '')
+    has_rate = 'fee_rate' in action and action.get('fee_rate') not in (None, '')
+    has_famt = 'fee_amount' in action and action.get('fee_amount') not in (None, '')
+    if has_mode or has_rate or has_famt:
+        next_mode = action.get('fee_mode') if has_mode else ('rate' if has_rate and not has_famt else ('fixed' if has_famt and not has_rate else body['fee_mode']))
+        body['fee_mode'] = next_mode
+        if next_mode == 'none':
+            body['fee_rate'] = ''
+            body['fee_amount'] = ''
+        elif next_mode == 'rate':
+            if has_rate:
+                body['fee_rate'] = _rate_value(action.get('fee_rate'))
+            body['fee_amount'] = ''
+        elif next_mode == 'fixed':
+            if has_famt:
+                parsed_fee = _amount_value(action.get('fee_amount'))
+                if parsed_fee in (None, 'FULL'):
+                    card['errors'].append('手续费金额格式不正确')
+                else:
+                    body['fee_amount'] = parsed_fee
+            body['fee_rate'] = ''
     if 'description' in action:
         description = str(action.get('description') or '').strip()
         if len(description) > 120:
@@ -322,14 +394,29 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         body['payer_id'] = payer_id
     if 'note' in action:
         body['note'] = str(action.get('note') or '')[:1000]
+    norm = None
     if not card['errors']:
         try:
-            normalized_entry(conn, user, body)
+            norm = normalized_entry(conn, user, body)
         except HTTPException as exc:
             _error(card, exc)
-    card['resolved'] = {'id': entry['id'], 'version': entry['version'], **body, 'payer_name': payer_name}
+    cur_obj = next((c for c in conf['currencies'] if c['code'] == body['currency']), {'decimals': 2})
+    eff_fee_mode = norm['fee_mode'] if norm else body['fee_mode']
+    eff_fee_rate = norm['fee_rate'] if norm else body['fee_rate']
+    eff_fee_amount = format(Decimal(norm['fee_minor']) / (10 ** cur_obj['decimals']), f'.{cur_obj["decimals"]}f') if norm else body['fee_amount']
+    eff_amount = format(Decimal(norm['amount_minor']) / (10 ** cur_obj['decimals']), f'.{cur_obj["decimals"]}f') if norm else body['amount']
+    resolved_body = {
+        **body,
+        'gross_amount': body['amount'],
+        'amount': eff_amount if eff_fee_mode != 'none' else body['amount'],
+        'fee_mode': eff_fee_mode,
+        'fee_rate': eff_fee_rate,
+        'fee_amount': eff_fee_amount if eff_fee_mode != 'none' else '',
+    }
+    card['resolved'] = {'id': entry['id'], 'version': entry['version'], **resolved_body, 'payer_name': payer_name}
     before = f'{_money(entry["amount"], entry["currency"], conf)} · {entry["description"] or "未填写说明"}'
-    after = f'{_money(body["amount"], body["currency"], conf)} · {body["description"] or "未填写说明"}'
+    fee_text = _fee_summary_text(entry['kind'], eff_fee_mode, eff_fee_rate, eff_fee_amount, eff_amount, body['currency'], conf) if norm else ''
+    after = f'{_money(body["amount"], body["currency"], conf)}{fee_text} · {body["description"] or "未填写说明"}'
     card['summary'] = f'#{entry["id"]} 修改：{before} → {after} · {body["date"]}'
     return card
 
@@ -659,6 +746,10 @@ def _funds_card(kind, conf, action, conn):
             'actual_net_after_due': report.get('actual_net_after_due'),
             'operating_net': report.get('operating_net'),
             'operating_net_after_due': report.get('operating_net_after_due'),
+            'operating_profit': report.get('operating_profit'),
+            'operating_profit_after_due': report.get('operating_profit_after_due'),
+            'income_fees': report.get('income_fees'), 'public_fees': report.get('public_fees'),
+            'advance_fees': report.get('advance_fees'), 'total_fees': report.get('total_fees'),
             'reserve': report.get('reserve'), 'payable': report.get('payable'),
             'remaining': report.get('remaining'), 'shortage': report.get('shortage'),
             'balances': report.get('balances', {}),
@@ -855,6 +946,21 @@ def load(conn, user, plan_id):
 
 def _create_body(resolved):
     body = {key: resolved.get(key) for key in ('kind', 'amount', 'currency', 'description', 'date', 'payer_id', 'status', 'note')}
+    if resolved.get('gross_amount') not in (None, ''):
+        body['gross_amount'] = resolved['gross_amount']
+        body['amount'] = resolved['gross_amount']
+    fee_mode = resolved.get('fee_mode')
+    if fee_mode not in (None, ''):
+        body['fee_mode'] = fee_mode
+        if fee_mode == 'rate' and resolved.get('fee_rate') not in (None, ''):
+            body['fee_rate'] = resolved['fee_rate']
+        elif fee_mode == 'fixed' and resolved.get('fee_amount') not in (None, ''):
+            body['fee_amount'] = resolved['fee_amount']
+    else:
+        if resolved.get('fee_rate') not in (None, ''):
+            body['fee_rate'] = resolved['fee_rate']
+        if resolved.get('fee_amount') not in (None, ''):
+            body['fee_amount'] = resolved['fee_amount']
     body['expense_type'] = resolved.get('expense_type', 'advance') if body['kind'] == 'expense' else ''
     body['income_type'] = (resolved.get('income_type') or 'operating') if body['kind'] == 'income' else ''
     return body

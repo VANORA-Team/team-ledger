@@ -176,11 +176,13 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         self.assertEqual(rep['actual_cash'], '9400.00')
         self.assertEqual(rep['due'], '600.00')
         self.assertEqual(rep['actual_net_after_due'], '8800.00')
-        # Operating net excludes shareholder capital: 2000 - 2600 = -600; after due = -1200
+        # Operating profit strictly excludes 公户转入 (capital): 2000 - 2600 = -600; after due = -1200
         self.assertEqual(rep['operating_net'], '-600.00')
         self.assertEqual(rep['operating_net_after_due'], '-1200.00')
+        self.assertEqual(rep['operating_profit'], '-600.00')
+        self.assertEqual(rep['operating_profit_after_due'], '-1200.00')
 
-        # Exact per-currency corporate accounts
+        # Exact per-currency corporate accounts & operating profit (excluding 公户转入)
         by_cur = {a['code']: a for a in rep['currency_accounts']}
         self.assertEqual(by_cur['CNY']['operating_income'], '2000.00')
         self.assertEqual(by_cur['CNY']['capital_income'], '3000.00')
@@ -189,9 +191,13 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         self.assertEqual(by_cur['CNY']['balance'], '3100.00')
         self.assertEqual(by_cur['CNY']['due'], '600.00')
         self.assertEqual(by_cur['CNY']['net_after_due'], '2500.00')
+        self.assertEqual(by_cur['CNY']['operating_profit'], '100.00')
+        self.assertEqual(by_cur['CNY']['operating_profit_after_due'], '-500.00')
         self.assertEqual(by_cur['USD']['capital_income'], '1000.00')
         self.assertEqual(by_cur['USD']['public_paid'], '100.00')
         self.assertEqual(by_cur['USD']['balance'], '900.00')
+        self.assertEqual(by_cur['USD']['operating_profit'], '-100.00')
+        self.assertEqual(by_cur['USD']['operating_profit_after_due'], '-100.00')
 
         # Shareholder contributions sorted descending by converted total
         sh = rep['shareholder_contributions']
@@ -306,7 +312,7 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
 
     def test_excel_export_separates_income_types_and_filters(self):
         op = self.entry(kind='income', income_type='operating', amount='2000', description='项目营收')
-        cap = self.entry(kind='income', income_type='capital', amount='5000', description='股东增资')
+        cap = self.entry(kind='income', income_type='capital', amount='5000', description='资金注资')
         pub = self.entry(expense_type='public', amount='600', description='公账支出项')
         self.entry(amount='400', description='垫付项')
 
@@ -318,17 +324,18 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         rows = [dict(zip(headers, [c.value for c in r])) for r in ws_entries.iter_rows(min_row=2)]
         by_desc = {r['用途 / 说明']: r for r in rows}
         self.assertEqual(by_desc['项目营收']['业务类型'], '营业收入')
-        self.assertEqual(by_desc['股东增资']['业务类型'], '股东出资转入')
+        self.assertEqual(by_desc['资金注资']['业务类型'], '公户转入')
         self.assertEqual(by_desc['公账支出项']['业务类型'], '公账支出')
 
-        # Summary sheet contains operating_income, capital_income, and public balance KPIs
+        # Summary sheet contains operating_income, capital_income, public balance, and profit excluding 公户转入
         ws_sum = wb['资金汇总']
         kpis = {ws_sum.cell(r, 1).value: ws_sum.cell(r, 2).value for r in range(1, ws_sum.max_row + 1) if ws_sum.cell(r, 1).value}
         self.assertEqual(float(kpis['营业收入']), 2000.0)
-        self.assertEqual(float(kpis['股东出资转入']), 5000.0)
+        self.assertEqual(float(kpis['公户转入（不计入利润）']), 5000.0)
         self.assertEqual(float(kpis['公户结余（可用资金）']), 6400.0)
         self.assertEqual(float(kpis['扣除全部待报销后结余']), 6000.0)
-        self.assertEqual(float(kpis['经营收支净额（不含股东出资）']), 1400.0)
+        self.assertEqual(float(kpis['经营利润（实付口径，不含公户转入）']), 1400.0)
+        self.assertEqual(float(kpis['经营净利润（含待报销，不含公户转入）']), 1000.0)
 
         # Filtering by operating / capital / income
         for q, expected in [('?kind=operating', [op['id']]), ('?kind=capital', [cap['id']]), ('?kind=income', [op['id'], cap['id']])]:
@@ -339,6 +346,7 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
             self.assertEqual(ids, expected, q)
 
         self.assertEqual(excel_export.parse_export_shortcut('营业收入')['kind'], 'operating')
+        self.assertEqual(excel_export.parse_export_shortcut('公户转入')['kind'], 'capital')
         self.assertEqual(excel_export.parse_export_shortcut('股东出资')['kind'], 'capital')
 
     # ------------------------------------------------------------------
@@ -348,12 +356,12 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
     def test_ai_plan_supports_income_types_and_public_balance_queries(self):
         raw = {'reply': '记两笔收入。', 'questions': [], 'actions': [
             {'type': 'create_entry', 'kind': 'income', 'income_type': 'operating', 'amount': '800', 'currency': 'CNY', 'description': '客户回款'},
-            {'type': 'create_entry', 'kind': 'income', 'income_type': 'capital', 'amount': '5000', 'currency': 'CNY', 'description': '股东打款'},
+            {'type': 'create_entry', 'kind': 'income', 'income_type': 'capital', 'amount': '5000', 'currency': 'CNY', 'description': '公户调拨打款'},
         ]}
         with patch('app.ai.plan', return_value=raw):
-            plan = self.post('/ai/plan', {'text': '收到客户回款800，股东出资5000'}).json()
+            plan = self.post('/ai/plan', {'text': '收到客户回款800，公户转入5000'}).json()
         self.assertEqual(plan['actions'][0]['label'], '营业收入')
-        self.assertEqual(plan['actions'][1]['label'], '股东出资转入')
+        self.assertEqual(plan['actions'][1]['label'], '公户转入')
         exec_res = self.client.post(
             '/api/ai/execute',
             json={'plan_id': plan['plan_id'], 'actions': [0, 1]},
@@ -362,7 +370,7 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         self.assertEqual(exec_res.status_code, 200, exec_res.text)
         by_desc = {e['description']: e for e in self.client.get('/api/entries').json()}
         self.assertEqual(by_desc['客户回款']['income_type'], 'operating')
-        self.assertEqual(by_desc['股东打款']['income_type'], 'capital')
+        self.assertEqual(by_desc['公户调拨打款']['income_type'], 'capital')
 
         # AI query filtering by income_type & balance query with public_balance fields
         q_raw = {'reply': '查询结果', 'questions': [], 'actions': [
@@ -371,20 +379,20 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
             {'type': 'query', 'query': 'balance'},
         ]}
         with patch('app.ai.plan', return_value=q_raw):
-            q_plan = self.post('/ai/plan', {'text': '查股东出资和公户结余'}).json()
+            q_plan = self.post('/ai/plan', {'text': '查公户转入和公户结余'}).json()
         cards = [r['card'] for r in q_plan['results']]
-        self.assertEqual([e['description'] for e in cards[0]['entries']], ['股东打款'])
+        self.assertEqual([e['description'] for e in cards[0]['entries']], ['公户调拨打款'])
         self.assertEqual(cards[1]['by_income_type']['capital'][0]['amount'], '5000.00')
         self.assertEqual(cards[1]['by_income_type']['operating'][0]['amount'], '800.00')
-        self.assertEqual((cards[2]['public_balance'], cards[2]['operating_income'], cards[2]['capital_income']),
-                         ('5800.00', '800.00', '5000.00'))
+        self.assertEqual((cards[2]['public_balance'], cards[2]['operating_income'], cards[2]['capital_income'], cards[2]['operating_profit_after_due']),
+                         ('5800.00', '800.00', '5000.00', '800.00'))
 
         # AI edit posted income to switch income_type
         e_raw = {'reply': '修改归类', 'questions': [], 'actions': [
             {'type': 'edit_entry', 'id': by_desc['客户回款']['id'], 'income_type': 'capital'},
         ]}
         with patch('app.ai.plan', return_value=e_raw):
-            e_plan = self.post('/ai/plan', {'text': '把客户回款改成股东出资'}).json()
+            e_plan = self.post('/ai/plan', {'text': '把客户回款改成公户转入'}).json()
         self.assertFalse(e_plan['actions'][0]['errors'], e_plan)
         self.assertEqual(
             self.client.post(
@@ -408,12 +416,12 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         token = self.draft()['token']
         self.click(3, f'd:{token}:cur:CNY')
         bot.process_update(self.message(4, '5000'))
-        self.assertIn('股东出资转入', self.last_message()['text'])
+        self.assertIn('公户转入', self.last_message()['text'])
         # Toggle to operating and back to capital on preview card
         self.click(5, f'd:{token}:inctype')
         self.assertIn('营业收入', self.last_message()['text'])
         self.click(6, f'd:{token}:inctype')
-        self.assertIn('股东出资转入', self.last_message()['text'])
+        self.assertIn('公户转入', self.last_message()['text'])
         self.click(7, f'd:{token}:save')
 
         self.entry(kind='income', income_type='operating', amount='1200', description='服务费')
@@ -424,15 +432,16 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         bot.process_update(self.message(8, '/today'))
         today_text = self.last_message()['text']
         self.assertIn('营业收入 · 1 笔', today_text)
-        self.assertIn('股东出资转入 · 1 笔', today_text)
+        self.assertIn('公户转入（不计利润） · 1 笔', today_text)
 
-        # /funds displays corporate balance breakdown
+        # /funds displays corporate balance & operating profit excluding 公户转入
         bot.process_update(self.message(9, '/funds'))
         funds_text = self.last_message()['text']
         self.assertIn('累计营业收入：¥1,200.00 CNY', funds_text)
-        self.assertIn('累计股东出资转入：¥5,000.00 CNY', funds_text)
+        self.assertIn('累计公户转入（不计利润）：¥5,000.00 CNY', funds_text)
         self.assertIn('扣全额待报销后公户结余：¥5,500.00 CNY', funds_text)
-        self.assertIn('经营净额（不含股东出资）：¥900.00 CNY', funds_text)
+        self.assertIn('经营利润（实付，不含公户转入）：¥900.00 CNY', funds_text)
+        self.assertIn('经营净利润（含待报，不含公户转入）：¥500.00 CNY', funds_text)
 
     def test_feishu_shortcuts_for_operating_capital_and_public_balance(self):
         response = self.post('/feishu/link-code')
@@ -440,9 +449,9 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         self.feishu_message('bind', '绑定 ' + response.json()['code'])
         self.assertIn('绑定成功', self.feishu_process())
 
-        self.feishu_message(1, '股东出资 3000 CNY 首期注资')
+        self.feishu_message(1, '公户转入 3000 CNY 备用金注资')
         preview = self.feishu_process()
-        self.assertIn('股东出资转入', preview)
+        self.assertIn('公户转入', preview)
         code = re.search(r'确认 ([A-F0-9]{8})', preview)[1]
         self.feishu_message(2, '确认 ' + code)
         self.assertIn('已完成', self.feishu_process())
@@ -455,14 +464,15 @@ class PublicBalanceAndIncomeTypesTest(unittest.TestCase):
         self.assertIn('已完成', self.feishu_process())
 
         rows = {e['description']: e for e in self.client.get('/api/entries').json()}
-        self.assertEqual(rows['首期注资']['income_type'], 'capital')
+        self.assertEqual(rows['备用金注资']['income_type'], 'capital')
         self.assertEqual(rows['客户回款']['income_type'], 'operating')
 
         self.feishu_message(5, '公户结余')
         bal_reply = self.feishu_process()
         self.assertIn('公户结余', bal_reply)
         self.assertIn('营业收入', bal_reply)
-        self.assertIn('股东出资', bal_reply)
+        self.assertIn('公户转入', bal_reply)
+        self.assertIn('经营净利润（不含公户转入）', bal_reply)
 
 
 if __name__ == '__main__':

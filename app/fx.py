@@ -110,6 +110,9 @@ def _currency_accounts(entries, payments, conf, sim_deltas=None):
                 'public_paid': Decimal(0),
                 'paid': Decimal(0),
                 'due': Decimal(0),
+                'income_fees': Decimal(0),
+                'public_fees': Decimal(0),
+                'advance_fees': Decimal(0),
                 'operating_count': 0,
                 'capital_count': 0,
                 'public_count': 0,
@@ -124,8 +127,10 @@ def _currency_accounts(entries, payments, conf, sim_deltas=None):
         if e['status'] in ('draft', 'voided'):
             continue
         amt = Decimal(e['amount_minor']) / (10 ** e['decimals'])
+        fee = Decimal(e.get('fee_minor') or 0) / (10 ** e['decimals'])
         if e['kind'] == 'income' and e['status'] == 'posted':
             b = slot(e['currency'], e['decimals'])
+            b['income_fees'] += fee
             if _income_type(e) == 'capital':
                 b['capital_income'] += amt
                 b['capital_count'] += 1
@@ -135,13 +140,18 @@ def _currency_accounts(entries, payments, conf, sim_deltas=None):
         elif e['kind'] == 'expense' and e.get('expense_type') == 'public' and e['status'] == 'posted':
             b = slot(e['currency'], e['decimals'])
             b['public_paid'] += amt
+            b['public_fees'] += fee
             b['public_count'] += 1
-        elif e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance' and e['status'] == 'pending':
-            rem = Decimal(e['amount_minor'] - e['reimbursed_minor']) / (10 ** e['decimals'])
-            if rem > 0:
+        elif e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance':
+            if fee > 0:
                 b = slot(e['currency'], e['decimals'])
-                b['due'] += rem
-                b['due_count'] += 1
+                b['advance_fees'] += fee
+            if e['status'] == 'pending':
+                rem = Decimal(e['amount_minor'] - e['reimbursed_minor']) / (10 ** e['decimals'])
+                if rem > 0:
+                    b = slot(e['currency'], e['decimals'])
+                    b['due'] += rem
+                    b['due_count'] += 1
 
     for p in payments:
         b = slot(p['currency'], p['decimals'])
@@ -169,6 +179,9 @@ def _currency_accounts(entries, payments, conf, sim_deltas=None):
         sim_pub = delta.get('public_expense', Decimal(0))
         projected_balance = balance + sim_op + sim_cap - sim_pub
         projected_after_due = projected_balance - b['due']
+        projected_operating_net = operating_net + sim_op - sim_pub
+        projected_operating_net_after_due = projected_operating_net - b['due']
+        total_fees = b['income_fees'] + b['public_fees'] + b['advance_fees']
         rows.append({
             'code': code,
             'decimals': dec,
@@ -180,11 +193,19 @@ def _currency_accounts(entries, payments, conf, sim_deltas=None):
             'outflow': _fmt_dec(outflow, dec),
             'balance': _fmt_dec(balance, dec),
             'operating_net': _fmt_dec(operating_net, dec),
+            'operating_profit': _fmt_dec(operating_net, dec),
             'due': _fmt_dec(b['due'], dec),
             'net_after_due': _fmt_dec(net_after_due, dec),
             'operating_net_after_due': _fmt_dec(operating_net_after_due, dec),
+            'operating_profit_after_due': _fmt_dec(operating_net_after_due, dec),
             'projected_balance': _fmt_dec(projected_balance, dec),
             'projected_after_due': _fmt_dec(projected_after_due, dec),
+            'projected_operating_profit': _fmt_dec(projected_operating_net, dec),
+            'projected_operating_profit_after_due': _fmt_dec(projected_operating_net_after_due, dec),
+            'income_fees': _fmt_dec(b['income_fees'], dec),
+            'public_fees': _fmt_dec(b['public_fees'], dec),
+            'advance_fees': _fmt_dec(b['advance_fees'], dec),
+            'total_fees': _fmt_dec(total_fees, dec),
             'operating_count': b['operating_count'],
             'capital_count': b['capital_count'],
             'public_count': b['public_count'],
@@ -281,6 +302,12 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
     public_paid = sum((convert(e) for e in public_expenses), Decimal(0))
     total_outflow = paid + public_paid
     due_entries = sorted((e for e in entries if e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance' and e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
+    active_advances = [e for e in entries if e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance' and e['status'] in ('pending', 'reimbursed')]
+    income_fees = sum((convert(e, e.get('fee_minor') or 0) for e in posted_incomes), Decimal(0))
+    public_fees = sum((convert(e, e.get('fee_minor') or 0) for e in public_expenses), Decimal(0))
+    advance_fees = sum((convert(e, e.get('fee_minor') or 0) for e in active_advances), Decimal(0))
+    expense_fees = public_fees + advance_fees
+    total_fees = income_fees + expense_fees
     due = sum((convert(e, e['amount_minor'] - e['reimbursed_minor']) for e in due_entries), Decimal(0))
     extra = Decimal(0)
     if scenario:
@@ -313,6 +340,8 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
         groups[key]['suggested'] += portion
         left -= portion
         original = Decimal(entry['amount_minor'] - entry['reimbursed_minor']) / (10 ** entry['decimals'])
+        gross_minor = entry.get('gross_amount_minor') or entry['amount_minor']
+        fee_minor = entry.get('fee_minor') or 0
         groups[key]['entries'].append({
             'id': entry['id'],
             'selected': selected,
@@ -321,6 +350,11 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
             'currency': entry['currency'],
             'amount': format(original, f'.{entry["decimals"]}f'),
             'original_amount': format(Decimal(entry['amount_minor']) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
+            'gross_amount': format(Decimal(gross_minor) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
+            'fee_mode': entry.get('fee_mode') or 'none',
+            'fee_rate': entry.get('fee_rate') or '',
+            'fee_minor': fee_minor,
+            'fee_amount': format(Decimal(fee_minor) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
             'reimbursed_amount': format(Decimal(entry['reimbursed_minor']) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
             'settlement': formatted(amount),
             'suggested': formatted(portion),
@@ -330,11 +364,14 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
         income=income, operating_income=operating_income, capital_income=capital_income,
         today_income=today_income, today_operating_income=today_operating_income, today_capital_income=today_capital_income,
         paid=paid, public_paid=public_paid, total_outflow=total_outflow,
+        income_fees=income_fees, public_fees=public_fees, advance_fees=advance_fees,
+        expense_fees=expense_fees, total_fees=total_fees,
         actual_cash=actual_cash, public_balance=public_balance, cash=cash,
         due=due, selected_due=selected_due, reserve=reserve, payable=payable,
         remaining=cash - reserve, unplanned=due - reserve,
         actual_net_after_due=actual_net_after_due, net_after_due=net_after_due,
         operating_net=operating_net, operating_net_after_due=operating_net_after_due,
+        operating_profit=operating_net, operating_profit_after_due=operating_net_after_due,
         shortage=max(due - available, Decimal(0)), extra=extra).items()})
     common['members'] = [{**g, **{k: formatted(g[k]) for k in ('due', 'suggested')}} for g in groups.values()]
     common['shareholder_contributions'] = _shareholder_contributions(
@@ -430,7 +467,7 @@ def public_balance_report(base=None, *, as_of='', adjustments=None, bank_actual=
     adj_in = adjustments or {}
     parsed_adj = {
         'operating_income': _parse_adjustment(conf, adj_in.get('operating_income'), '模拟营业收入'),
-        'capital_income': _parse_adjustment(conf, adj_in.get('capital_income'), '模拟股东出资转入'),
+        'capital_income': _parse_adjustment(conf, adj_in.get('capital_income'), '模拟公户转入'),
         'public_expense': _parse_adjustment(conf, adj_in.get('public_expense'), '模拟公账支出'),
     }
     parsed_bank = _parse_bank_actual(conf, base, bank_actual)
@@ -498,6 +535,8 @@ def public_balance_report(base=None, *, as_of='', adjustments=None, bank_actual=
             'projected_capital_income': _fmt_dec(projected_cap_income, base_dec),
             'projected_operating_net': _fmt_dec(projected_op_net, base_dec),
             'projected_operating_net_after_due': _fmt_dec(projected_op_net_after_due, base_dec),
+            'projected_operating_profit': _fmt_dec(projected_op_net, base_dec),
+            'projected_operating_profit_after_due': _fmt_dec(projected_op_net_after_due, base_dec),
         })
 
     reconciliation = None
@@ -511,7 +550,7 @@ def public_balance_report(base=None, *, as_of='', adjustments=None, bank_actual=
             status = 'matched' if diff == 0 else ('surplus' if diff > 0 else 'deficit')
             messages = {
                 'matched': '账实相符：银行公户实际余额与账面公户结余完全一致。',
-                'surplus': '银行余额高于账面结余，可能存在尚未登记的营业收入、股东出资转入、银行利息或期初结余。',
+                'surplus': '银行余额高于账面结余，可能存在尚未登记的营业收入、公户转入、银行利息或期初结余。',
                 'deficit': '银行余额低于账面结余，可能存在尚未登记的公账支出、银行手续费或已付款未登记的报销。',
             }
             reconciliation = {
@@ -542,7 +581,7 @@ def public_balance_report(base=None, *, as_of='', adjustments=None, bank_actual=
                 status = 'matched' if diff == 0 else ('surplus' if diff > 0 else 'deficit')
                 messages = {
                     'matched': '折算口径下银行余额与账面公户结余一致（多币种时建议按各原币种分别核对）。',
-                    'surplus': '折算口径下银行余额高于账面结余，可能存在未入账收入、股东出资、期初结余或汇率差异。',
+                    'surplus': '折算口径下银行余额高于账面结余，可能存在未入账营业收入、公户转入、期初结余或汇率差异。',
                     'deficit': '折算口径下银行余额低于账面结余，可能存在未入账公账支出、未登记报销付款或汇率差异。',
                 }
                 reconciliation = {

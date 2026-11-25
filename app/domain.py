@@ -68,25 +68,92 @@ def currency(conf, code):
     return match
 
 
-def minor_amount(value, decimals, *, allow_zero=False):
+def minor_amount(value, decimals, *, allow_zero=False, label='金额'):
     value = str(value).strip()
     if not re.fullmatch(r'\d{1,12}(?:\.\d{1,4})?', value):
-        fail('金额必须为正数，不支持千分位或科学计数法')
+        fail(f'{label}必须为{"非负数" if (allow_zero and label != "金额") else "正数"}，不支持千分位或科学计数法')
     try:
         amount = Decimal(value)
         scaled = amount * (10 ** decimals)
         if amount < 0 or (amount == 0 and not allow_zero) or scaled != scaled.to_integral_value() or scaled > 9_000_000_000_000:
-            fail(f'金额超出范围或小数超过 {decimals} 位')
+            fail(f'{label}超出范围或小数超过 {decimals} 位')
         return int(scaled)
     except InvalidOperation:
-        fail('金额格式不正确')
+        fail(f'{label}格式不正确')
 
 
 INCOME_TYPES = ('operating', 'capital')
+FEE_MODES = ('none', 'rate', 'fixed')
 
 
 def income_type_label(income_type):
-    return '股东出资转入' if income_type == 'capital' else '营业收入'
+    return '公户转入' if income_type == 'capital' else '营业收入'
+
+
+def parse_fee_rate(value):
+    if isinstance(value, bool) or value is None:
+        fail('手续费比例格式不正确')
+    raw = str(value).strip()
+    if not re.fullmatch(r'\d{1,3}(?:\.\d{1,4})?', raw):
+        fail('手续费比例需为非负数，最多保留 4 位小数（例如 0.6 或 2.9）')
+    try:
+        rate = Decimal(raw)
+    except InvalidOperation:
+        fail('手续费比例格式不正确')
+    if rate < 0 or rate > Decimal(100):
+        fail('手续费比例需在 0%–100% 之间')
+    text = format(rate, 'f')
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return rate, text
+
+
+def compute_fee(kind, gross_minor, decimals, body):
+    raw_mode = body.get('fee_mode', None)
+    raw_rate = body.get('fee_rate', None)
+    raw_fee = body.get('fee_amount', None)
+    has_rate = raw_rate is not None and str(raw_rate).strip() != ''
+    has_fee = raw_fee is not None and str(raw_fee).strip() != ''
+
+    if raw_mode is None or raw_mode == '':
+        if has_rate and has_fee:
+            fail('按比例手续费与手动手续费只能选择一种')
+        mode = 'rate' if has_rate else ('fixed' if has_fee else 'none')
+    else:
+        if not isinstance(raw_mode, str) or raw_mode not in FEE_MODES:
+            fail('手续费方式请选择无手续费、按比例或手动金额')
+        mode = raw_mode
+
+    if mode == 'none':
+        return 'none', '', 0, gross_minor
+
+    if mode == 'rate':
+        if not has_rate:
+            return 'none', '', 0, gross_minor
+        rate_dec, rate_str = parse_fee_rate(raw_rate)
+        if rate_dec == 0:
+            return 'none', '', 0, gross_minor
+        if kind == 'income' and rate_dec >= Decimal(100):
+            fail('收入手续费比例必须小于 100%')
+        fee_minor = int((Decimal(gross_minor) * rate_dec / Decimal(100)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    else:
+        if not has_fee:
+            return 'none', '', 0, gross_minor
+        fee_minor = minor_amount(raw_fee, decimals, allow_zero=True, label='手续费金额')
+        if fee_minor == 0:
+            return 'none', '', 0, gross_minor
+        rate_str = ''
+
+    if kind == 'income':
+        effective_minor = gross_minor - fee_minor
+        if effective_minor <= 0:
+            fail('收入手续费必须小于原金额，实际入账金额需大于 0')
+    else:
+        effective_minor = gross_minor + fee_minor
+        if effective_minor > 9_000_000_000_000:
+            fail('含手续费后的实际金额超出范围')
+
+    return mode, rate_str, fee_minor, effective_minor
 
 
 def signed_minor_amount(value, decimals):
@@ -113,11 +180,13 @@ def normalized_entry(conn, user, body):
         fail('支出请选择公账支出或成员垫付')
     income_type = body.get('income_type', 'operating') if kind == 'income' else ''
     if kind == 'income' and income_type not in INCOME_TYPES:
-        fail('收入请选择营业收入或股东出资转入')
+        fail('收入请选择营业收入或公户转入')
     if kind == 'income' or expense_type == 'public':
         admin(user)
     cur = currency(conf, body.get('currency', conf['default_currency']))
-    amount = minor_amount(body.get('amount', ''), cur['decimals'])
+    gross_raw = body['gross_amount'] if body.get('gross_amount') not in (None, '') else body.get('amount', '')
+    gross_minor = minor_amount(gross_raw, cur['decimals'])
+    fee_mode, fee_rate, fee_minor, amount = compute_fee(kind, gross_minor, cur['decimals'], body)
     description = text_value(body.get('description', ''), '用途 / 收入说明', 120, False)
     try:
         entry_date = date.fromisoformat(body.get('date', ''))
@@ -141,7 +210,10 @@ def normalized_entry(conn, user, body):
     allowed = ('posted',) if kind == 'income' else ('draft', 'posted') if direct else ('draft', 'pending')
     if status not in allowed:
         fail('成员垫付请选择草稿或待报销；公账支出请选择草稿或已入账；收入正常入账')
-    return {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount_minor': amount, 'currency': cur['code'], 'decimals': cur['decimals'],
+    return {'kind': kind, 'expense_type': expense_type, 'income_type': income_type,
+            'amount_minor': amount, 'gross_amount_minor': gross_minor,
+            'fee_mode': fee_mode, 'fee_rate': fee_rate, 'fee_minor': fee_minor,
+            'currency': cur['code'], 'decimals': cur['decimals'],
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
 
@@ -153,6 +225,14 @@ def entry_view(conn, entry_id):
     result = dict(row)
     def amount(units):
         return format(Decimal(units) / (10 ** row['decimals']), f'.{row["decimals"]}f')
+    gross_minor = row['gross_amount_minor'] if row['gross_amount_minor'] else row['amount_minor']
+    fee_minor = row['fee_minor'] or 0
+    result['gross_amount_minor'] = gross_minor
+    result['gross_amount'] = amount(gross_minor)
+    result['fee_mode'] = row['fee_mode'] or 'none'
+    result['fee_rate'] = row['fee_rate'] or ''
+    result['fee_minor'] = fee_minor
+    result['fee_amount'] = amount(fee_minor)
     result['amount'] = amount(row['amount_minor'])
     result['reimbursed_amount'] = amount(row['reimbursed_minor'])
     result['remaining_minor'] = row['amount_minor'] - row['reimbursed_minor'] if row['kind'] == 'expense' and row['expense_type'] == 'advance' else 0
@@ -324,6 +404,38 @@ def edit_entry(conn, user, entry_id, body):
         merged['expense_type'] = body.get('expense_type', old['expense_type'])
     else:
         merged['income_type'] = body.get('income_type', old.get('income_type') or 'operating')
+    has_fee_input = any(k in body for k in ('fee_mode', 'fee_rate', 'fee_amount'))
+    if not has_fee_input:
+        merged['fee_mode'] = old['fee_mode']
+        if old['fee_mode'] == 'rate':
+            merged['fee_rate'] = old['fee_rate']
+        elif old['fee_mode'] == 'fixed':
+            merged['fee_amount'] = old['fee_amount']
+    has_gross = body.get('gross_amount') not in (None, '')
+    has_amount = body.get('amount') not in (None, '')
+    if not has_gross and not has_amount:
+        merged['gross_amount'] = old['gross_amount']
+    elif not has_gross and has_amount:
+        if not has_fee_input and str(body['amount']).strip() == old['amount']:
+            merged['gross_amount'] = old['gross_amount']
+        else:
+            merged['gross_amount'] = body['amount']
+    elif has_gross and has_amount:
+        gross_str = str(body['gross_amount']).strip()
+        amt_str = str(body['amount']).strip()
+        if gross_str == old['gross_amount'] and amt_str != old['amount']:
+            # Support callers doing PUT {**entry, 'amount': '99'} while preserving explicit gross+effective payloads.
+            keep_gross = False
+            try:
+                cur_obj = currency(settings(conn), merged.get('currency', old['currency']))
+                g_minor = minor_amount(gross_str, cur_obj['decimals'])
+                _, _, _, eff_minor = compute_fee(old['kind'], g_minor, cur_obj['decimals'], merged)
+                a_minor = minor_amount(amt_str, cur_obj['decimals'])
+                keep_gross = (a_minor == eff_minor)
+            except HTTPException:
+                keep_gross = False
+            if not keep_gross:
+                merged['gross_amount'] = body['amount']
     data = normalized_entry(conn, user, merged)
     if data['kind'] != old['kind']:
         fail('不支持更改账目类型')

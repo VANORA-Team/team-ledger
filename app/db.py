@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS entries (
  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, expense_type TEXT NOT NULL DEFAULT 'advance',
  income_type TEXT NOT NULL DEFAULT '',
  amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+ gross_amount_minor INTEGER NOT NULL DEFAULT 0 CHECK(gross_amount_minor>=0),
+ fee_mode TEXT NOT NULL DEFAULT 'none',
+ fee_rate TEXT NOT NULL DEFAULT '',
+ fee_minor INTEGER NOT NULL DEFAULT 0 CHECK(fee_minor>=0),
  currency TEXT NOT NULL, decimals INTEGER NOT NULL, description TEXT NOT NULL,
  category TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, payer_id INTEGER NOT NULL REFERENCES users(id),
  created_by INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL,
@@ -196,6 +200,14 @@ def _init_db():
             conn.execute("ALTER TABLE entries ADD COLUMN expense_type TEXT NOT NULL DEFAULT 'advance'")
         if 'income_type' not in entry_cols:
             conn.execute("ALTER TABLE entries ADD COLUMN income_type TEXT NOT NULL DEFAULT ''")
+        if 'gross_amount_minor' not in entry_cols:
+            conn.execute('ALTER TABLE entries ADD COLUMN gross_amount_minor INTEGER NOT NULL DEFAULT 0 CHECK(gross_amount_minor>=0)')
+        if 'fee_mode' not in entry_cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN fee_mode TEXT NOT NULL DEFAULT 'none'")
+        if 'fee_rate' not in entry_cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN fee_rate TEXT NOT NULL DEFAULT ''")
+        if 'fee_minor' not in entry_cols:
+            conn.execute('ALTER TABLE entries ADD COLUMN fee_minor INTEGER NOT NULL DEFAULT 0 CHECK(fee_minor>=0)')
         if 'domain' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_config)')}:
             conn.execute("ALTER TABLE feishu_config ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
         if 'attempts' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_outbox)')}:
@@ -217,6 +229,8 @@ def _init_db():
         conn.execute("UPDATE entries SET expense_type='' WHERE kind='income' AND expense_type<>''")
         conn.execute("UPDATE entries SET income_type='operating' WHERE kind='income' AND (income_type IS NULL OR income_type='')")
         conn.execute("UPDATE entries SET income_type='' WHERE kind='expense' AND income_type<>''")
+        conn.execute('UPDATE entries SET gross_amount_minor=amount_minor WHERE gross_amount_minor=0')
+        conn.execute("UPDATE entries SET fee_mode='none', fee_rate='', fee_minor=0 WHERE fee_mode IS NULL OR fee_mode=''")
         # Earlier versions only supported full payments. Preserve their dates and notes,
         # and create exactly one payment record without rewriting their audit history.
         conn.execute("""INSERT OR IGNORE INTO payments(entry_id,user_id,amount_minor,currency,decimals,note,entry_amount_minor,fx_rate,fx_date,source_key,created_at)
@@ -258,9 +272,9 @@ def migrate_public_expenses(conn):
             continue
         stamp, actor = row['created_at'], row['user_id']
         cursor = conn.execute("""INSERT INTO entries
-            (kind,expense_type,amount_minor,currency,decimals,description,date,payer_id,created_by,status,source,source_key,note,paid_at,created_at,updated_at)
-            VALUES ('expense','public',?,?,?,'历史公账支出',?,?,?,'posted','migration',?,?,?,?,?)""",
-            (row['amount_minor'], row['currency'], row['decimals'], stamp[:10], actor, actor,
+            (kind,expense_type,amount_minor,gross_amount_minor,fee_mode,fee_rate,fee_minor,currency,decimals,description,date,payer_id,created_by,status,source,source_key,note,paid_at,created_at,updated_at)
+            VALUES ('expense','public',?,?,'none','',0,?,?,'历史公账支出',?,?,?,'posted','migration',?,?,?,?,?)""",
+            (row['amount_minor'], row['amount_minor'], row['currency'], row['decimals'], stamp[:10], actor, actor,
              key, row['note'], stamp, stamp, stamp))
         conn.execute("INSERT INTO events(entry_id,user_id,action,detail,created_at) VALUES (?,?,'migrated',?,?)",
                      (cursor.lastrowid, actor, json.dumps(row, ensure_ascii=False), stamp))

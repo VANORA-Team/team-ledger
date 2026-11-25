@@ -81,7 +81,7 @@ const PAGES = {
 
 const STATUS = {draft: '草稿', pending: '待报销', partial: '部分报销', reimbursed: '已报销', posted: '已入账', voided: '已作废'};
 const entryStatus = e => e.status === 'pending' && e.reimbursed_minor > 0 ? 'partial' : e.status;
-const entryType = e => e.kind === 'income' ? (e.income_type === 'capital' ? '股东出资转入' : '营业收入') : e.expense_type === 'public' ? '公账支出' : '成员垫付';
+const entryType = e => e.kind === 'income' ? (e.income_type === 'capital' ? '公户转入' : '营业收入') : e.expense_type === 'public' ? '公账支出' : '成员垫付';
 const entryDescription = e => e.description || '未填写说明';
 const ROLES = {owner: '账本所有者', finance: '财务管理员', member: '普通成员'};
 const roleName = role => ROLES[role] || '未识别角色';
@@ -107,7 +107,7 @@ const state = {
   reimburseMode: 'queue',
   reimburseTab: 'pending',
   settingsTab: 'members',
-  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', editing: null, entryKey: null,
+  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', entryFeeMode: 'none', editing: null, entryKey: null,
   action: null, base: null, loadId: 0,
   exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
@@ -397,11 +397,30 @@ function settlementDisplay(entry, report = state.report, compact = false) {
   return `<span class="settlement-line">≈ ${money(convertedAmount, base)} <small>参考${rate.date ? ` · ${esc(rate.date)}` : ''}</small></span>`;
 }
 
-function compactAmountSubline(e) {
-  if (e.kind === 'expense' && e.reimbursed_minor > 0) {
-    return `<span class="payment-progress">剩余 ${money(e.remaining_amount, e.currency, false)} ${esc(e.currency)}</span>`;
+function feeDetailTag(e) {
+  const mode = e.fee_mode || 'none';
+  if (mode === 'rate' && e.fee_rate) {
+    return `按比例 ${e.fee_rate}% · ${money(e.fee_amount, e.currency)}`;
   }
-  return settlementDisplay(e, state.report, true);
+  if (Number(e.fee_minor) > 0) {
+    return `手动 · ${money(e.fee_amount, e.currency)}`;
+  }
+  return '';
+}
+
+function compactAmountSubline(e) {
+  const parts = [];
+  if (Number(e.fee_minor) > 0) {
+    const rateSuffix = e.fee_mode === 'rate' && e.fee_rate ? ` · ${esc(e.fee_rate)}%` : '';
+    parts.push(`<span class="fee-subline">${e.kind === 'income' ? '已扣' : '含'}手续费 ${money(e.fee_amount, e.currency, false)}${rateSuffix}</span>`);
+  }
+  if (e.kind === 'expense' && e.reimbursed_minor > 0) {
+    parts.push(`<span class="payment-progress">剩余 ${money(e.remaining_amount, e.currency, false)} ${esc(e.currency)}</span>`);
+  } else {
+    const settle = settlementDisplay(e, state.report, true);
+    if (settle) parts.push(settle);
+  }
+  return parts.join('');
 }
 
 function receiptLink(entry, label = '凭证') {
@@ -464,10 +483,28 @@ function aiFieldRows(action) {
   const r = action.resolved || {}, rows = [];
   const add = (label, value) => { if (value !== undefined && value !== null && value !== '') rows.push(`<span><b>${esc(label)}</b> ${esc(value)}</span>`); };
   if (action.type === 'create_entry') {
-    add('类型', entryType(r)); add('金额', `${r.amount} ${r.currency}`); add('用途', entryDescription(r));
+    const hasFee = r.fee_mode && r.fee_mode !== 'none';
+    add('类型', entryType(r));
+    if (hasFee) {
+      add('原金额', `${r.gross_amount || r.amount} ${r.currency}`);
+      add('手续费', r.fee_mode === 'rate' && r.fee_rate ? `${r.fee_rate}%（${r.fee_amount} ${r.currency}）` : `${r.fee_amount} ${r.currency}`);
+      add(r.kind === 'income' ? '实收金额' : '实付金额', `${r.amount} ${r.currency}`);
+    } else {
+      add('金额', `${r.amount} ${r.currency}`);
+    }
+    add('用途', entryDescription(r));
     add('日期', r.date); add('成员', r.payer_name || r.payer_id); add('状态', AI_STATUS[r.status] || r.status); add('备注', r.note);
   } else if (action.type === 'edit_entry') {
-    add('编号', `#${r.id}`); add('类型', r.kind ? entryType(r) : ''); add('金额', `${r.amount} ${r.currency}`); add('用途', entryDescription(r)); add('日期', r.date); add('备注', r.note);
+    const hasFee = r.fee_mode && r.fee_mode !== 'none';
+    add('编号', `#${r.id}`); add('类型', r.kind ? entryType(r) : '');
+    if (hasFee) {
+      add('原金额', `${r.gross_amount || r.amount} ${r.currency}`);
+      add('手续费', r.fee_mode === 'rate' && r.fee_rate ? `${r.fee_rate}%（${r.fee_amount} ${r.currency}）` : `${r.fee_amount} ${r.currency}`);
+      add(r.kind === 'income' ? '实收金额' : '实付金额', `${r.amount} ${r.currency}`);
+    } else {
+      add('金额', `${r.amount} ${r.currency}`);
+    }
+    add('用途', entryDescription(r)); add('日期', r.date); add('备注', r.note);
   } else if (['void_entry', 'submit_entry'].includes(action.type)) {
     add('编号', `#${r.id}`); add('备注', r.note);
   } else if (action.type === 'pay_entry') {
@@ -513,7 +550,7 @@ function aiQueryCard(card) {
   if (card.kind === 'summary') {
     const incomeSlots = [
       ...(card.by_income_type?.operating || []).map(x => ({...x, label: '营业收入'})),
-      ...(card.by_income_type?.capital || []).map(x => ({...x, label: '股东出资转入'})),
+      ...(card.by_income_type?.capital || []).map(x => ({...x, label: '公户转入（不计利润）'})),
     ];
     const slots = [
       ...(card.by_kind?.expense || []).map(x => ({...x, label: '支出'})),
@@ -524,7 +561,7 @@ function aiQueryCard(card) {
   if (['balance', 'due', 'funds'].includes(card.kind)) {
     if (!card.complete) return `<div class="ai-query-card warn">${esc(card.warning || '资金数据暂不可用')}</div>`;
     const base = card.base;
-    return `<div class="ai-query-card"><div class="ai-query-head">公户结余与资金概览 <span class="mono">${esc(base)}</span></div><div class="ai-metrics"><span>公户结余 ${money(card.cash, base)}</span>${card.operating_income !== undefined ? `<span>营业收入 ${money(card.operating_income, base)}</span><span>股东出资 ${money(card.capital_income, base)}</span>` : `<span>在账收入 ${money(card.income, base)}</span>`}<span>公账支出 ${money(card.public_paid, base)}</span><span>已报销 ${money(card.paid, base)}</span><span>待报销 ${money(card.due, base)}</span>${card.net_after_due !== undefined ? `<span>扣全额待报后 ${money(card.net_after_due, base)}</span>` : ''}<span>可安排 ${money(card.payable, base)}</span><span>缺口 ${money(card.shortage, base)}</span></div>${card.members?.length ? `<div class="ai-batch-items">${card.members.filter(m => Number(m.due) > 0).slice(0, 8).map(m => `<div>${esc(m.name)} · 待报销 ${money(m.due, base)} · 建议 ${money(m.suggested, base)}</div>`).join('')}</div>` : ''}${card.warning ? `<div class="ai-action-warning">${esc(card.warning)}</div>` : ''}</div>`;
+    return `<div class="ai-query-card"><div class="ai-query-head">公户结余与经营利润概览 <span class="mono">${esc(base)}</span></div><div class="ai-metrics"><span>公户结余 ${money(card.cash, base)}</span>${card.operating_income !== undefined ? `<span>营业收入 ${money(card.operating_income, base)}</span><span>公户转入 ${money(card.capital_income, base)}</span>` : `<span>在账收入 ${money(card.income, base)}</span>`}<span>公账支出 ${money(card.public_paid, base)}</span><span>已报销 ${money(card.paid, base)}</span><span>待报销 ${money(card.due, base)}</span>${card.net_after_due !== undefined ? `<span>扣全额待报后 ${money(card.net_after_due, base)}</span>` : ''}${card.operating_net_after_due !== undefined ? `<span>经营净利润（不含转入） ${money(card.operating_net_after_due, base)}</span>` : ''}<span>可安排 ${money(card.payable, base)}</span><span>缺口 ${money(card.shortage, base)}</span></div>${card.members?.length ? `<div class="ai-batch-items">${card.members.filter(m => Number(m.due) > 0).slice(0, 8).map(m => `<div>${esc(m.name)} · 待报销 ${money(m.due, base)} · 建议 ${money(m.suggested, base)}</div>`).join('')}</div>` : ''}${card.warning ? `<div class="ai-action-warning">${esc(card.warning)}</div>` : ''}</div>`;
   }
   if (card.kind === 'simulation') {
     if (!card.complete) return `<div class="ai-query-card warn">${esc(card.warning || '模拟暂不可用')}</div>`;
@@ -703,8 +740,10 @@ function aiEditInForm(index) {
   state.ai.selected.delete(index);
   closeAi();
   openEntry(r.kind, {
-    kind: r.kind, expense_type: r.expense_type, income_type: r.income_type, amount: r.amount, currency: r.currency,
-    description: r.description, date: r.date, payer_id: r.payer_id, note: r.note, status: r.status,
+    kind: r.kind, expense_type: r.expense_type, income_type: r.income_type,
+    amount: r.gross_amount || r.amount, gross_amount: r.gross_amount || r.amount,
+    fee_mode: r.fee_mode || 'none', fee_rate: r.fee_rate || '', fee_amount: r.fee_amount || '',
+    currency: r.currency, description: r.description, date: r.date, payer_id: r.payer_id, note: r.note, status: r.status,
   });
   toast('已在表单中打开，保存后不会重复执行此项');
 }
@@ -732,19 +771,21 @@ function chart() {
     const d = new Date(state.conf.today + 'T12:00:00Z');
     d.setUTCDate(d.getUTCDate() - i);
     const date = d.toISOString().slice(0, 10);
-    const income = state.entries.filter(e => e.kind === 'income' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0);
+    const operating = state.entries.filter(e => e.kind === 'income' && (e.income_type || 'operating') === 'operating' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0);
+    const capital = state.entries.filter(e => e.kind === 'income' && e.income_type === 'capital' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0);
     const paid = state.entries.filter(e => e.kind === 'expense' && e.expense_type === 'public' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0)
       + state.entries.reduce((s, e) => s + (e.payments || []).filter(p => p.created_at.slice(0, 10) === date).reduce((sum, p) => sum + converted(p), 0), 0);
-    days.push({date, income, paid, net: income - paid});
+    days.push({date, operating, capital, paid, profit: operating - paid});
   }
-  const rawMax = Math.max(0, ...days.flatMap(d => [d.income, d.paid]));
+  const hasCapital = days.some(d => d.capital > 0);
+  const rawMax = Math.max(0, ...days.flatMap(d => [d.operating, d.capital, d.paid]));
   const max = rawMax > 0 ? rawMax : 100;
   const fmtTick = v => v.toLocaleString('zh-CN', {notation: 'compact', maximumFractionDigits: 1});
   const ticks = rawMax > 0 ? [fmtTick(max), fmtTick(max / 2), '0'] : ['—', '—', '0'];
   const c = cur(r.base);
   const fmtMoney = v => `${c.symbol}${v.toLocaleString('zh-CN', {minimumFractionDigits: c.decimals, maximumFractionDigits: c.decimals})} ${r.base}`;
   return `
-    <div class="chart-container" id="cashflow-chart" role="group" aria-label="最近七天团队收入与公账付款，单位 ${esc(r.base)}">
+    <div class="chart-container" id="cashflow-chart" role="group" aria-label="最近七天营业收入、公户转入与公账付款，单位 ${esc(r.base)}">
       <div class="trend-chart-layout">
         <div class="trend-chart-axis" aria-hidden="true">
           ${ticks.map(t => `<span>${esc(t)}</span>`).join('')}
@@ -752,13 +793,15 @@ function chart() {
         <div class="trend-chart-plot">
           <div class="trend-chart-bars">
             ${days.map((d, idx) => {
-              const ip = rawMax > 0 && d.income > 0 ? Math.max(4, Math.round(d.income / max * 1000) / 10) : 0;
+              const op = rawMax > 0 && d.operating > 0 ? Math.max(4, Math.round(d.operating / max * 1000) / 10) : 0;
+              const cp = rawMax > 0 && d.capital > 0 ? Math.max(4, Math.round(d.capital / max * 1000) / 10) : 0;
               const pp = rawMax > 0 && d.paid > 0 ? Math.max(4, Math.round(d.paid / max * 1000) / 10) : 0;
               const shortDate = d.date.slice(5).replace('-', '/');
-              const netSign = d.net > 0 ? '+' : d.net < 0 ? '−' : '';
-              return `<button type="button" class="trend-chart-col" data-chart-col="${idx}" data-date="${esc(d.date)}" data-income="${esc(fmtMoney(d.income))}" data-paid="${esc(fmtMoney(d.paid))}" data-net="${esc(netSign + fmtMoney(Math.abs(d.net)))}" aria-label="${esc(d.date)} 收入 ${esc(fmtMoney(d.income))}，支出 ${esc(fmtMoney(d.paid))}">
+              const profitSign = d.profit > 0 ? '+' : d.profit < 0 ? '−' : '';
+              return `<button type="button" class="trend-chart-col" data-chart-col="${idx}" data-date="${esc(d.date)}" data-income="${esc(fmtMoney(d.operating))}" data-capital="${esc(fmtMoney(d.capital))}" data-paid="${esc(fmtMoney(d.paid))}" data-net="${esc(profitSign + fmtMoney(Math.abs(d.profit)))}" aria-label="${esc(d.date)} 营业收入 ${esc(fmtMoney(d.operating))}，公户转入 ${esc(fmtMoney(d.capital))}，支出 ${esc(fmtMoney(d.paid))}">
                 <span class="trend-chart-track">
-                  <i class="trend-bar income-bar" data-bar-h="${ip}"></i>
+                  <i class="trend-bar income-bar" data-bar-h="${op}"></i>
+                  ${hasCapital ? `<i class="trend-bar capital-bar" data-bar-h="${cp}"></i>` : ''}
                   <i class="trend-bar paid-bar" data-bar-h="${pp}"></i>
                 </span>
                 <small>${esc(shortDate)}</small>
@@ -768,9 +811,10 @@ function chart() {
           <div class="activity-chart-tooltip chart-tooltip" id="cashflow-tooltip" hidden aria-live="polite">
             <strong id="ct-date"></strong>
             <dl>
-              <div><dt>团队收入</dt><dd id="ct-income"></dd></div>
+              <div><dt>营业收入</dt><dd id="ct-income"></dd></div>
+              <div><dt>公户转入</dt><dd id="ct-capital"></dd></div>
               <div><dt>公账与报销</dt><dd id="ct-paid"></dd></div>
-              <div><dt>当日净变化</dt><dd id="ct-net"></dd></div>
+              <div><dt>当日经营利润</dt><dd id="ct-net"></dd></div>
             </dl>
           </div>
         </div>
@@ -791,6 +835,8 @@ function hydrateChart() {
     cols.forEach(c => c.classList.toggle('is-active', c === col));
     $('#ct-date').textContent = col.dataset.date || '';
     $('#ct-income').textContent = col.dataset.income || '';
+    const capEl = $('#ct-capital');
+    if (capEl) capEl.textContent = col.dataset.capital || '';
     $('#ct-paid').textContent = col.dataset.paid || '';
     $('#ct-net').textContent = col.dataset.net || '';
     const idx = Number(col.dataset.chartCol || 0);
@@ -835,6 +881,7 @@ function renderOverview() {
   const currencyAccounts = r?.currency_accounts || [];
   const showCurrencyChips = currencyAccounts.length > 1 || (!ok && currencyAccounts.length > 0);
   const cashNegative = ok && Number(r.actual_cash) < 0;
+  const profitNegative = ok && Number(r.operating_net_after_due) < 0;
 
   return heading(
     '团队总览',
@@ -851,18 +898,18 @@ function renderOverview() {
         <div class="summary-card-value${cashNegative ? ' is-negative' : ''}">${metric('actual_cash')}</div>
         ${showCurrencyChips ? `<div class="summary-currency-chips">${currencyAccounts.slice(0, 4).map(a => `<span class="summary-currency-chip${Number(a.balance) < 0 ? ' is-negative' : ''}">${esc(a.code)} ${money(a.balance, a.code, false)}</span>`).join('')}</div>` : ''}
         <div class="summary-card-foot">
-          <span>${ok && Number(r.shortage) > 0 ? `缺口 ${money(r.shortage, base, false)}` : ok ? `扣待报后 ${money(r.actual_net_after_due, base, false)}` : '原币结余见公户核算'}</span>
+          <span>${ok && Number(r.shortage) > 0 ? `缺口 ${money(r.shortage, base, false)}` : ok ? `含公户转入 ${money(r.capital_income, base, false)}` : '原币结余见公户核算'}</span>
           <a class="activity-summary-link" href="#reimbursements/balance">公户结余计算 ${icon('arrow', 'icon-sm')}</a>
         </div>
       </section>
       <section class="summary-card">
         <div class="summary-card-head">
-          <h2>累计公户入账</h2>
-          <span class="mono muted">${ok ? `今日 ${money(r.today_income, base, false)}` : ''}</span>
+          <h2>累计营业收入</h2>
+          <span class="mono muted">${ok ? `今日营收 ${money(r.today_operating_income, base, false)}` : ''}</span>
         </div>
-        <div class="summary-card-value">${metric('income')}</div>
+        <div class="summary-card-value">${metric('operating_income')}</div>
         <div class="summary-card-foot">
-          <span>营收 ${ok ? money(r.operating_income, base, false) : '—'} · 出资 ${ok ? money(r.capital_income, base, false) : '—'}</span>
+          <span class="${profitNegative ? 'money-negative' : ''}">经营净利润 ${ok ? money(r.operating_net_after_due, base, false) : '—'}（不含公户转入）</span>
           ${canManage() ? `<a class="activity-summary-link" href="#ledger" data-income-link>登记收入 ${icon('arrow', 'icon-sm')}</a>` : '<span></span>'}
         </div>
       </section>
@@ -882,8 +929,8 @@ function renderOverview() {
     <div class="overview-mid-grid">
       <section class="panel overview-chart-panel">
         <div class="panel-heading">
-          <h3>最近 7 天资金流向 <span class="panel-meta mono">${esc(base)}</span></h3>
-          <div class="chart-key"><span><i></i>收入</span><span><i class="gold"></i>支出</span></div>
+          <h3>最近 7 天资金与营收流向 <span class="panel-meta mono">${esc(base)}</span></h3>
+          <div class="chart-key"><span><i></i>营业收入</span><span><i class="blue"></i>公户转入</span><span><i class="gold"></i>支出</span></div>
         </div>
         ${chart()}
       </section>
@@ -973,7 +1020,7 @@ function renderLedger() {
   ) + `
     <section class="panel">
       <div class="filter-tabs" role="tablist" aria-label="收支类型筛选">
-        ${[['all', '全部记录'], ['public', '公账支出'], ['advance', '成员垫付'], ['income', '全部收入'], ['operating', '营业收入'], ['capital', '股东出资转入']].map(([value, label]) => `<button type="button" role="tab" aria-selected="${f.kind === value}" data-filter-kind="${value}" class="${f.kind === value ? 'active' : ''}">${label}</button>`).join('')}
+        ${[['all', '全部记录'], ['public', '公账支出'], ['advance', '成员垫付'], ['income', '全部收入'], ['operating', '营业收入'], ['capital', '公户转入']].map(([value, label]) => `<button type="button" role="tab" aria-selected="${f.kind === value}" data-filter-kind="${value}" class="${f.kind === value ? 'active' : ''}">${label}</button>`).join('')}
       </div>
       <div class="filters">
         <div class="search-box">
@@ -1018,7 +1065,7 @@ function calcSummary(report, scenario = false) {
       <div class="calc-amount">${money(report.reserve, b)}</div>
       <div class="calc-rows">
         <div class="calc-row"><span>${scenario ? '模拟后' : '当前'}公户结余（可用资金）</span><strong>${money(report.cash, b)}</strong></div>
-        <div class="calc-row"><span>其中：营业收入 / 股东出资</span><strong>${money(report.operating_income, b, false)} / ${money(report.capital_income, b, false)} ${esc(b)}</strong></div>
+        <div class="calc-row"><span>其中：营业收入 / 公户转入（不计利润）</span><strong>${money(report.operating_income, b, false)} / ${money(report.capital_income, b, false)} ${esc(b)}</strong></div>
         <div class="calc-row"><span>公账支出 / 已报销付款</span><strong>${money(report.public_paid, b, false)} / ${money(report.paid, b, false)} ${esc(b)}</strong></div>
         <div class="calc-row"><span>全部待报销</span><strong>${money(report.due, b)}</strong></div>
         ${mode === 'manual' ? `<div class="calc-row"><span>已选项目待报销</span><strong>${money(report.selected_due, b)}</strong></div>` : ''}
@@ -1038,8 +1085,7 @@ function publicBalanceStrip(report) {
   const metric = k => ok ? money(report[k], base) : '—';
   const balNeg = ok && Number(report.public_balance ?? report.actual_cash) < 0;
   const afterNeg = ok && Number(report.actual_net_after_due) < 0;
-  const opNetNeg = ok && Number(report.operating_net) < 0;
-  const shareholders = report?.shareholder_contributions || [];
+  const opProfitNeg = ok && Number(report.operating_net_after_due) < 0;
   return `
     <div class="metric-strip metric-strip-4" id="public-balance-strip">
       <div class="metric-cell">
@@ -1055,12 +1101,12 @@ function publicBalanceStrip(report) {
       <div class="metric-cell">
         <small>累计营业收入</small>
         <strong>${metric('operating_income')}</strong>
-        <span class="metric-cell-sub${opNetNeg ? ' money-negative' : ''}">经营净额 ${ok ? money(report.operating_net, base, false) : '—'}（不含出资）</span>
+        <span class="metric-cell-sub">公户转入 ${ok ? money(report.capital_income, base, false) : '—'} · 不计利润</span>
       </div>
       <div class="metric-cell">
-        <small>累计股东出资转入</small>
-        <strong>${metric('capital_income')}</strong>
-        <span class="metric-cell-sub">${shareholders.length ? `${shareholders.length} 位成员出资` : '暂无股东出资记录'}</span>
+        <small>经营净利润（不含公户转入）</small>
+        <strong class="${opProfitNeg ? 'is-negative' : ''}">${metric('operating_net_after_due')}</strong>
+        <span class="metric-cell-sub">实付经营利润 ${ok ? money(report.operating_net, base, false) : '—'}</span>
       </div>
     </div>`;
 }
@@ -1124,43 +1170,48 @@ function publicBalanceSummary(report) {
       <div class="calc-amount${headlineNeg ? ' is-negative' : ''}">${money(headlineAmount, b)}</div>
       <div class="calc-rows">
         <div class="calc-row"><span>+ 营业收入</span><strong>${money(report.operating_income, b)}</strong></div>
-        <div class="calc-row"><span>+ 股东出资转入</span><strong>${money(report.capital_income, b)}</strong></div>
+        <div class="calc-row"><span>+ 公户转入（不计入利润）</span><strong>${money(report.capital_income, b)}</strong></div>
         <div class="calc-row subtotal"><span>= 公户总入账</span><strong>${money(report.income, b)}</strong></div>
         <div class="calc-row"><span>− 公账支出</span><strong>${money(report.public_paid, b)}</strong></div>
         <div class="calc-row"><span>− 已报销付款</span><strong>${money(report.paid, b)}</strong></div>
         <div class="calc-row subtotal ${Number(report.actual_cash) < 0 ? 'danger' : 'highlight'}"><span>= 账面公户结余</span><strong>${money(report.actual_cash, b)}</strong></div>
         ${hasSim ? `
           ${Number(sim.sim_operating) > 0 ? `<div class="calc-row"><span>+ 模拟营业收入</span><strong>${money(sim.sim_operating, b)}</strong></div>` : ''}
-          ${Number(sim.sim_capital) > 0 ? `<div class="calc-row"><span>+ 模拟股东出资转入</span><strong>${money(sim.sim_capital, b)}</strong></div>` : ''}
+          ${Number(sim.sim_capital) > 0 ? `<div class="calc-row"><span>+ 模拟公户转入（不计利润）</span><strong>${money(sim.sim_capital, b)}</strong></div>` : ''}
           ${Number(sim.sim_public_expense) > 0 ? `<div class="calc-row"><span>− 模拟公账支出</span><strong>${money(sim.sim_public_expense, b)}</strong></div>` : ''}
           <div class="calc-row subtotal ${Number(sim.projected_balance) < 0 ? 'danger' : 'highlight'}"><span>= 模拟后公户结余（变动 ${deltaNum >= 0 ? '+' : ''}${money(sim.sim_net_delta, b, false)}）</span><strong>${money(sim.projected_balance, b)}</strong></div>
         ` : ''}
         <div class="calc-row"><span>− 全部待报销垫付</span><strong>${money(report.due, b)}</strong></div>
         <div class="calc-row subtotal ${Number(hasSim ? sim.projected_after_due : report.actual_net_after_due) < 0 ? 'danger' : 'highlight'}"><span>= 结清待报后公户结余</span><strong>${money(hasSim ? sim.projected_after_due : report.actual_net_after_due, b)}</strong></div>
-        <div class="calc-row section-divider ${Number(opNetVal) < 0 ? 'danger' : ''}"><span>经营净现金流（不含股东出资）</span><strong>${money(opNetVal, b)}</strong></div>
-        <div class="calc-row ${Number(opNetAfterVal) < 0 ? 'danger' : ''}"><span>全口径经营净额（营业收入 − 全部支出）</span><strong>${money(opNetAfterVal, b)}</strong></div>
+        <div class="calc-row section-divider ${Number(opNetVal) < 0 ? 'danger' : ''}"><span>经营利润（实付口径，不含公户转入）</span><strong>${money(opNetVal, b)}</strong></div>
+        <div class="calc-row ${Number(opNetAfterVal) < 0 ? 'danger' : ''}"><span>经营净利润（含待报销，不含公户转入）</span><strong>${money(opNetAfterVal, b)}</strong></div>
+        ${Number(report.total_fees) > 0 ? `<div class="calc-row section-divider"><span>累计手续费（收入扣费 ${money(report.income_fees, b, false)} · 公账 ${money(report.public_fees, b, false)} · 垫付 ${money(report.advance_fees, b, false)}）</span><strong>${money(report.total_fees, b)}</strong></div>` : ''}
       </div>
-      <p class="pb-formula-note">公户结余 = 营业收入 + 股东出资转入 − 公账支出 − 已报销付款；成员垫付仅在实际报销后扣减账面结余。模拟试算与银行对账均不会写入账本。</p>
+      <p class="pb-formula-note">公户结余 = 营业收入 + 公户转入 − 公账支出 − 已报销付款（收入按扣除手续费后的实际到账、支出按含手续费的实际支出核算）；公户转入仅计入公户可用资金，不与营业收入一起计入经营利润。模拟试算与银行对账均不会写入账本。</p>
     </div>${recHtml}`;
 }
 
 function publicCurrencyTable(report) {
   const accounts = report?.currency_accounts || [];
   if (!accounts.length) {
-    return empty('暂无公户资金变动', '登记营业收入、股东出资转入、公账支出或报销付款后，这里会按各原币种精确核算公户结余。', '');
+    return empty('暂无公户资金变动', '登记营业收入、公户转入、公账支出或报销付款后，这里会按各原币种精确核算公户结余与经营利润。', '');
   }
   const hasSim = Boolean(report?.simulation?.has_adjustments);
-  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="按原币种公户结余明细" tabindex="0"><table class="data-table"><thead><tr><th>币种</th><th class="money">营业收入</th><th class="money">股东出资转入</th><th class="money">公账支出</th><th class="money">已报销实付</th><th class="money">账面公户结余</th>${hasSim ? '<th class="money">模拟后结余</th>' : ''}<th class="money">剩余待报销</th><th class="money">扣待报后结余</th></tr></thead><tbody>${accounts.map(a => `<tr><td><strong class="mono">${esc(a.code)}</strong></td><td class="money">${money(a.operating_income, a.code, false)}</td><td class="money">${money(a.capital_income, a.code, false)}</td><td class="money">${money(a.public_paid, a.code, false)}</td><td class="money">${money(a.paid, a.code, false)}</td><td class="money ${Number(a.balance) < 0 ? 'money-negative' : ''}"><strong>${money(a.balance, a.code, false)}</strong></td>${hasSim ? `<td class="money ${Number(a.projected_balance) < 0 ? 'money-negative' : ''}"><strong>${money(a.projected_balance, a.code, false)}</strong></td>` : ''}<td class="money">${money(a.due, a.code, false)}</td><td class="money ${Number(hasSim ? a.projected_after_due : a.net_after_due) < 0 ? 'money-negative' : ''}"><strong>${money(hasSim ? a.projected_after_due : a.net_after_due, a.code, false)}</strong></td></tr>`).join('')}</tbody></table></div>`;
+  const hasFees = accounts.some(a => Number(a.total_fees) > 0);
+  return `<p class="table-scroll-hint" aria-hidden="true">${icon('move', 'icon-sm')}左右滑动查看完整列表</p><div class="table-wrap" role="region" aria-label="按原币种公户结余明细" tabindex="0"><table class="data-table"><thead><tr><th>币种</th><th class="money">营业收入</th><th class="money">公户转入</th><th class="money">公账支出</th><th class="money">已报销实付</th><th class="money">账面公户结余</th>${hasSim ? '<th class="money">模拟后结余</th>' : ''}<th class="money">剩余待报销</th><th class="money">扣待报后结余</th><th class="money">经营净利润（不含转入）</th>${hasFees ? '<th class="money">累计手续费</th>' : ''}</tr></thead><tbody>${accounts.map(a => {
+    const profitVal = hasSim ? (a.projected_operating_profit_after_due ?? a.operating_net_after_due) : a.operating_net_after_due;
+    return `<tr><td><strong class="mono">${esc(a.code)}</strong></td><td class="money">${money(a.operating_income, a.code, false)}</td><td class="money">${money(a.capital_income, a.code, false)}</td><td class="money">${money(a.public_paid, a.code, false)}</td><td class="money">${money(a.paid, a.code, false)}</td><td class="money ${Number(a.balance) < 0 ? 'money-negative' : ''}"><strong>${money(a.balance, a.code, false)}</strong></td>${hasSim ? `<td class="money ${Number(a.projected_balance) < 0 ? 'money-negative' : ''}"><strong>${money(a.projected_balance, a.code, false)}</strong></td>` : ''}<td class="money">${money(a.due, a.code, false)}</td><td class="money ${Number(hasSim ? a.projected_after_due : a.net_after_due) < 0 ? 'money-negative' : ''}"><strong>${money(hasSim ? a.projected_after_due : a.net_after_due, a.code, false)}</strong></td><td class="money ${Number(profitVal) < 0 ? 'money-negative' : ''}"><strong>${money(profitVal, a.code, false)}</strong></td>${hasFees ? `<td class="money">${money(a.total_fees, a.code, false)}</td>` : ''}</tr>`;
+  }).join('')}</tbody></table></div>`;
 }
 
 function shareholderTable(report) {
   const rows = report?.shareholder_contributions || [];
   if (!rows.length) {
-    return empty('暂无股东出资转入记录', '登记收入时选择「股东出资转入」即可自动统计每位股东的累计出资与占比。', '');
+    return empty('暂无公户转入记录', '登记收入时选择「公户转入」即可统计各成员转入公户的资金明细与占比（不计入经营利润）。', '');
   }
   const base = report?.base || state.conf.reference_currency;
   const ok = Boolean(report?.complete);
-  return `<div class="table-wrap" role="region" aria-label="股东出资转入汇总" tabindex="0"><table class="data-table"><thead><tr><th>出资股东 / 经手人</th><th>笔数</th><th>原币种出资明细</th><th class="money">折合参考（${esc(base)}）</th><th class="money">出资占比</th></tr></thead><tbody>${rows.map(s => `<tr><td><div class="member-table-cell">${avatar(s.name, s.id)}<strong>${esc(s.name)}</strong></div></td><td class="mono">${s.count} 笔</td><td class="mono">${Object.entries(s.by_currency || {}).map(([code, amt]) => money(amt, code)).join(' <span class="muted">/</span> ') || '—'}</td><td class="money"><strong>${ok && s.total !== null ? money(s.total, base) : '—'}</strong></td><td class="money mono">${ok && s.share !== null ? `${esc(s.share)}%` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-wrap" role="region" aria-label="公户转入汇总" tabindex="0"><table class="data-table"><thead><tr><th>转入 / 经手成员</th><th>笔数</th><th>原币种转入明细</th><th class="money">折合参考（${esc(base)}）</th><th class="money">转入占比</th></tr></thead><tbody>${rows.map(s => `<tr><td><div class="member-table-cell">${avatar(s.name, s.id)}<strong>${esc(s.name)}</strong></div></td><td class="mono">${s.count} 笔</td><td class="mono">${Object.entries(s.by_currency || {}).map(([code, amt]) => money(amt, code)).join(' <span class="muted">/</span> ') || '—'}</td><td class="money"><strong>${ok && s.total !== null ? money(s.total, base) : '—'}</strong></td><td class="money mono">${ok && s.share !== null ? `${esc(s.share)}%` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function planGroups(report, selectable = false) {
@@ -1187,7 +1238,7 @@ function planGroups(report, selectable = false) {
             <span class="plan-item-status">${status}</span>
             <div class="plan-item-main">
               <strong>${esc(entryDescription(entry))}</strong>
-              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
+              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${Number(entry.fee_minor) > 0 ? ` · 含手续费 ${money(entry.fee_amount, entry.currency, false)}` : ''}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
             </div>
             <div class="plan-item-suggested">${hasSuggestion ? money(entry.suggested, report.base, false) : '—'}</div>
           </div>`;
@@ -1213,7 +1264,7 @@ function renderReimbursements() {
     </div>`;
 
   const actions = mode === 'balance'
-    ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-new="capital">${icon('plus', 'ico-plus')}股东出资</button><button type="button" class="button button-outline" data-export-open="balance">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
+    ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-new="capital">${icon('plus', 'ico-plus')}公户转入</button><button type="button" class="button button-outline" data-export-open="balance">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
     : mode === 'calculator'
       ? `${baseSelect()}${canManage() ? `<button type="button" class="button button-outline" data-export-open="calculator">${icon('download', 'ico-download')}导出 Excel</button>` : ''}`
       : `${canManage() ? `<button type="button" class="button button-outline" data-export-open="reimbursements">${icon('download', 'ico-download')}导出 Excel</button>` : ''}${newButton()}`;
@@ -1248,7 +1299,7 @@ function renderReimbursements() {
               <label><span>币种</span><select name="operating_currency">${currencyOptions(pb.operating_currency || defCur)}</select></label>
             </div>
             <div class="form-grid">
-              <label><span>模拟股东出资转入</span><input name="capital_amount" value="${esc(pb.capital_amount)}" inputmode="decimal" placeholder="0.00"></label>
+              <label><span>模拟公户转入 <small class="optional">不计利润</small></span><input name="capital_amount" value="${esc(pb.capital_amount)}" inputmode="decimal" placeholder="0.00"></label>
               <label><span>币种</span><select name="capital_currency">${currencyOptions(pb.capital_currency || defCur)}</select></label>
             </div>
             <div class="form-grid">
@@ -1293,8 +1344,8 @@ function renderReimbursements() {
 
       <section class="panel recent-panel">
         <div class="panel-heading">
-          <h3>股东出资转入汇总 <span class="panel-meta mono">${esc(base)}</span></h3>
-          ${canManage() ? `<button type="button" class="console-inline-link" data-new="capital">登记股东出资 ${icon('arrow', 'icon-sm')}</button>` : ''}
+          <h3>公户转入汇总 <span class="panel-meta mono">${esc(base)} · 不计入利润</span></h3>
+          ${canManage() ? `<button type="button" class="console-inline-link" data-new="capital">登记公户转入 ${icon('arrow', 'icon-sm')}</button>` : ''}
         </div>
         <div id="shareholder-table">${shareholderTable(r)}</div>
       </section>
@@ -2396,6 +2447,130 @@ async function start() {
  * Entry, Detail Drawer, Receipt & Payment Modals
  * ========================================================================== */
 
+function parseMinorUnits(raw, decimals) {
+  const text = String(raw ?? '').trim();
+  if (!/^\d{1,12}(?:\.\d{1,4})?$/.test(text)) return null;
+  const [intPart, fracPart = ''] = text.split('.');
+  if (fracPart.length > decimals) return null;
+  const minor = Number(intPart + fracPart.padEnd(decimals, '0'));
+  if (!Number.isSafeInteger(minor) || minor > 9_000_000_000_000) return null;
+  return minor;
+}
+
+function computeFeePreview(kind, amountRaw, code, feeMode, feeRateRaw, feeAmountRaw) {
+  const c = cur(code);
+  const scale = 10 ** c.decimals;
+  const grossMinor = parseMinorUnits(amountRaw, c.decimals);
+  if (grossMinor === null || grossMinor <= 0) {
+    return {ready: false, message: '填写原金额后将实时计算手续费与实际金额'};
+  }
+  if (feeMode === 'none') {
+    return {ready: true, grossMinor, feeMinor: 0, effectiveMinor: grossMinor, gross: grossMinor / scale, fee: 0, effective: grossMinor / scale, rateLabel: '', code};
+  }
+  let feeMinor = 0;
+  let rateLabel = '';
+  if (feeMode === 'rate') {
+    const text = String(feeRateRaw ?? '').trim();
+    if (!text) {
+      feeMinor = 0;
+      rateLabel = '0';
+    } else {
+      if (!/^\d{1,3}(?:\.\d{1,4})?$/.test(text)) return {ready: false, error: '手续费比例需为非负数，最多保留 4 位小数'};
+      const rateNum = Number(text);
+      if (!Number.isFinite(rateNum) || rateNum < 0 || rateNum > 100) return {ready: false, error: '手续费比例需在 0%–100% 之间'};
+      if (kind === 'income' && rateNum >= 100) return {ready: false, error: '收入手续费比例必须小于 100%'};
+      const [rInt, rFrac = ''] = text.split('.');
+      const rateScaled = BigInt(rInt + rFrac.padEnd(4, '0'));
+      const denom = 1_000_000n;
+      feeMinor = Number((BigInt(grossMinor) * rateScaled + denom / 2n) / denom);
+      rateLabel = text.includes('.') ? text.replace(/^0+(?=\d)/, '').replace(/0+$/, '').replace(/\.$/, '') : String(rateNum);
+    }
+  } else if (feeMode === 'fixed') {
+    const text = String(feeAmountRaw ?? '').trim();
+    if (!text) {
+      feeMinor = 0;
+    } else {
+      const parsed = parseMinorUnits(text, c.decimals);
+      if (parsed === null) return {ready: false, error: `手续费金额格式不正确或小数超过 ${c.decimals} 位`};
+      feeMinor = parsed;
+    }
+  }
+  const effectiveMinor = kind === 'income' ? grossMinor - feeMinor : grossMinor + feeMinor;
+  if (kind === 'income' && effectiveMinor <= 0) {
+    return {ready: false, error: '收入手续费必须小于原金额，实际入账金额需大于 0'};
+  }
+  if (effectiveMinor > 9_000_000_000_000) {
+    return {ready: false, error: '含手续费后的实际金额超出范围'};
+  }
+  return {
+    ready: true, grossMinor, feeMinor, effectiveMinor,
+    gross: grossMinor / scale, fee: feeMinor / scale, effective: effectiveMinor / scale,
+    rateLabel, code,
+  };
+}
+
+function updateFeeUi() {
+  const form = $('#entry-form');
+  if (!form) return;
+  const mode = state.entryFeeMode || 'none';
+  const isIncome = state.entryKind === 'income';
+  const isPublic = state.entryKind === 'public';
+  const code = form.elements.currency.value || state.conf.default_currency;
+  $$('#entry-fee-mode button').forEach(b => {
+    const active = b.dataset.feeMode === mode;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  const amountLabel = $('#entry-amount-label');
+  if (amountLabel) amountLabel.textContent = mode === 'none' ? '金额' : '原金额（手续费前）';
+  const rateWrap = $('#fee-rate-wrap');
+  const fixedWrap = $('#fee-fixed-wrap');
+  const rateInput = $('#entry-fee-rate');
+  const fixedInput = $('#entry-fee-amount');
+  const curSuffix = $('#fee-currency-suffix');
+  const curObj = cur(code);
+  if (curSuffix) curSuffix.textContent = code;
+  if (rateWrap) rateWrap.hidden = mode !== 'rate';
+  if (fixedWrap) fixedWrap.hidden = mode !== 'fixed';
+  if (rateInput) rateInput.required = false;
+  if (fixedInput) {
+    fixedInput.required = false;
+    fixedInput.placeholder = curObj.decimals > 0 ? '0.' + '0'.repeat(curObj.decimals) : '0';
+  }
+
+  const previewEl = $('#fee-preview');
+  if (!previewEl) return;
+  if (mode === 'none') {
+    previewEl.hidden = true;
+    previewEl.classList.remove('is-error');
+    previewEl.innerHTML = '';
+    return;
+  }
+  const calc = computeFeePreview(
+    isIncome ? 'income' : 'expense',
+    form.elements.amount.value,
+    code,
+    mode,
+    rateInput?.value,
+    fixedInput?.value,
+  );
+  previewEl.hidden = false;
+  if (calc.error) {
+    previewEl.classList.add('is-error');
+    previewEl.innerHTML = `<span>${esc(calc.error)}</span>`;
+    return;
+  }
+  previewEl.classList.remove('is-error');
+  if (!calc.ready) {
+    previewEl.innerHTML = `<span class="muted">${esc(calc.message)}</span>`;
+    return;
+  }
+  const sign = isIncome ? '−' : '+';
+  const effLabel = isIncome ? '实收入账' : (isPublic ? '公账实付' : '实付 / 应报销');
+  const feeTag = mode === 'rate' && calc.rateLabel ? ` (${esc(calc.rateLabel)}%)` : '';
+  previewEl.innerHTML = `<span class="fee-preview-eq">原金额 ${money(calc.gross, code, false)} ${sign} 手续费 ${money(calc.fee, code, false)}${feeTag}</span><strong class="fee-preview-total">${effLabel} ${money(calc.effective, code)}</strong>`;
+}
+
 function openEntry(kind = 'expense', data = null) {
   if ((!canManage() && kind !== 'expense') || (data && !canManageEntry(data))) return;
   const form = $('#entry-form');
@@ -2405,18 +2580,23 @@ function openEntry(kind = 'expense', data = null) {
   if (data) {
     state.entryKind = data.kind === 'expense' && data.expense_type === 'public' ? 'public' : data.kind;
     state.entryIncomeType = data.kind === 'income' ? (data.income_type === 'capital' ? 'capital' : 'operating') : 'operating';
+    state.entryFeeMode = ['rate', 'fixed'].includes(data.fee_mode) ? data.fee_mode : 'none';
   } else if (kind === 'capital') {
     state.entryKind = 'income';
     state.entryIncomeType = 'capital';
+    state.entryFeeMode = 'none';
   } else {
     state.entryKind = kind;
     state.entryIncomeType = 'operating';
+    state.entryFeeMode = 'none';
   }
   form.elements.currency.innerHTML = currencyOptions(data?.currency || state.conf.default_currency);
   form.elements.payer_id.innerHTML = options(state.members.filter(m => m.active), m => m.id, m => m.name, data?.payer_id || state.user.id);
   form.elements.payer_id.disabled = !canManage();
   form.elements.date.value = data?.date || state.conf.today;
-  form.elements.amount.value = data?.amount || '';
+  form.elements.amount.value = data?.gross_amount || data?.amount || '';
+  if (form.elements.fee_rate) form.elements.fee_rate.value = data?.fee_mode === 'rate' ? (data?.fee_rate || '') : '';
+  if (form.elements.fee_amount) form.elements.fee_amount.value = data?.fee_mode === 'fixed' ? (data?.fee_amount || '') : '';
   form.elements.description.value = data?.description || '';
   form.elements.note.value = data?.note || '';
   $('#entry-kind').hidden = Boolean(data?.id);
@@ -2443,14 +2623,19 @@ function entryKindChanged() {
     b.classList.toggle('active', active);
     b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
-  $('#entry-title').textContent = state.editing ? '修改账目' : isCapital ? '登记股东出资转入' : income ? '登记营业收入' : publicExpense ? '记公账支出' : '记成员垫付';
+  $('#entry-title').textContent = state.editing ? '修改账目' : isCapital ? '登记公户转入' : income ? '登记营业收入' : publicExpense ? '记公账支出' : '记成员垫付';
   $('#save-draft').hidden = income;
-  $('#payer-label > span').textContent = isCapital ? '出资股东 / 经手人' : (income || publicExpense ? '经手成员' : '垫付成员');
+  const incomeHint = $('#income-type-hint');
+  if (incomeHint) {
+    incomeHint.textContent = isCapital ? '仅计入公户结余，不与营业收入一起计入利润' : '同时计入公户结余与经营利润';
+  }
+  $('#payer-label > span').textContent = isCapital ? '转入 / 经手成员' : (income || publicExpense ? '经手成员' : '垫付成员');
   const descInput = $('#entry-form input[name="description"]');
   if (descInput) {
-    descInput.placeholder = isCapital ? '例如：首期注册资本、股东增资转入' : income ? '例如：客户尾款、项目服务费' : '例如：服务器续费、团队聚餐';
+    descInput.placeholder = isCapital ? '例如：股东出资、关联账户调拨、备用金转入' : income ? '例如：客户尾款、项目服务费' : '例如：服务器续费、团队聚餐';
   }
   $('#save-entry').textContent = state.editing ? '保存修改' : income ? '确认入账' : '确认记账';
+  updateFeeUi();
 }
 
 async function saveEntry(status, button) {
@@ -2467,6 +2652,29 @@ async function saveEntry(status, button) {
       body.kind = state.entryKind === 'income' ? 'income' : 'expense';
       body.expense_type = state.entryKind === 'public' ? 'public' : state.entryKind === 'expense' ? 'advance' : '';
       body.income_type = state.entryKind === 'income' ? state.entryIncomeType : '';
+      body.fee_mode = state.entryFeeMode || 'none';
+      if (body.fee_mode === 'rate') {
+        const rate = String(form.elements.fee_rate?.value || '').trim();
+        if (rate) {
+          body.fee_rate = rate;
+        } else {
+          body.fee_mode = 'none';
+          delete body.fee_rate;
+        }
+        delete body.fee_amount;
+      } else if (body.fee_mode === 'fixed') {
+        const feeAmt = String(form.elements.fee_amount?.value || '').trim();
+        if (feeAmt) {
+          body.fee_amount = feeAmt;
+        } else {
+          body.fee_mode = 'none';
+          delete body.fee_amount;
+        }
+        delete body.fee_rate;
+      } else {
+        delete body.fee_rate;
+        delete body.fee_amount;
+      }
       body.status = state.entryKind === 'income' || (state.entryKind === 'public' && status !== 'draft') ? 'posted' : status;
       const entry = await api(state.editing ? `/entries/${state.editing}` : '/entries', state.editing ? 'PUT' : 'POST', body, {'Idempotency-Key': state.entryKey});
       if (file) {
@@ -2483,7 +2691,7 @@ async function saveEntry(status, button) {
         }
       }
       $('#entry-dialog').close();
-      const actionLabel = state.editing ? '保存修改' : state.entryKind === 'income' ? (state.entryIncomeType === 'capital' ? '登记股东出资' : '登记营业收入') : status === 'draft' ? '保存草稿' : '记账';
+      const actionLabel = state.editing ? '保存修改' : state.entryKind === 'income' ? (state.entryIncomeType === 'capital' ? '登记公户转入' : '登记营业收入') : status === 'draft' ? '保存草稿' : '记账';
       toast(`已${actionLabel} · #${entry.id}`);
       await refresh();
     } catch (e) {
@@ -2540,6 +2748,7 @@ async function openDetail(id) {
             <span class="badge ${e.kind === 'income' && e.income_type === 'capital' ? 'info' : 'neutral'}">${entryType(e)}</span>
           </div>
           <h3 class="detail-amount ${e.kind === 'income' ? 'income' : ''}">${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency)}</h3>
+          ${(Number(e.fee_minor) > 0 || (e.fee_mode && e.fee_mode !== 'none')) ? `<div class="detail-fee-breakdown">原金额 ${money(e.gross_amount, e.currency)} ${e.kind === 'income' ? '−' : '+'} 手续费 ${money(e.fee_amount, e.currency)}${e.fee_mode === 'rate' && e.fee_rate ? `（${esc(e.fee_rate)}%）` : '（手动）'} = ${e.kind === 'income' ? '实收入账' : (e.expense_type === 'public' ? '公账实付' : '实付应报销')} ${money(e.amount, e.currency)}</div>` : ''}
           ${settlementDisplay(e)}
           <p class="detail-desc">${esc(entryDescription(e))}</p>
           ${paymentSummary(e)}
@@ -2548,7 +2757,8 @@ async function openDetail(id) {
         <section class="drawer-card">
           <h4>基本信息</h4>
           <dl class="detail-list">
-            <div><dt>${e.kind === 'income' && e.income_type === 'capital' ? '出资股东 / 经手人' : (e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员')}</dt><dd>${esc(e.payer_name)}</dd></div>
+            ${(Number(e.fee_minor) > 0 || (e.fee_mode && e.fee_mode !== 'none')) ? `<div><dt>原金额（手续费前）</dt><dd class="mono">${money(e.gross_amount, e.currency)}</dd></div><div><dt>手续费</dt><dd class="mono">${feeDetailTag(e)}</dd></div>` : ''}
+            <div><dt>${e.kind === 'income' && e.income_type === 'capital' ? '转入 / 经手成员' : (e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员')}</dt><dd>${esc(e.payer_name)}</dd></div>
             <div><dt>发生日期</dt><dd class="mono">${esc(e.date)}</dd></div>
             <div><dt>记录来源</dt><dd>${esc(sourceLabel(e.source))} · ${esc(e.creator_name)}</dd></div>
             <div><dt>凭证文件</dt><dd>${e.receipt ? receiptLink(e, e.receipt_name || '查看凭证') : '未附凭证'}</dd></div>
@@ -3143,6 +3353,13 @@ document.addEventListener('click', async event => {
     entryKindChanged();
     return;
   }
+  if (b.hasAttribute('data-fee-mode')) {
+    state.entryFeeMode = ['rate', 'fixed'].includes(b.dataset.feeMode) ? b.dataset.feeMode : 'none';
+    updateFeeUi();
+    if (state.entryFeeMode === 'rate') setTimeout(() => $('#entry-fee-rate')?.focus(), 20);
+    else if (state.entryFeeMode === 'fixed') setTimeout(() => $('#entry-fee-amount')?.focus(), 20);
+    return;
+  }
   if (b.hasAttribute('data-pb-as-of')) {
     const form = $('#public-balance-form');
     if (form) {
@@ -3495,6 +3712,9 @@ document.addEventListener('input', event => {
     }
     updateExportPreview();
   }
+  if (el.closest('#entry-form') && ['amount', 'fee_rate', 'fee_amount'].includes(el.name)) {
+    updateFeeUi();
+  }
   if (el.id === 'auth-team-name') {
     syncAuthExternalLink();
   }
@@ -3502,6 +3722,10 @@ document.addEventListener('input', event => {
 
 document.addEventListener('change', async event => {
   const el = event.target;
+  if (el.closest('#entry-form') && el.name === 'currency') {
+    updateFeeUi();
+    return;
+  }
   if (el.id === 'feishu-domain-preset') {
     const wrap = $('#feishu-domain-custom-wrap');
     if (wrap) wrap.hidden = el.value !== 'custom';

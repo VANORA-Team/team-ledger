@@ -26,7 +26,7 @@ DOMAIN_ALIASES = {
 }
 HELP = (
     '发送「绑定 绑定码」绑定账号。绑定后发送 /start 或「菜单」打开按钮菜单；'
-    '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「营业收入 100 CNY 客户回款」「股东出资 5000 CNY 增资」'
+    '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「营业收入 100 CNY 客户回款」「公户转入 5000 CNY 增资」'
     '或「最近账目」「公户结余」「余额」「待报销」「导出Excel」。配置 AI 后支持自然语言多笔记账与查询，确认后才会入账。'
     '群聊中 @机器人发送 /groupid 获取群 ID 并加入 Web 允许名单即可使用。'
 )
@@ -194,18 +194,33 @@ def enqueue(conn, chat_id, open_id, text):
 
 
 def _raw_input(text, conf):
-    match = re.fullmatch(r'(公账支出|成员垫付|支出|营业收入|股东出资转入|股东出资|收入)\s+(\d+(?:\.\d+)?)\s+([A-Za-z]{3})(?:\s+(.{1,200}))?', text)
+    match = re.fullmatch(r'(公账支出|成员垫付|支出|营业收入|公户转入|股东出资转入|股东出资|收入)\s+(\d+(?:\.\d+)?)\s+([A-Za-z]{3})(?:\s+(.{1,200}))?', text)
     if match:
         tag = match[1]
-        is_income = tag in ('营业收入', '股东出资转入', '股东出资', '收入')
-        income_type = ('capital' if tag in ('股东出资转入', '股东出资') else 'operating') if is_income else ''
+        is_income = tag in ('营业收入', '公户转入', '股东出资转入', '股东出资', '收入')
+        income_type = ('capital' if tag in ('公户转入', '股东出资转入', '股东出资') else 'operating') if is_income else ''
         expense_type = '' if is_income else ('public' if tag == '公账支出' else 'advance')
-        return {'reply': '', 'questions': [], 'actions': [{'type': 'create_entry',
-                'kind': 'income' if is_income else 'expense',
-                'expense_type': expense_type,
-                'income_type': income_type,
-                'amount': match[2], 'currency': match[3].upper(),
-                'description': match[4] or '', 'date': config.today()}]}
+        desc = (match[4] or '').strip()
+        action = {
+            'type': 'create_entry',
+            'kind': 'income' if is_income else 'expense',
+            'expense_type': expense_type,
+            'income_type': income_type,
+            'amount': match[2],
+            'currency': match[3].upper(),
+            'description': desc,
+            'date': config.today(),
+        }
+        fee_match = re.search(r'(?:^|\s)手续费\s*[:：]?\s*(\d+(?:\.\d+)?)(%|％)?\s*$', desc)
+        if fee_match:
+            action['description'] = desc[:fee_match.start()].strip()
+            if fee_match[2]:
+                action['fee_mode'] = 'rate'
+                action['fee_rate'] = fee_match[1]
+            else:
+                action['fee_mode'] = 'fixed'
+                action['fee_amount'] = fee_match[1]
+        return {'reply': '', 'questions': [], 'actions': [action]}
     queries = {'最近账目': 'list_entries', '余额': 'balance', '公户结余': 'balance', '待报销': 'due'}
     if text in queries:
         return {'reply': '', 'questions': [], 'actions': [{'type': 'query', 'query': queries[text]}]}
@@ -354,7 +369,7 @@ def process_one():
                 conn.execute('DELETE FROM feishu_link_codes WHERE user_id=?', (row['user_id'],))
                 reply = (
                     '绑定成功。发送 /start 或「菜单」打开按钮菜单；'
-                    '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「营业收入 100 CNY 回款」「股东出资 5000 CNY 注资」或自然语言记账。'
+                    '也可直接发送「公账支出 35 CNY 打车」「成员垫付 35 CNY 打车」「营业收入 100 CNY 回款」「公户转入 5000 CNY 注资」或自然语言记账。'
                 )
             else:
                 reply = '绑定码无效或已过期，请在 Web「机器人与 AI」重新生成。'

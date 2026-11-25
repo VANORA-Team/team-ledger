@@ -45,14 +45,17 @@ def show(conn, user, chat_id, token, payload, rates, page=0):
         lines += ['⚗️ 模拟进账：' + amount_text(scenario['amount'], scenario['currency'], conf) + ' ≈ ' + fmt(result['extra']),
                   '以下含模拟收入，仅作试算；尚未入账。', '原账本可用资金：' + fmt(Decimal(result['cash']) - Decimal(result['extra']))]
     for key, label in [('cash', '当前可用资金（公户结余）' if not payload.get('scenario') else '模拟后可用资金（公户结余）'),
-                       ('operating_income', '累计营业收入'), ('capital_income', '累计股东出资转入'),
+                       ('operating_income', '累计营业收入'), ('capital_income', '累计公户转入（不计利润）'),
                        ('public_paid', '累计公账支出'), ('paid', '累计已报销付款'),
                        ('due', '全部待报销'), ('net_after_due', '扣全额待报销后公户结余'),
-                       ('operating_net', '经营净额（不含股东出资）'),
+                       ('operating_net', '经营利润（实付，不含公户转入）'),
+                       ('operating_net_after_due', '经营净利润（含待报，不含公户转入）'),
                        ('reserve', '本次安排报销'), ('payable', '当前可安排付款'),
                        ('remaining', '本次安排后结余'), ('unplanned', '本次安排后仍待报销'),
                        ('shortage', '还需补充的资金')]:
         lines.append(label + '：' + fmt(result[key]))
+    if Decimal(result.get('total_fees', '0')) > 0:
+        lines.append(f'累计手续费：{fmt(result["total_fees"])}（收入扣费 {fmt(result["income_fees"])} · 公账 {fmt(result["public_fees"])} · 垫付 {fmt(result["advance_fees"])}）')
     accounts = result.get('currency_accounts') or []
     if len(accounts) > 1:
         lines.append('各币种公户结余：' + ' / '.join(amount_text(a['balance'], a['code'], conf) for a in accounts[:6]))
@@ -68,7 +71,7 @@ def show(conn, user, chat_id, token, payload, rates, page=0):
     if not projects:
         lines.append('暂无可安排的付款项目。')
     dates = sorted({r['date'] for r in result['fx']['rates'].values() if r.get('date')})
-    lines.append('\n公户结余 = 营业收入 + 股东出资转入 − 公账支出 − 已报销；成员垫付仅在实际报销后扣减公户结余。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
+    lines.append('\n公户结余 = 营业收入 + 公户转入 − 公账支出 − 已报销；公户转入不计入经营利润，成员垫付仅在实际报销后扣减公户结余。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
     if result['fx'].get('warning'):
         lines.append(result['fx']['warning'])
     rows += paging(token, 'view', page, total)

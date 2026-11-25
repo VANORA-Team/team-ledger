@@ -10,7 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
 from . import ai_plan, config, excel_export
 from .db import settings
-from .domain import (add_entry, admin, can_manage_entry, currency, delete_entry, edit_entry, entry_view, fail,
+from .domain import (add_entry, admin, can_manage_entry, compute_fee, currency, delete_entry, edit_entry, entry_view, fail,
                      is_finance, minor_amount, normalized_entry, require_entry_access, text_value,
                      transition, make_payment_quote, payment_preview)
 
@@ -19,7 +19,7 @@ PLATFORM = ContextVar('bot_platform', default='telegram')
 PAGE_SIZE = 5
 STATUS = {'pending': '待报销', 'reimbursed': '已报销', 'draft': '草稿', 'posted': '已入账', 'voided': '已作废'}
 COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'), ('expense', '记录公账支出'), ('income', '记录营业收入'),
-            ('capital', '记录股东出资转入'), ('ai', '自然语言记账'), ('recent', '最近账目与详情'), ('summary', '我的待报销明细'),
+            ('capital', '记录公户转入（不计入利润）'), ('ai', '自然语言记账'), ('recent', '最近账目与详情'), ('summary', '我的待报销明细'),
             ('team', '团队待报销明细'), ('funds', '公户结余、资金计算与一键报销'), ('today', '今日收支'),
             ('month', '本月收支'), ('export', '导出 Excel 账本报表'), ('cancel', '取消当前填写'), ('help', '使用帮助')]
 
@@ -88,7 +88,7 @@ def entry_description(entry):
 
 def entry_type_label(entry):
     if entry.get('kind') == 'income':
-        return '股东出资转入' if entry.get('income_type') == 'capital' else '营业收入'
+        return '公户转入' if entry.get('income_type') == 'capital' else '营业收入'
     return '公账支出' if entry.get('expense_type') == 'public' else '成员垫付'
 
 
@@ -118,7 +118,7 @@ def menu(conn, user, chat_id):
             [button('📊 资金与付款项目', 'funds'), button('📅 今日收支', 'period:today')],
             bottom_row]
     if is_finance(user):
-        rows.insert(0, [button('🏦 公账支出', 'newpublic'), button('💰 营业收入', 'newincome'), button('🏛️ 股东出资', 'newcapital')])
+        rows.insert(0, [button('🏦 公账支出', 'newpublic'), button('💰 营业收入', 'newincome'), button('🏛️ 公户转入', 'newcapital')])
     draft = conn.execute("SELECT token FROM tg_drafts WHERE user_id=? AND chat_id=? AND expires>? AND step<>'funds_receipt'",
                          (user['id'], chat_id, int(time.time()))).fetchone()
     if draft:
@@ -135,10 +135,10 @@ def help_menu(conn, chat_id):
                   if PLATFORM.get() == 'feishu' else
                   '群聊：请回复机器人弹出的输入提示，普通聊天不会触发记账。成员草稿互相独立。\n')
     say(conn, chat_id, '📖 使用帮助\n\n'
-        '记账：点公账支出 / 成员垫付 / 营业收入 / 股东出资，选币种、输入金额即可预览；用途、备注选填。收入预览支持一键切换营业收入或股东出资转入，编辑用途或备注时发送 - 清空。\n'
+        '记账：点公账支出 / 成员垫付 / 营业收入 / 公户转入，选币种、输入金额即可预览；用途、备注选填。收入预览支持一键切换营业收入或公户转入（不计利润），编辑用途或备注时发送 - 清空。\n'
         '🤖 AI：私聊直接说「昨天打车花了35元」，群里使用 /ai 记账内容；也可以一次说一段话，核对清单后才入账。\n'
         '查账：最近账目、个人与团队待报销均可翻页，点项目查看详情。\n'
-        '账本所有者和财务管理员可登记公账支出、营业收入、股东出资与报销，并使用 /export 导出含收据的 Excel（.xlsx）报表（支持按月、待报销或自定义日期范围）。/funds 可查看公户结余、模拟进账与具体报销项目。\n'
+        '账本所有者和财务管理员可登记公账支出、营业收入、公户转入与报销，并使用 /export 导出含收据的 Excel（.xlsx）报表（支持按月、待报销或自定义日期范围）。/funds 可查看公户结余、经营利润、模拟进账与具体报销项目。\n'
         '一键报销：选择记账 / 结算货币，核对全部项目后确认已转账。模拟收入不会自动入账，也不会用于实际付款。\n'
         + group_help +
         '取消：/cancel；返回菜单：/start。凭证文件请到 Web 上传。', [nav()], edit=True)
@@ -254,24 +254,51 @@ def show_currencies(conn, chat_id, token, conf):
     say(conn, chat_id, '选择币种，输入金额后即可预览；用途、备注选填。', [buttons[i:i+2] for i in range(0, len(buttons), 2)] + [[button('取消', f'd:{token}:cancel')]], edit=True)
 
 
+def fee_label(entry, conf):
+    mode = entry.get('fee_mode') or 'none'
+    fee_minor = entry.get('fee_minor') or 0
+    if mode == 'none' and not fee_minor:
+        return ''
+    fee_txt = amount_text(Decimal(fee_minor) / (10 ** entry['decimals']), entry['currency'], conf)
+    if mode == 'rate' and entry.get('fee_rate'):
+        return f'按比例 {entry["fee_rate"]}%（{fee_txt}）'
+    return f'手动 {fee_txt}'
+
+
 def preview(conn, user, chat_id, token, data, rates=None):
     conf = settings(conn)
     payer = conn.execute('SELECT name FROM users WHERE id=?', (data.get('payer_id'),)).fetchone()
-    kind = ('股东出资转入 · 计入公户' if data.get('income_type') == 'capital' else '营业收入 · 计入公户') if data['kind'] == 'income' else '公账支出 · 直接扣款' if data.get('expense_type') == 'public' else '成员垫付 · 待报销'
-    member_label = '出资股东' if (data['kind'] == 'income' and data.get('income_type') == 'capital') else '成员'
-    lines = [f'🧾 确认{kind}', f'用途：{entry_description(data)}', f'金额：{amount_text(data["amount"],data["currency"],conf)}']
-    converted = reference(data['amount'], data['currency'], conf, rates)
+    kind = ('公户转入 · 计入公户/不计利润' if data.get('income_type') == 'capital' else '营业收入 · 计入公户与利润') if data['kind'] == 'income' else '公账支出 · 直接扣款' if data.get('expense_type') == 'public' else '成员垫付 · 待报销'
+    member_label = '转入成员' if (data['kind'] == 'income' and data.get('income_type') == 'capital') else '成员'
+    cur = currency(conf, data['currency'])
+    gross_minor = minor_amount(data['amount'], cur['decimals'])
+    fee_mode, fee_rate, fee_minor, effective_minor = compute_fee(data['kind'], gross_minor, cur['decimals'], data)
+    effective_dec = Decimal(effective_minor) / (10 ** cur['decimals'])
+    effective_str = format(effective_dec, f'.{cur["decimals"]}f')
+    lines = [f'🧾 确认{kind}', f'用途：{entry_description(data)}']
+    if fee_mode != 'none' or fee_minor > 0:
+        fee_txt = amount_text(Decimal(fee_minor) / (10 ** cur['decimals']), data['currency'], conf)
+        mode_txt = f'按比例 {fee_rate}%（{fee_txt}）' if fee_mode == 'rate' else f'手动 {fee_txt}'
+        eff_label = '实收金额' if data['kind'] == 'income' else '实付总额'
+        lines += [
+            f'原金额：{amount_text(data["amount"], data["currency"], conf)}',
+            f'手续费：{mode_txt}',
+            f'{eff_label}：{amount_text(effective_str, data["currency"], conf)}',
+        ]
+    else:
+        lines.append(f'金额：{amount_text(data["amount"], data["currency"], conf)}')
+    converted = reference(effective_str, data['currency'], conf, rates)
     if converted:
         lines.append(converted)
     lines += [f'日期：{data["date"]}', f'{member_label}：{payer["name"] if payer else "当前成员"}', f'备注：{data.get("note") or "未填写"}', '\n核对后确认才入账。']
     rows = [
         [button('✅ 保存修改' if data.get('_edit_id') else '✅ 确认入账', f'd:{token}:save')],
-        [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('用途', f'd:{token}:edit:description')],
-        [button('日期', f'd:{token}:edit:date'), button('备注', f'd:{token}:edit:note')]
+        [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('手续费', f'd:{token}:edit:fee')],
+        [button('用途', f'd:{token}:edit:description'), button('日期', f'd:{token}:edit:date'), button('备注', f'd:{token}:edit:note')]
         + ([button('成员', f'd:{token}:edit:payer')] if is_finance(user) else []),
     ]
     if data['kind'] == 'income':
-        rows.append([button('切换为营业收入' if data.get('income_type') == 'capital' else '切换为股东出资转入', f'd:{token}:inctype')])
+        rows.append([button('切换为营业收入' if data.get('income_type') == 'capital' else '切换为公户转入', f'd:{token}:inctype')])
     rows.append([button('取消', f'd:{token}:cancel'), button('主菜单', 'home')])
     say(conn, chat_id, '\n'.join(lines), rows, edit=True)
 
@@ -329,6 +356,8 @@ def list_entries(conn, user, chat_id, scope='recent', page=0, rates=None):
 def detail(conn, user, chat_id, entry_id, rates=None):
     conf, entry = settings(conn), entry_view(conn, entry_id)
     lines = [f'🧾 #{entry_id} · {entry_status(entry)} · {entry_type_label(entry)}', entry_description(entry), original(entry, conf)]
+    if entry.get('fee_minor') or (entry.get('fee_mode') and entry.get('fee_mode') != 'none'):
+        lines.append(f'原金额：{amount_text(entry["gross_amount"], entry["currency"], conf)} · 手续费：{fee_label(entry, conf)}')
     converted = reference(entry['amount'], entry['currency'], conf, rates)
     if converted:
         lines.append(converted)
@@ -337,7 +366,7 @@ def detail(conn, user, chat_id, entry_id, rates=None):
         remaining_reference = reference(entry['remaining_amount'], entry['currency'], conf, rates)
         if remaining_reference:
             lines.append('剩余待报 ' + remaining_reference)
-    member_label = '出资股东' if (entry['kind'] == 'income' and entry.get('income_type') == 'capital') else '成员'
+    member_label = '转入成员' if (entry['kind'] == 'income' and entry.get('income_type') == 'capital') else '成员'
     lines += [f'{member_label}：{entry["payer_name"]}', f'日期：{entry["date"]}', f'备注：{entry["note"] or "未填写"}',
               f'凭证：{"已上传，Web 可查看" if entry["receipt"] else "未上传"}']
     if entry['review_note']:
@@ -377,7 +406,7 @@ def period_summary(conn, chat_id, period):
     lines = [f'📅 {"今日" if period == "today" else "本月"}收支 · {start} 至 {today}', '按发生日期统计，原币种分别列示。']
     for kind, expense_type, income_type, label in [
         ('income', '', 'operating', '营业收入'),
-        ('income', '', 'capital', '股东出资转入'),
+        ('income', '', 'capital', '公户转入（不计利润）'),
         ('expense', 'public', '', '公账支出'),
         ('expense', 'advance', '', '成员垫付'),
     ]:
@@ -430,6 +459,11 @@ def show_field(conn, chat_id, draft, field):
         persist(conn, token, data, 'edit_date')
         say(conn, chat_id, '选择日期：', [[button('今天', f'd:{token}:day:0'), button('昨天', f'd:{token}:day:1')],
             [button('自定义日期', f'd:{token}:dateinput'), button('返回预览', f'd:{token}:back')]], edit=True)
+    elif field == 'fee':
+        persist(conn, token, data, 'edit_fee')
+        say(conn, chat_id, '选择手续费方式（默认 0）：\n支持填写任意比例（%），或手动填写固定手续费金额。',
+            [[button('按比例（%）', f'd:{token}:fee:rate'), button('手动金额', f'd:{token}:fee:fixed')],
+             [button('无手续费（0）', f'd:{token}:fee:none'), button('返回预览', f'd:{token}:back')]], edit=True)
     elif field in ('amount', 'description', 'note'):
         hints = {'amount': f'请输入金额（{data["currency"]}）。', 'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'note': '请输入备注，发送 - 清空。'}
         ask(conn, chat_id, draft, 'edit_' + field, hints[field])
@@ -459,6 +493,22 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
         payload['income_type'] = 'operating' if payload.get('income_type') == 'capital' else 'capital'
         persist(conn, token, payload, 'confirm')
         preview(conn, user, chat_id, token, payload, rates)
+    elif action == 'fee' and len(parts) == 4 and step == 'edit_fee':
+        mode = parts[3]
+        if mode == 'none':
+            payload['fee_mode'] = 'none'
+            payload.pop('fee_rate', None)
+            payload.pop('fee_amount', None)
+            persist(conn, token, payload, 'confirm')
+            preview(conn, user, chat_id, token, payload, rates)
+        elif mode == 'rate':
+            ask(conn, chat_id, draft, 'edit_fee_rate',
+                '请输入手续费比例（%），例如 0.6 或 2.9（默认 0，输入 0 或 - 清零）。')
+        elif mode == 'fixed':
+            ask(conn, chat_id, draft, 'edit_fee_amount',
+                f'请输入手动手续费金额（{payload["currency"]}，默认 0，输入 0 或 - 清零）。')
+        else:
+            fail('手续费选项无效')
     elif action == 'resume':
         if payload.get('_flow') == 'funds':
             from . import bot_funds
@@ -476,10 +526,12 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
             show_payment_currencies(conn, chat_id, token, payload)
         elif step in ('currency', 'edit_currency'):
             show_currencies(conn, chat_id, token, conf)
-        elif step in ('edit_date', 'edit_payer'):
+        elif step in ('edit_date', 'edit_payer', 'edit_fee'):
             show_field(conn, chat_id, draft, step[5:])
         else:
             hints = {'amount': '请输入金额。', 'edit_amount': '请输入金额。',
+                     'edit_fee_rate': '请输入手续费比例（%），例如 0.6 或 2.9（默认 0，输入 0 或 - 清零）。',
+                     'edit_fee_amount': f'请输入手动手续费金额（{payload.get("currency","")}，默认 0，输入 0 或 - 清零）。',
                      'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'edit_description': '用途 / 收入说明选填，发送 - 跳过 / 清空。',
                      'edit_note': '请输入备注，发送 - 清空。', 'pay_note': '请输入付款方式 / 付款参考号。',
                      'pay_amount': f'请输入本次实际已报销金额（{payload.get("_quote",{}).get("currency","")}），发送 全额 报销剩余全部。',
@@ -500,8 +552,14 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
         persist(conn, token, payload, 'confirm')
         preview(conn, user, chat_id, token, payload, rates)
     elif action == 'cur' and len(parts) == 4 and step in ('currency', 'edit_currency'):
-        currency(conf, parts[3])
+        cur_obj = currency(conf, parts[3])
         payload['currency'] = parts[3]
+        if payload.get('fee_mode') == 'fixed' and payload.get('fee_amount'):
+            try:
+                minor_amount(payload['fee_amount'], cur_obj['decimals'], allow_zero=True)
+            except HTTPException:
+                payload['fee_mode'] = 'none'
+                payload.pop('fee_amount', None)
         next_step = 'edit_amount' if step == 'edit_currency' else 'amount'
         persist(conn, token, payload, next_step)
         ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), next_step,
@@ -719,7 +777,13 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
                 fail('仅已入账的收入可以修改')
         elif entry['status'] not in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')) or entry['reimbursed_minor']:
             fail('只可修改没有报销记录的支出')
-        body = {k: entry[k] for k in ('kind', 'expense_type', 'income_type', 'amount', 'currency', 'description', 'date', 'note', 'payer_id', 'status')}
+        body = {k: entry[k] for k in ('kind', 'expense_type', 'income_type', 'currency', 'description', 'date', 'note', 'payer_id', 'status')}
+        body['amount'] = entry['gross_amount']
+        body['fee_mode'] = entry.get('fee_mode') or 'none'
+        if body['fee_mode'] == 'rate':
+            body['fee_rate'] = entry.get('fee_rate') or ''
+        elif body['fee_mode'] == 'fixed':
+            body['fee_amount'] = entry.get('fee_amount') or ''
         body.update(_edit_id=entry['id'], _snapshot=entry_snapshot(conn, entry['id']))
         token, body = new_draft(conn, user, telegram_id, chat_id, body)
         preview(conn, user, chat_id, token, body, rates)
@@ -795,10 +859,30 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
             persist(conn, draft['token'], payload, 'action_confirm')
             action_preview(conn, chat_id, draft['token'], payload)
             return
-        elif step in ('amount', 'description', 'edit_amount', 'edit_description', 'edit_note', 'edit_date'):
+        elif step in ('amount', 'description', 'edit_amount', 'edit_description', 'edit_note', 'edit_date', 'edit_fee_rate', 'edit_fee_amount'):
             if step in ('amount', 'edit_amount'):
                 minor_amount(text, currency(conf, payload['currency'])['decimals'])
                 payload['amount'] = text
+            elif step == 'edit_fee_rate':
+                cleaned_rate = text.strip().rstrip('%％').strip()
+                if cleaned_rate in ('', '-'):
+                    payload['fee_mode'] = 'none'
+                    payload.pop('fee_rate', None)
+                    payload.pop('fee_amount', None)
+                else:
+                    payload['fee_mode'] = 'rate'
+                    payload['fee_rate'] = cleaned_rate
+                    payload.pop('fee_amount', None)
+            elif step == 'edit_fee_amount':
+                cleaned_fee = text.strip()
+                if cleaned_fee in ('', '-'):
+                    payload['fee_mode'] = 'none'
+                    payload.pop('fee_rate', None)
+                    payload.pop('fee_amount', None)
+                else:
+                    payload['fee_mode'] = 'fixed'
+                    payload['fee_amount'] = cleaned_fee
+                    payload.pop('fee_rate', None)
             elif step in ('description', 'edit_description'):
                 payload['description'] = '' if text == '-' else text_value(text, '用途', 120, False)
             elif step == 'edit_note':
@@ -809,7 +893,16 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
                 except ValueError:
                     fail('日期请使用 YYYY-MM-DD 格式。')
             payload.setdefault('description', '')
-            normalized_entry(conn, user, payload)
+            norm = normalized_entry(conn, user, payload)
+            payload['fee_mode'] = norm['fee_mode']
+            if norm['fee_mode'] == 'rate':
+                payload['fee_rate'] = norm['fee_rate']
+                payload.pop('fee_amount', None)
+            elif norm['fee_mode'] == 'fixed':
+                payload.pop('fee_rate', None)
+            else:
+                payload.pop('fee_rate', None)
+                payload.pop('fee_amount', None)
             persist(conn, draft['token'], payload, 'confirm')
             preview(conn, user, chat_id, draft['token'], payload, rates)
             return
@@ -871,8 +964,10 @@ def ai_query_line(card, conf):
                  f' · 公账支出 {amount_text(card["public_paid"], card["base"], conf)}']
         if card.get('operating_income') is not None and card.get('capital_income') is not None:
             lines.append(f'📥 营业收入 {amount_text(card["operating_income"], card["base"], conf)}'
-                         f' · 股东出资 {amount_text(card["capital_income"], card["base"], conf)}'
+                         f' · 公户转入 {amount_text(card["capital_income"], card["base"], conf)}'
                          f' · 扣全额待报后 {amount_text(card.get("net_after_due", card["remaining"]), card["base"], conf)}')
+        if card.get('operating_net_after_due') is not None:
+            lines.append(f'📈 经营净利润（不含公户转入）{amount_text(card["operating_net_after_due"], card["base"], conf)}')
         accounts = card.get('currency_accounts') or []
         if len(accounts) > 1:
             lines.append('💱 各币种结余：' + ' / '.join(amount_text(a['balance'], a['code'], conf) for a in accounts[:6]))

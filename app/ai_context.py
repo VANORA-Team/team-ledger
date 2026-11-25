@@ -27,6 +27,15 @@ def _compact(row):
         'description': row['description'][:120], 'payer': row['payer_name'],
         'status': row['status'],
     }
+    fee_mode = row['fee_mode'] or 'none'
+    fee_minor = row['fee_minor'] or 0
+    if fee_mode != 'none' or fee_minor > 0:
+        gross_minor = row['gross_amount_minor'] or row['amount_minor']
+        item['gross_amount'] = _amount(row, gross_minor)
+        item['fee_mode'] = fee_mode
+        if row['fee_rate']:
+            item['fee_rate'] = row['fee_rate']
+        item['fee_amount'] = _amount(row, fee_minor)
     if row['kind'] == 'expense' and row['expense_type'] == 'advance':
         item['remaining'] = _amount(row, row['amount_minor'] - row['reimbursed_minor'])
         if row['reimbursed_minor']:
@@ -37,7 +46,8 @@ def _compact(row):
 
 
 def _rows(conn, where='', params=(), limit=None):
-    sql = ('SELECT e.id,e.kind,e.expense_type,e.income_type,e.amount_minor,e.currency,e.decimals,e.description,e.date,'
+    sql = ('SELECT e.id,e.kind,e.expense_type,e.income_type,e.amount_minor,e.gross_amount_minor,'
+           'e.fee_mode,e.fee_rate,e.fee_minor,e.currency,e.decimals,e.description,e.date,'
            'e.status,e.reimbursed_minor,e.note,u.name payer_name '
            'FROM entries e JOIN users u ON u.id=e.payer_id ' + where +
            ' ORDER BY e.date DESC,e.id DESC')
@@ -80,7 +90,9 @@ def funds(conf):
         return {'complete': False, 'base': report.get('base'),
                 'warning': report.get('fx', {}).get('warning') or '汇率不完整'}
     keys = ('base', 'income', 'operating_income', 'capital_income', 'paid', 'public_paid',
-            'total_outflow', 'public_balance', 'cash', 'due', 'net_after_due', 'operating_net',
+            'total_outflow', 'income_fees', 'public_fees', 'advance_fees', 'total_fees',
+            'public_balance', 'cash', 'due', 'net_after_due', 'operating_net',
+            'operating_net_after_due', 'operating_profit', 'operating_profit_after_due',
             'reserve', 'payable', 'remaining', 'shortage', 'balances')
     return {key: report.get(key) for key in keys}
 
