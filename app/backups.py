@@ -44,6 +44,7 @@ OPTIONAL_TABLES = {'ai_config', 'oidc_flows', 'oidc_revoked_jti'}
 OPTIONAL_COLUMNS = {
     'users': {'oidc_issuer', 'oidc_sub', 'oidc_email'},
     'sessions': {'oidc_sid'},
+    'entries': {'income_type', 'gross_amount_minor', 'fee_mode', 'fee_rate', 'fee_minor', 'fx_rate', 'fx_currency'},
 }
 
 

@@ -36,6 +36,9 @@ def _compact(row):
         if row['fee_rate']:
             item['fee_rate'] = row['fee_rate']
         item['fee_amount'] = _amount(row, fee_minor)
+    if row['fx_rate'] and row['fx_currency']:
+        item['fx_rate'] = row['fx_rate']
+        item['fx_currency'] = row['fx_currency']
     if row['kind'] == 'expense' and row['expense_type'] == 'advance':
         item['remaining'] = _amount(row, row['amount_minor'] - row['reimbursed_minor'])
         if row['reimbursed_minor']:
@@ -47,7 +50,7 @@ def _compact(row):
 
 def _rows(conn, where='', params=(), limit=None):
     sql = ('SELECT e.id,e.kind,e.expense_type,e.income_type,e.amount_minor,e.gross_amount_minor,'
-           'e.fee_mode,e.fee_rate,e.fee_minor,e.currency,e.decimals,e.description,e.date,'
+           'e.fee_mode,e.fee_rate,e.fee_minor,e.currency,e.decimals,e.fx_rate,e.fx_currency,e.description,e.date,'
            'e.status,e.reimbursed_minor,e.note,u.name payer_name '
            'FROM entries e JOIN users u ON u.id=e.payer_id ' + where +
            ' ORDER BY e.date DESC,e.id DESC')

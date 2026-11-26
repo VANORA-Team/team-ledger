@@ -84,10 +84,59 @@ def minor_amount(value, decimals, *, allow_zero=False, label='金额'):
 
 INCOME_TYPES = ('operating', 'capital')
 FEE_MODES = ('none', 'rate', 'fixed')
+FX_MODES = ('auto', 'manual')
 
 
 def income_type_label(income_type):
     return '公户转入' if income_type == 'capital' else '营业收入'
+
+
+def parse_fx_rate(value):
+    if isinstance(value, bool) or value is None:
+        fail('外币汇率格式不正确')
+    raw = str(value).strip()
+    if not re.fullmatch(r'\d{1,12}(?:\.\d{1,8})?', raw):
+        fail('外币汇率需为正数，最多保留 8 位小数，不支持千分位或科学计数法')
+    try:
+        rate = Decimal(raw)
+    except InvalidOperation:
+        fail('外币汇率格式不正确')
+    if not rate.is_finite() or rate <= 0 or rate > Decimal('1000000000'):
+        fail('外币汇率需大于 0 且不超过 1,000,000,000')
+    text = format(rate, 'f')
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return rate, text
+
+
+def compute_fx(cur_code, conf, body):
+    raw_mode = body.get('fx_mode', None)
+    raw_rate = body.get('fx_rate', None)
+    raw_target = body.get('fx_currency', None)
+    has_rate = raw_rate is not None and str(raw_rate).strip() != ''
+
+    if raw_mode is not None and raw_mode != '':
+        if not isinstance(raw_mode, str) or raw_mode not in FX_MODES:
+            fail('汇率方式请选择自动参考汇率或手动指定')
+        if raw_mode == 'auto':
+            return '', ''
+        if not has_rate:
+            fail('请填写外币汇率，或切换为自动参考汇率')
+    elif not has_rate:
+        return '', ''
+
+    if raw_target not in (None, ''):
+        if not isinstance(raw_target, str):
+            fail('汇率目标币种格式不正确')
+        target_code = currency(conf, raw_target.strip().upper())['code']
+    else:
+        target_code = conf['reference_currency']
+
+    if target_code == cur_code:
+        fail('记账币种与参考币种一致，无需手动指定外币汇率')
+
+    _, rate_str = parse_fx_rate(raw_rate)
+    return rate_str, target_code
 
 
 def parse_fee_rate(value):
@@ -187,6 +236,7 @@ def normalized_entry(conn, user, body):
     gross_raw = body['gross_amount'] if body.get('gross_amount') not in (None, '') else body.get('amount', '')
     gross_minor = minor_amount(gross_raw, cur['decimals'])
     fee_mode, fee_rate, fee_minor, amount = compute_fee(kind, gross_minor, cur['decimals'], body)
+    fx_rate, fx_currency = compute_fx(cur['code'], conf, body)
     description = text_value(body.get('description', ''), '用途 / 收入说明', 120, False)
     try:
         entry_date = date.fromisoformat(body.get('date', ''))
@@ -214,6 +264,7 @@ def normalized_entry(conn, user, body):
             'amount_minor': amount, 'gross_amount_minor': gross_minor,
             'fee_mode': fee_mode, 'fee_rate': fee_rate, 'fee_minor': fee_minor,
             'currency': cur['code'], 'decimals': cur['decimals'],
+            'fx_rate': fx_rate, 'fx_currency': fx_currency,
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
 
@@ -233,6 +284,20 @@ def entry_view(conn, entry_id):
     result['fee_rate'] = row['fee_rate'] or ''
     result['fee_minor'] = fee_minor
     result['fee_amount'] = amount(fee_minor)
+    result['fx_rate'] = row['fx_rate'] or ''
+    result['fx_currency'] = row['fx_currency'] or ''
+    result['fx_mode'] = 'manual' if (result['fx_rate'] and result['fx_currency']) else 'auto'
+    if result['fx_mode'] == 'manual':
+        conf = settings(conn)
+        target_dec = next((c['decimals'] for c in conf['currencies'] if c['code'] == result['fx_currency']), 2)
+        fx_val = (Decimal(row['amount_minor']) / (10 ** row['decimals']) * Decimal(result['fx_rate'])).quantize(
+            Decimal(1).scaleb(-target_dec), rounding=ROUND_HALF_UP
+        )
+        result['fx_amount'] = format(fx_val, f'.{target_dec}f')
+    else:
+        result['fx_rate'] = ''
+        result['fx_currency'] = ''
+        result['fx_amount'] = ''
     result['amount'] = amount(row['amount_minor'])
     result['reimbursed_amount'] = amount(row['reimbursed_minor'])
     result['remaining_minor'] = row['amount_minor'] - row['reimbursed_minor'] if row['kind'] == 'expense' and row['expense_type'] == 'advance' else 0
@@ -284,12 +349,15 @@ def make_payment_quote(conn, user, entry_id, code, fx=None):
     if code not in (entry['currency'], conf['reference_currency']):
         fail('请选择记账货币或团队结算货币')
     cur = currency(conf, code)
-    rate, rate_date = Decimal(1), None
+    rate, rate_date, rate_source = Decimal(1), None, 'same'
     if code != entry['currency']:
-        row = (fx or {}).get('rates', {}).get(entry['currency'])
-        if not row or fx.get('base') != code or fx.get('stale') or fx.get('missing'):
-            fail('暂无有效汇率，不能按结算货币登记，请刷新汇率或选择记账货币')
-        rate, rate_date = Decimal(row['rate']), row['date']
+        if entry.get('fx_rate') and entry.get('fx_currency') == code:
+            rate, rate_date, rate_source = Decimal(entry['fx_rate']), None, 'manual'
+        else:
+            row = (fx or {}).get('rates', {}).get(entry['currency'])
+            if not row or fx.get('base') != code or fx.get('stale') or fx.get('missing'):
+                fail('暂无有效汇率，不能按结算货币登记，请刷新汇率或选择记账货币')
+            rate, rate_date, rate_source = Decimal(row['rate']), row['date'], 'reference'
     maximum = int((Decimal(entry['remaining_minor']) / (10 ** entry['decimals']) * rate * (10 ** cur['decimals'])).quantize(Decimal(1), rounding=ROUND_HALF_UP))
     if maximum <= 0:
         fail('剩余金额小于该币种最小单位，请按记账货币报销')
@@ -298,7 +366,8 @@ def make_payment_quote(conn, user, entry_id, code, fx=None):
     conn.execute('INSERT INTO payment_quotes VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                  (token, entry_id, user['id'], entry['version'], code, cur['decimals'], str(rate), rate_date, entry['remaining_minor'], maximum, expires))
     return {'id': token, 'entry_id': entry_id, 'version': entry['version'], 'currency': code, 'decimals': cur['decimals'],
-            'rate': str(rate), 'rate_date': rate_date, 'remaining_amount': entry['remaining_amount'], 'entry_currency': entry['currency'],
+            'rate': str(rate), 'rate_date': rate_date, 'rate_source': rate_source,
+            'remaining_amount': entry['remaining_amount'], 'entry_currency': entry['currency'],
             'maximum_amount': format(Decimal(maximum) / (10 ** cur['decimals']), f'.{cur["decimals"]}f'), 'expires': expires}
 
 
@@ -341,7 +410,8 @@ def record_payment(conn, user, entry_id, amount, note, payment_key, quote_id):
     allocation = format(Decimal(original_units) / (10 ** entry['decimals']), f'.{entry["decimals"]}f')
     detail = f'本次报销 {actual} {quote["currency"]}'
     if quote['currency'] != entry['currency']:
-        detail += f'，抵扣 {allocation} {entry["currency"]}（1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"]}）'
+        rate_tag = quote['rate_date'] or '手动汇率'
+        detail += f'，抵扣 {allocation} {entry["currency"]}（1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {rate_tag}）'
     audit(conn, entry_id, user['id'], 'pay', detail + ' · ' + note)
     return entry_view(conn, entry_id)
 
@@ -411,6 +481,30 @@ def edit_entry(conn, user, entry_id, body):
             merged['fee_rate'] = old['fee_rate']
         elif old['fee_mode'] == 'fixed':
             merged['fee_amount'] = old['fee_amount']
+    new_currency = merged.get('currency', old['currency'])
+    currency_changed = new_currency != old['currency']
+    has_fx_input = any(k in body for k in ('fx_mode', 'fx_rate', 'fx_currency'))
+    if not has_fx_input:
+        if not currency_changed and old['fx_rate'] and old['fx_currency']:
+            merged['fx_mode'] = 'manual'
+            merged['fx_rate'] = old['fx_rate']
+            merged['fx_currency'] = old['fx_currency']
+        else:
+            merged['fx_mode'] = 'auto'
+            merged['fx_rate'] = ''
+            merged['fx_currency'] = ''
+    else:
+        raw_fx_mode = body.get('fx_mode')
+        raw_fx_rate = body.get('fx_rate')
+        if raw_fx_mode == 'auto' and old.get('fx_mode') == 'auto' and raw_fx_rate not in (None, ''):
+            # Support callers doing PUT {**entry, 'fx_rate': '7.25'} without flipping fx_mode.
+            merged['fx_mode'] = 'manual'
+        elif (currency_changed and raw_fx_mode == old.get('fx_mode') and raw_fx_rate == old.get('fx_rate')
+              and body.get('fx_currency') == old.get('fx_currency')):
+            # Support callers doing PUT {**entry, 'currency': 'CNY'} without explicitly clearing old manual FX.
+            merged['fx_mode'] = 'auto'
+            merged['fx_rate'] = ''
+            merged['fx_currency'] = ''
     has_gross = body.get('gross_amount') not in (None, '')
     has_amount = body.get('amount') not in (None, '')
     if not has_gross and not has_amount:
@@ -467,7 +561,7 @@ def save_settings(conn, user, body):
         codes.add(code)
         clean.append({'code': code, 'decimals': decimals, 'name': text_value(cur.get('name', code), '币种名称', 20),
                       'symbol': text_value(cur.get('symbol', code), '货币符号', 8)})
-    for row in conn.execute('SELECT currency FROM entries UNION SELECT currency FROM payments'):
+    for row in conn.execute("SELECT currency FROM entries UNION SELECT currency FROM payments UNION SELECT fx_currency FROM entries WHERE fx_currency<>''"):
         if row['currency'] not in codes:
             fail(f'{row["currency"]} 已有账目，不能移除')
     default = body.get('default_currency', conf['default_currency'])

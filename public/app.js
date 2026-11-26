@@ -107,7 +107,7 @@ const state = {
   reimburseMode: 'queue',
   reimburseTab: 'pending',
   settingsTab: 'members',
-  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', entryFeeMode: 'none', editing: null, entryKey: null,
+  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', entryFeeMode: 'none', entryFxMode: 'auto', entryFxCurrency: '', editing: null, entryKey: null,
   action: null, base: null, loadId: 0,
   exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
@@ -384,17 +384,52 @@ function paymentSummary(e) {
 
 function paymentHistory(e) {
   if (!e.payments?.length) return '';
-  return `<section class="drawer-card"><h4>报销付款记录</h4><div class="timeline">${e.payments.map(p => `<div class="timeline-item"><strong>实际付款 ${money(p.amount, p.currency)}</strong> · 抵扣 ${money(p.entry_amount, e.currency)}${p.currency !== e.currency ? `<br>汇率 1 ${esc(e.currency)} = ${esc(p.fx_rate)} ${esc(p.currency)} · ${esc(p.fx_date)}` : ''}<br>${esc(p.name)} · ${esc(p.note)}<small>${esc(p.created_at.replace('T', ' ').slice(0, 19))}</small></div>`).join('')}</div></section>`;
+  return `<section class="drawer-card"><h4>报销付款记录</h4><div class="timeline">${e.payments.map(p => `<div class="timeline-item"><strong>实际付款 ${money(p.amount, p.currency)}</strong> · 抵扣 ${money(p.entry_amount, e.currency)}${p.currency !== e.currency ? `<br>汇率 1 ${esc(e.currency)} = ${esc(p.fx_rate)} ${esc(p.currency)} · ${esc(p.fx_date || '手动汇率')}` : ''}<br>${esc(p.name)} · ${esc(p.note)}<small>${esc(p.created_at.replace('T', ' ').slice(0, 19))}</small></div>`).join('')}</div></section>`;
+}
+
+function effectiveRate(entry, report = state.report, parentEntry = null) {
+  const base = report?.base;
+  if (!base || !entry?.currency) return null;
+  if (entry.currency === base) return {rate: 1, manual: false};
+  const manualSource = parentEntry
+    ? (entry.currency === parentEntry.currency && parentEntry.fx_rate && parentEntry.fx_currency ? parentEntry : null)
+    : (entry.fx_rate && entry.fx_currency ? entry : null);
+  if (manualSource) {
+    const mRate = Number(manualSource.fx_rate);
+    if (!Number.isFinite(mRate) || mRate <= 0) return null;
+    if (manualSource.fx_currency === base) {
+      return {rate: mRate, manual: true, fxRate: manualSource.fx_rate, fxCurrency: manualSource.fx_currency, triangulated: false};
+    }
+    const bridge = report?.fx?.rates?.[manualSource.fx_currency];
+    if (!bridge) return null;
+    return {rate: mRate * Number(bridge.rate), manual: true, fxRate: manualSource.fx_rate, fxCurrency: manualSource.fx_currency, refDate: bridge.date, triangulated: true};
+  }
+  const ref = report?.fx?.rates?.[entry.currency];
+  if (!ref) return null;
+  return {rate: Number(ref.rate), manual: false, refDate: ref.date, triangulated: false};
 }
 
 function settlementDisplay(entry, report = state.report, compact = false) {
   const base = report?.base;
-  const rate = report?.fx?.rates?.[entry.currency];
-  if (!base || entry.currency === base || !rate) return '';
-  const convertedAmount = Number(entry.amount) * Number(rate.rate);
-  if (!Number.isFinite(convertedAmount)) return '';
-  if (compact) return `<span class="settlement-line">≈ ${money(convertedAmount, base)}</span>`;
-  return `<span class="settlement-line">≈ ${money(convertedAmount, base)} <small>参考${rate.date ? ` · ${esc(rate.date)}` : ''}</small></span>`;
+  const info = effectiveRate(entry, report);
+  if (info && base && entry.currency !== base) {
+    const convertedAmount = Number(entry.amount) * info.rate;
+    if (!Number.isFinite(convertedAmount)) return '';
+    if (info.manual) {
+      if (compact) return `<span class="settlement-line">≈ ${money(convertedAmount, base)} <small>汇率 ${esc(info.fxRate)}</small></span>`;
+      const bridgeNote = info.triangulated ? ` → ${esc(base)}${info.refDate ? ` · ${esc(info.refDate)}` : ''}` : '';
+      return `<span class="settlement-line">≈ ${money(convertedAmount, base)} <small>手动汇率 · 1 ${esc(entry.currency)} = ${esc(info.fxRate)} ${esc(info.fxCurrency)}${bridgeNote}</small></span>`;
+    }
+    if (compact) return `<span class="settlement-line">≈ ${money(convertedAmount, base)}</span>`;
+    return `<span class="settlement-line">≈ ${money(convertedAmount, base)} <small>参考${info.refDate ? ` · ${esc(info.refDate)}` : ''}</small></span>`;
+  }
+  if (entry?.fx_rate && entry?.fx_currency && entry.currency !== entry.fx_currency && (!base || entry.currency !== base)) {
+    const fallbackAmount = Number(entry.amount) * Number(entry.fx_rate);
+    if (!Number.isFinite(fallbackAmount)) return '';
+    if (compact) return `<span class="settlement-line">≈ ${money(fallbackAmount, entry.fx_currency)} <small>汇率 ${esc(entry.fx_rate)}</small></span>`;
+    return `<span class="settlement-line">≈ ${money(fallbackAmount, entry.fx_currency)} <small>手动汇率 · 1 ${esc(entry.currency)} = ${esc(entry.fx_rate)} ${esc(entry.fx_currency)}</small></span>`;
+  }
+  return '';
 }
 
 function feeDetailTag(e) {
@@ -492,6 +527,9 @@ function aiFieldRows(action) {
     } else {
       add('金额', `${r.amount} ${r.currency}`);
     }
+    if (r.fx_mode === 'manual' && r.fx_rate && r.fx_currency) {
+      add('外币汇率', `手动 1 ${r.currency} = ${r.fx_rate} ${r.fx_currency}${r.fx_amount ? `（折合 ${r.fx_amount} ${r.fx_currency}）` : ''}`);
+    }
     add('用途', entryDescription(r));
     add('日期', r.date); add('成员', r.payer_name || r.payer_id); add('状态', AI_STATUS[r.status] || r.status); add('备注', r.note);
   } else if (action.type === 'edit_entry') {
@@ -503,6 +541,9 @@ function aiFieldRows(action) {
       add(r.kind === 'income' ? '实收金额' : '实付金额', `${r.amount} ${r.currency}`);
     } else {
       add('金额', `${r.amount} ${r.currency}`);
+    }
+    if (r.fx_mode === 'manual' && r.fx_rate && r.fx_currency) {
+      add('外币汇率', `手动 1 ${r.currency} = ${r.fx_rate} ${r.fx_currency}${r.fx_amount ? `（折合 ${r.fx_amount} ${r.fx_currency}）` : ''}`);
     }
     add('用途', entryDescription(r)); add('日期', r.date); add('备注', r.note);
   } else if (['void_entry', 'submit_entry'].includes(action.type)) {
@@ -743,6 +784,7 @@ function aiEditInForm(index) {
     kind: r.kind, expense_type: r.expense_type, income_type: r.income_type,
     amount: r.gross_amount || r.amount, gross_amount: r.gross_amount || r.amount,
     fee_mode: r.fee_mode || 'none', fee_rate: r.fee_rate || '', fee_amount: r.fee_amount || '',
+    fx_mode: r.fx_mode || 'auto', fx_rate: r.fx_rate || '', fx_currency: r.fx_currency || '',
     currency: r.currency, description: r.description, date: r.date, payer_id: r.payer_id, note: r.note, status: r.status,
   });
   toast('已在表单中打开，保存后不会重复执行此项');
@@ -755,12 +797,15 @@ function aiEditInForm(index) {
 function rateDetails(report = state.report) {
   if (!report) return '';
   const rows = Object.entries(report.fx.rates).filter(([code]) => code !== report.base);
-  return `${rows.length ? `<div class="rates">${rows.map(([code, r]) => `<span class="rate-chip">1 ${esc(code)} ≈ ${Number(r.rate).toLocaleString('zh-CN', {maximumFractionDigits: 6})} ${esc(report.base)} · ${esc(r.date)}</span>`).join('')}</div>` : '<p class="muted">当前账目无需跨币种换算。</p>'}<p class="fx-caption">${rows.length ? `${esc(report.fx.source)}${report.fx.stale ? ' · 缓存沿用' : ''}` : ''}</p>`;
+  const manualCount = Number(report.manual_fx_count || 0);
+  const manualCaption = manualCount > 0 ? `<p class="fx-caption">另有 ${manualCount} 笔外币账目使用记账时手动指定的汇率。</p>` : '';
+  const emptyText = manualCount > 0 ? '' : '<p class="muted">当前账目无需跨币种换算。</p>';
+  return `${rows.length ? `<div class="rates">${rows.map(([code, r]) => `<span class="rate-chip">1 ${esc(code)} ≈ ${Number(r.rate).toLocaleString('zh-CN', {maximumFractionDigits: 6})} ${esc(report.base)} · ${esc(r.date)}</span>`).join('')}</div>` : emptyText}${rows.length ? `<p class="fx-caption">${esc(report.fx.source)}${report.fx.stale ? ' · 缓存沿用' : ''}</p>` : ''}${manualCaption}`;
 }
 
-function converted(entry, report = state.report) {
-  const r = report?.fx.rates[entry.currency];
-  return r ? Number(entry.amount) * Number(r.rate) : 0;
+function converted(entry, report = state.report, parentEntry = null) {
+  const info = effectiveRate(entry, report, parentEntry);
+  return info ? Number(entry.amount) * info.rate : 0;
 }
 
 function chart() {
@@ -774,7 +819,7 @@ function chart() {
     const operating = state.entries.filter(e => e.kind === 'income' && (e.income_type || 'operating') === 'operating' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0);
     const capital = state.entries.filter(e => e.kind === 'income' && e.income_type === 'capital' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0);
     const paid = state.entries.filter(e => e.kind === 'expense' && e.expense_type === 'public' && e.status === 'posted' && e.date === date).reduce((s, e) => s + converted(e), 0)
-      + state.entries.reduce((s, e) => s + (e.payments || []).filter(p => p.created_at.slice(0, 10) === date).reduce((sum, p) => sum + converted(p), 0), 0);
+      + state.entries.reduce((s, e) => s + (e.payments || []).filter(p => p.created_at.slice(0, 10) === date).reduce((sum, p) => sum + converted(p, r, e), 0), 0);
     days.push({date, operating, capital, paid, profit: operating - paid});
   }
   const hasCapital = days.some(d => d.capital > 0);
@@ -1238,7 +1283,7 @@ function planGroups(report, selectable = false) {
             <span class="plan-item-status">${status}</span>
             <div class="plan-item-main">
               <strong>${esc(entryDescription(entry))}</strong>
-              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${Number(entry.fee_minor) > 0 ? ` · 含手续费 ${money(entry.fee_amount, entry.currency, false)}` : ''}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
+              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${entry.fx_rate && entry.fx_currency ? ` · 手动汇率 ${esc(entry.fx_rate)}` : ''}${Number(entry.fee_minor) > 0 ? ` · 含手续费 ${money(entry.fee_amount, entry.currency, false)}` : ''}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
             </div>
             <div class="plan-item-suggested">${hasSuggestion ? money(entry.suggested, report.base, false) : '—'}</div>
           </div>`;
@@ -2539,36 +2584,135 @@ function updateFeeUi() {
   }
 
   const previewEl = $('#fee-preview');
-  if (!previewEl) return;
-  if (mode === 'none') {
-    previewEl.hidden = true;
-    previewEl.classList.remove('is-error');
-    previewEl.innerHTML = '';
+  if (previewEl) {
+    if (mode === 'none') {
+      previewEl.hidden = true;
+      previewEl.classList.remove('is-error');
+      previewEl.innerHTML = '';
+    } else {
+      const calc = computeFeePreview(
+        isIncome ? 'income' : 'expense',
+        form.elements.amount.value,
+        code,
+        mode,
+        rateInput?.value,
+        fixedInput?.value,
+      );
+      previewEl.hidden = false;
+      if (calc.error) {
+        previewEl.classList.add('is-error');
+        previewEl.innerHTML = `<span>${esc(calc.error)}</span>`;
+      } else {
+        previewEl.classList.remove('is-error');
+        if (!calc.ready) {
+          previewEl.innerHTML = `<span class="muted">${esc(calc.message)}</span>`;
+        } else {
+          const sign = isIncome ? '−' : '+';
+          const effLabel = isIncome ? '实收入账' : (isPublic ? '公账实付' : '实付 / 应报销');
+          const feeTag = mode === 'rate' && calc.rateLabel ? ` (${esc(calc.rateLabel)}%)` : '';
+          previewEl.innerHTML = `<span class="fee-preview-eq">原金额 ${money(calc.gross, code, false)} ${sign} 手续费 ${money(calc.fee, code, false)}${feeTag}</span><strong class="fee-preview-total">${effLabel} ${money(calc.effective, code)}</strong>`;
+        }
+      }
+    }
+  }
+  updateFxUi();
+}
+
+function formatFxRateText(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  return num.toFixed(6).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+}
+
+function updateFxUi() {
+  const form = $('#entry-form');
+  const group = $('#fx-group');
+  if (!form || !group || !state.conf) return;
+  const code = form.elements.currency.value || state.conf.default_currency;
+  const targetCur = (state.entryFxCurrency && state.entryFxCurrency !== code) ? state.entryFxCurrency : state.conf.reference_currency;
+  const rateInput = $('#entry-fx-rate');
+  if (code === targetCur) {
+    group.hidden = true;
+    if (rateInput) rateInput.required = false;
     return;
   }
-  const calc = computeFeePreview(
+  group.hidden = false;
+  const mode = state.entryFxMode === 'manual' ? 'manual' : 'auto';
+  $$('#entry-fx-mode button').forEach(b => {
+    const active = b.dataset.fxMode === mode;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  const pairHint = $('#fx-pair-hint');
+  if (pairHint) pairHint.textContent = `折算为 ${targetCur}`;
+  const prefixEl = $('#fx-rate-prefix');
+  if (prefixEl) prefixEl.textContent = `1 ${code} =`;
+  const suffixEl = $('#fx-rate-suffix');
+  if (suffixEl) suffixEl.textContent = targetCur;
+
+  const manualWrap = $('#fx-manual-wrap');
+  if (manualWrap) manualWrap.hidden = mode !== 'manual';
+  if (rateInput) rateInput.required = mode === 'manual';
+
+  const refEntry = state.report?.base === targetCur ? state.report?.fx?.rates?.[code] : null;
+  const refText = refEntry ? formatFxRateText(refEntry.rate) : '';
+  const helperRow = $('#fx-helper-row');
+  const refHint = $('#fx-ref-hint');
+  const useRefBtn = $('#fx-use-ref');
+  if (helperRow && refHint && useRefBtn) {
+    if (refEntry && refText) {
+      helperRow.hidden = false;
+      refHint.textContent = `当前参考：1 ${code} ≈ ${refText} ${targetCur}${refEntry.date ? `（${refEntry.date}）` : ''}`;
+      useRefBtn.dataset.refRate = refText;
+    } else {
+      helperRow.hidden = true;
+      refHint.textContent = '';
+      delete useRefBtn.dataset.refRate;
+    }
+  }
+
+  const previewEl = $('#fx-preview');
+  if (!previewEl) return;
+  const isIncome = state.entryKind === 'income';
+  const feeCalc = computeFeePreview(
     isIncome ? 'income' : 'expense',
     form.elements.amount.value,
     code,
-    mode,
-    rateInput?.value,
-    fixedInput?.value,
+    state.entryFeeMode || 'none',
+    $('#entry-fee-rate')?.value,
+    $('#entry-fee-amount')?.value,
   );
   previewEl.hidden = false;
-  if (calc.error) {
-    previewEl.classList.add('is-error');
-    previewEl.innerHTML = `<span>${esc(calc.error)}</span>`;
-    return;
-  }
   previewEl.classList.remove('is-error');
-  if (!calc.ready) {
-    previewEl.innerHTML = `<span class="muted">${esc(calc.message)}</span>`;
+  if (mode === 'auto') {
+    if (refEntry && refText && feeCalc.ready) {
+      const conv = feeCalc.effective * Number(refEntry.rate);
+      previewEl.innerHTML = `<span class="fee-preview-eq">按参考汇率 1 ${esc(code)} ≈ ${esc(refText)} ${esc(targetCur)}</span><strong class="fee-preview-total">预计折合 ${money(conv, targetCur)}</strong>`;
+    } else if (refEntry && refText) {
+      previewEl.innerHTML = `<span class="muted">汇总时将按参考汇率（1 ${esc(code)} ≈ ${esc(refText)} ${esc(targetCur)}）自动折算</span>`;
+    } else {
+      previewEl.innerHTML = `<span class="muted">汇总时将按每日参考汇率自动折算为 ${esc(targetCur)}</span>`;
+    }
     return;
   }
-  const sign = isIncome ? '−' : '+';
-  const effLabel = isIncome ? '实收入账' : (isPublic ? '公账实付' : '实付 / 应报销');
-  const feeTag = mode === 'rate' && calc.rateLabel ? ` (${esc(calc.rateLabel)}%)` : '';
-  previewEl.innerHTML = `<span class="fee-preview-eq">原金额 ${money(calc.gross, code, false)} ${sign} 手续费 ${money(calc.fee, code, false)}${feeTag}</span><strong class="fee-preview-total">${effLabel} ${money(calc.effective, code)}</strong>`;
+  const rawRate = String(rateInput?.value || '').trim();
+  if (!rawRate) {
+    previewEl.innerHTML = `<span class="muted">填写 1 ${esc(code)} 对应的 ${esc(targetCur)} 汇率后将实时预览折算金额</span>`;
+    return;
+  }
+  const rateNum = Number(rawRate);
+  if (!/^\d{1,12}(?:\.\d{1,8})?$/.test(rawRate) || !Number.isFinite(rateNum) || rateNum <= 0 || rateNum > 1_000_000_000) {
+    previewEl.classList.add('is-error');
+    previewEl.innerHTML = '<span>外币汇率需为大于 0 的数字，最多保留 8 位小数</span>';
+    return;
+  }
+  if (!feeCalc.ready) {
+    previewEl.innerHTML = `<span class="muted">已指定 1 ${esc(code)} = ${esc(rawRate)} ${esc(targetCur)}，填写金额后预览折算结果</span>`;
+    return;
+  }
+  const conv = feeCalc.effective * rateNum;
+  const effPrefix = feeCalc.feeMinor > 0 ? (isIncome ? '实收 ' : '实付 ') : '';
+  previewEl.innerHTML = `<span class="fee-preview-eq">${effPrefix}${money(feeCalc.effective, code, false)} ${esc(code)} × ${esc(rawRate)}</span><strong class="fee-preview-total">折合 ${money(conv, targetCur)}</strong>`;
 }
 
 function openEntry(kind = 'expense', data = null) {
@@ -2581,14 +2725,21 @@ function openEntry(kind = 'expense', data = null) {
     state.entryKind = data.kind === 'expense' && data.expense_type === 'public' ? 'public' : data.kind;
     state.entryIncomeType = data.kind === 'income' ? (data.income_type === 'capital' ? 'capital' : 'operating') : 'operating';
     state.entryFeeMode = ['rate', 'fixed'].includes(data.fee_mode) ? data.fee_mode : 'none';
+    const hasManualFx = Boolean((data.fx_mode === 'manual' || data.fx_rate) && data.fx_rate);
+    state.entryFxMode = hasManualFx ? 'manual' : 'auto';
+    state.entryFxCurrency = hasManualFx ? (data.fx_currency || state.conf.reference_currency) : '';
   } else if (kind === 'capital') {
     state.entryKind = 'income';
     state.entryIncomeType = 'capital';
     state.entryFeeMode = 'none';
+    state.entryFxMode = 'auto';
+    state.entryFxCurrency = '';
   } else {
     state.entryKind = kind;
     state.entryIncomeType = 'operating';
     state.entryFeeMode = 'none';
+    state.entryFxMode = 'auto';
+    state.entryFxCurrency = '';
   }
   form.elements.currency.innerHTML = currencyOptions(data?.currency || state.conf.default_currency);
   form.elements.payer_id.innerHTML = options(state.members.filter(m => m.active), m => m.id, m => m.name, data?.payer_id || state.user.id);
@@ -2597,6 +2748,7 @@ function openEntry(kind = 'expense', data = null) {
   form.elements.amount.value = data?.gross_amount || data?.amount || '';
   if (form.elements.fee_rate) form.elements.fee_rate.value = data?.fee_mode === 'rate' ? (data?.fee_rate || '') : '';
   if (form.elements.fee_amount) form.elements.fee_amount.value = data?.fee_mode === 'fixed' ? (data?.fee_amount || '') : '';
+  if (form.elements.fx_rate) form.elements.fx_rate.value = state.entryFxMode === 'manual' ? (data?.fx_rate || '') : '';
   form.elements.description.value = data?.description || '';
   form.elements.note.value = data?.note || '';
   $('#entry-kind').hidden = Boolean(data?.id);
@@ -2674,6 +2826,16 @@ async function saveEntry(status, button) {
       } else {
         delete body.fee_rate;
         delete body.fee_amount;
+      }
+      const targetFxCur = (state.entryFxCurrency && state.entryFxCurrency !== body.currency) ? state.entryFxCurrency : state.conf.reference_currency;
+      if (body.currency === targetFxCur || state.entryFxMode !== 'manual') {
+        body.fx_mode = 'auto';
+        delete body.fx_rate;
+        delete body.fx_currency;
+      } else {
+        body.fx_mode = 'manual';
+        body.fx_rate = String(form.elements.fx_rate?.value || '').trim();
+        body.fx_currency = targetFxCur;
       }
       body.status = state.entryKind === 'income' || (state.entryKind === 'public' && status !== 'draft') ? 'posted' : status;
       const entry = await api(state.editing ? `/entries/${state.editing}` : '/entries', state.editing ? 'PUT' : 'POST', body, {'Idempotency-Key': state.entryKey});
@@ -2758,6 +2920,7 @@ async function openDetail(id) {
           <h4>基本信息</h4>
           <dl class="detail-list">
             ${(Number(e.fee_minor) > 0 || (e.fee_mode && e.fee_mode !== 'none')) ? `<div><dt>原金额（手续费前）</dt><dd class="mono">${money(e.gross_amount, e.currency)}</dd></div><div><dt>手续费</dt><dd class="mono">${feeDetailTag(e)}</dd></div>` : ''}
+            ${e.fx_rate && e.fx_currency ? `<div><dt>外币汇率</dt><dd class="mono">手动指定 · 1 ${esc(e.currency)} = ${esc(e.fx_rate)} ${esc(e.fx_currency)}${e.fx_amount ? `（折合 ${money(e.fx_amount, e.fx_currency)}）` : ''}</dd></div>` : ''}
             <div><dt>${e.kind === 'income' && e.income_type === 'capital' ? '转入 / 经手成员' : (e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员')}</dt><dd>${esc(e.payer_name)}</dd></div>
             <div><dt>发生日期</dt><dd class="mono">${esc(e.date)}</dd></div>
             <div><dt>记录来源</dt><dd>${esc(sourceLabel(e.source))} · ${esc(e.creator_name)}</dd></div>
@@ -2894,7 +3057,7 @@ async function loadPaymentQuote(id, code) {
     input.value = quote.maximum_amount;
     input.disabled = false;
     input.setAttribute('aria-label', `本次已报销金额 ${quote.currency}`);
-    rateLabel.textContent = `上限 ${quote.maximum_amount} ${quote.currency}` + (quote.currency !== quote.entry_currency ? ` · 1 ${quote.entry_currency} = ${quote.rate} ${quote.currency} (${quote.rate_date})` : '');
+    rateLabel.textContent = `上限 ${quote.maximum_amount} ${quote.currency}` + (quote.currency !== quote.entry_currency ? ` · 1 ${quote.entry_currency} = ${quote.rate} ${quote.currency} (${quote.rate_date || '手动汇率'})` : '');
   } catch (e) {
     if (state.action === action) rateLabel.textContent = e.message;
   } finally {
@@ -3360,6 +3523,24 @@ document.addEventListener('click', async event => {
     else if (state.entryFeeMode === 'fixed') setTimeout(() => $('#entry-fee-amount')?.focus(), 20);
     return;
   }
+  if (b.hasAttribute('data-fx-mode')) {
+    state.entryFxMode = b.dataset.fxMode === 'manual' ? 'manual' : 'auto';
+    if (state.entryFxMode === 'manual' && !state.entryFxCurrency) {
+      state.entryFxCurrency = state.conf.reference_currency;
+    }
+    updateFxUi();
+    if (state.entryFxMode === 'manual') setTimeout(() => $('#entry-fx-rate')?.focus(), 20);
+    return;
+  }
+  if (b.id === 'fx-use-ref') {
+    const rateInput = $('#entry-fx-rate');
+    if (rateInput && b.dataset.refRate) {
+      rateInput.value = b.dataset.refRate;
+      updateFxUi();
+      rateInput.focus();
+    }
+    return;
+  }
   if (b.hasAttribute('data-pb-as-of')) {
     const form = $('#public-balance-form');
     if (form) {
@@ -3715,6 +3896,9 @@ document.addEventListener('input', event => {
   if (el.closest('#entry-form') && ['amount', 'fee_rate', 'fee_amount'].includes(el.name)) {
     updateFeeUi();
   }
+  if (el.closest('#entry-form') && el.name === 'fx_rate') {
+    updateFxUi();
+  }
   if (el.id === 'auth-team-name') {
     syncAuthExternalLink();
   }
@@ -3723,6 +3907,10 @@ document.addEventListener('input', event => {
 document.addEventListener('change', async event => {
   const el = event.target;
   if (el.closest('#entry-form') && el.name === 'currency') {
+    state.entryFxMode = 'auto';
+    state.entryFxCurrency = '';
+    const fxInput = $('#entry-fx-rate');
+    if (fxInput) fxInput.value = '';
     updateFeeUi();
     return;
   }

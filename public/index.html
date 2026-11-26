@@ -210,6 +210,30 @@
         </div>
         <div class="fee-preview" id="fee-preview" aria-live="polite" hidden></div>
       </div>
+      <div class="fx-group" id="fx-group" hidden>
+        <div class="fx-header-row">
+          <span class="fx-label">外币汇率 <small class="optional" id="fx-pair-hint"></small></span>
+          <div class="segmented segmented-compact" id="entry-fx-mode" role="group" aria-label="外币汇率方式">
+            <button type="button" data-fx-mode="auto" class="active" aria-pressed="true">自动参考</button>
+            <button type="button" data-fx-mode="manual" aria-pressed="false">手动指定</button>
+          </div>
+        </div>
+        <div class="fx-input-area" id="fx-manual-wrap" hidden>
+          <label class="fx-inline-field">
+            <span>记账汇率</span>
+            <div class="fx-rate-input-row">
+              <span class="fx-rate-prefix" id="fx-rate-prefix">1 USD =</span>
+              <input name="fx_rate" id="entry-fx-rate" placeholder="例如 7.25" inputmode="decimal" autocomplete="off">
+              <span class="fx-rate-suffix" id="fx-rate-suffix">CNY</span>
+            </div>
+          </label>
+          <div class="fx-helper-row" id="fx-helper-row" hidden>
+            <span class="fx-ref-hint" id="fx-ref-hint"></span>
+            <button type="button" class="pb-quick-btn" id="fx-use-ref">填入参考汇率</button>
+          </div>
+        </div>
+        <div class="fx-preview" id="fx-preview" aria-live="polite" hidden></div>
+      </div>
       <label>
         <span>用途 / 说明 <small class="optional">选填</small></span>
         <input name="description" placeholder="例如：服务器续费、团队聚餐" maxlength="120">

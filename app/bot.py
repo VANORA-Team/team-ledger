@@ -51,8 +51,9 @@ def _process_update(update, db_provider, platform):
             parts = callback.get('data', '').split(':')
             payload = json.loads(draft['payload'])
             if len(parts) == 4 and parts[:3] == ['d', draft['token'], 'paycur'] and payload.get('_action') == 'pay':
-                row = conn.execute('SELECT currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
-                payment_code = row['currency'] if row else None
+                row = conn.execute('SELECT currency,fx_rate,fx_currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
+                if row and not (row['fx_rate'] and row['fx_currency'] == parts[3]):
+                    payment_code = row['currency']
     if linked_any and linked_any['oidc_sub']:
         if permissions_sync.sync_member(linked_any['oidc_sub'], force=False, db_provider=db_provider):
             with db_provider() as conn:
@@ -97,15 +98,17 @@ def _process_update(update, db_provider, platform):
         if result:
             codes.add(result.get('currency', conf['default_currency']))
         if funds_flow:
-            # Only posted income, outstanding expenses and actual payments affect
-            # this calculator. Draft/voided currencies must not block the plan.
+            # Only posted income, outstanding expenses and actual payments not covered by manual rates need external FX.
             with db_provider() as conn:
-                codes = {r['currency'] for r in conn.execute("SELECT currency FROM entries WHERE status IN ('posted','pending','reimbursed') UNION SELECT currency FROM payments")}
+                fund_entries = [dict(r) for r in conn.execute("SELECT id,currency,status,fx_rate,fx_currency FROM entries WHERE status IN ('posted','pending','reimbursed')")]
+                fund_payments = [dict(r) for r in conn.execute('SELECT entry_id,currency FROM payments')]
+            extra = set()
             fund_action = callback_data.split(':')[2] if callback_data.startswith('f:') and len(callback_data.split(':')) > 2 else ''
             if payload.get('scenario') and fund_action not in ('refresh', 'cancel', 'batch', 'mode') and command != '/funds' and callback_data != 'funds':
-                codes.add(payload['scenario']['currency'])
+                extra.add(payload['scenario']['currency'])
             if payload.get('scenario_currency') and draft and draft['step'] == 'funds_amount' and not callback:
-                codes.add(payload['scenario_currency'])
+                extra.add(payload['scenario_currency'])
+            codes = fx.required_codes(fund_entries, fund_payments, conf['reference_currency'], extra)
         if payment_code:
             # A payment quote only needs this entry's pair. Other ledger/default
             # currencies must not block a supported settlement-currency payment.

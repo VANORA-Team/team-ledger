@@ -24,13 +24,13 @@ def snapshot(conn):
 
 def report(conn, rates, scenario=None, reimbursement=None):
     conf = settings(conn)
-    if not rates or rates['base'] != conf['reference_currency']:
-        return None
+    base = conf['reference_currency']
     entries, payments = ledger_rows(conn)
-    needed = {e['currency'] for e in entries if e['status'] in ('pending', 'reimbursed', 'posted')}
-    needed.update(p['currency'] for p in payments)
-    if scenario:
-        needed.add(scenario['currency'])
+    needed = fx.required_codes(entries, payments, base, {scenario['currency']} if scenario else None)
+    if not rates or rates['base'] != base:
+        if needed:
+            return None
+        rates = fx.rates_for(base, set())
     if needed - rates['rates'].keys():
         return None
     return fx.calculate(entries, conf, rates, scenario, payments, reimbursement)
@@ -43,19 +43,31 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
     an explicit id set, or an occurrence-date range. The cash limit still applies.
     """
     conf = settings(conn)
-    result = report(conn, rates)
-    if not result or not result['complete'] or rates.get('stale'):
-        fail('暂无完整有效汇率，请刷新资金计算后重试。')
     base = conf['reference_currency']
+    entries, payments = ledger_rows(conn)
+    needed = fx.required_codes(entries, payments, base)
+    if not rates or rates['base'] != base:
+        if needed:
+            fail('暂无完整有效汇率，请刷新资金计算后重试。')
+        rates = fx.rates_for(base, set())
+    result = report(conn, rates)
+    if not result or not result['complete'] or (needed and rates.get('stale')):
+        fail('暂无完整有效汇率，请刷新资金计算后重试。')
     if mode not in ('settlement', 'original'):
         fail('请选择有效的付款币种方式')
     scale = 10 ** currency(conf, base)['decimals']
-    entries, payments = ledger_rows(conn)
+    entry_by_id = {e['id']: e for e in entries}
     choice = reimbursement_plan.normalize(entries, conf, base, reimbursement)
-    def converted(e):
-        return Decimal(e['amount_minor']) / (10 ** e['decimals']) * Decimal(rates['rates'][e['currency']]['rate'])
+    def converted_entry(e):
+        rate, _ = fx.effective_rate(e, base, rates['rates'])
+        return Decimal(e['amount_minor']) / (10 ** e['decimals']) * rate
+    def converted_payment(p):
+        rate, _ = fx.effective_rate(p, base, rates['rates'], parent_entry=entry_by_id.get(p.get('entry_id')))
+        return Decimal(p['amount_minor']) / (10 ** p['decimals']) * rate
     public_expenses = [e for e in entries if e['kind'] == 'expense' and e['expense_type'] == 'public' and e['status'] == 'posted']
-    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments + public_expenses), Decimal(0))
+    cash = (sum((converted_entry(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0))
+            - sum((converted_payment(p) for p in payments), Decimal(0))
+            - sum((converted_entry(e) for e in public_expenses), Decimal(0)))
     left = max(cash, Decimal(0)).quantize(Decimal(1) / scale, rounding=ROUND_DOWN)
     if choice['mode'] == 'budget':
         left = min(left, Decimal(choice['budget']))
@@ -79,7 +91,7 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
         if date_to and e['date'] > date_to:
             continue
         remaining = e['amount_minor'] - e['reimbursed_minor']
-        rate = Decimal(rates['rates'][e['currency']]['rate'])
+        rate, _ = fx.effective_rate(e, base, rates['rates'])
         code = base if mode == 'settlement' else e['currency']
         quote = make_payment_quote(conn, user, e['id'], code, rates)
         pay_scale = 10 ** quote['decimals']

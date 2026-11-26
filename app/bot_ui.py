@@ -8,9 +8,9 @@ from contextvars import ContextVar
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException
-from . import ai_plan, config, excel_export
+from . import ai_plan, config, excel_export, fx
 from .db import settings
-from .domain import (add_entry, admin, can_manage_entry, compute_fee, currency, delete_entry, edit_entry, entry_view, fail,
+from .domain import (add_entry, admin, can_manage_entry, compute_fee, compute_fx, currency, delete_entry, edit_entry, entry_view, fail,
                      is_finance, minor_amount, normalized_entry, require_entry_access, text_value,
                      transition, make_payment_quote, payment_preview)
 
@@ -106,6 +106,26 @@ def reference(value, code, conf, rates):
     converted = amount_text(Decimal(str(value)) * Decimal(row['rate']), base, conf)
     suffix = ' · 缓存' if rates.get('stale') else ''
     return f'≈ {converted} · {row["date"]}{suffix}'
+
+
+def entry_reference(entry, conf, rates, value=None):
+    base = conf['reference_currency']
+    code = entry['currency']
+    if code == base:
+        return ''
+    amt = entry['amount'] if value is None else value
+    m_rate, m_cur = fx.manual_rate_for(entry)
+    if m_rate is not None:
+        if m_cur == base:
+            converted = amount_text(Decimal(str(amt)) * m_rate, base, conf)
+            return f'≈ {converted} · 手动汇率 1 {code} = {entry["fx_rate"]} {m_cur}'
+        bridge = (rates or {}).get('rates', {}).get(m_cur)
+        if bridge:
+            converted = amount_text(Decimal(str(amt)) * m_rate * Decimal(str(bridge['rate'])), base, conf)
+            return f'≈ {converted} · 手动汇率 1 {code} = {entry["fx_rate"]} {m_cur}'
+        converted_target = amount_text(Decimal(str(amt)) * m_rate, m_cur, conf)
+        return f'≈ {converted_target} · 手动汇率 1 {code} = {entry["fx_rate"]} {m_cur}'
+    return reference(amt, code, conf, rates)
 
 
 def menu(conn, user, chat_id):
@@ -273,6 +293,7 @@ def preview(conn, user, chat_id, token, data, rates=None):
     cur = currency(conf, data['currency'])
     gross_minor = minor_amount(data['amount'], cur['decimals'])
     fee_mode, fee_rate, fee_minor, effective_minor = compute_fee(data['kind'], gross_minor, cur['decimals'], data)
+    fx_rate, fx_currency = compute_fx(data['currency'], conf, data)
     effective_dec = Decimal(effective_minor) / (10 ** cur['decimals'])
     effective_str = format(effective_dec, f'.{cur["decimals"]}f')
     lines = [f'🧾 确认{kind}', f'用途：{entry_description(data)}']
@@ -287,13 +308,14 @@ def preview(conn, user, chat_id, token, data, rates=None):
         ]
     else:
         lines.append(f'金额：{amount_text(data["amount"], data["currency"], conf)}')
-    converted = reference(effective_str, data['currency'], conf, rates)
+    converted = entry_reference({**data, 'amount': effective_str, 'fx_rate': fx_rate, 'fx_currency': fx_currency}, conf, rates, effective_str)
     if converted:
         lines.append(converted)
     lines += [f'日期：{data["date"]}', f'{member_label}：{payer["name"] if payer else "当前成员"}', f'备注：{data.get("note") or "未填写"}', '\n核对后确认才入账。']
     rows = [
         [button('✅ 保存修改' if data.get('_edit_id') else '✅ 确认入账', f'd:{token}:save')],
-        [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('手续费', f'd:{token}:edit:fee')],
+        [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('手续费', f'd:{token}:edit:fee')]
+        + ([button('汇率', f'd:{token}:edit:fx')] if data['currency'] != conf['reference_currency'] else []),
         [button('用途', f'd:{token}:edit:description'), button('日期', f'd:{token}:edit:date'), button('备注', f'd:{token}:edit:note')]
         + ([button('成员', f'd:{token}:edit:payer')] if is_finance(user) else []),
     ]
@@ -330,7 +352,7 @@ def list_entries(conn, user, chat_id, scope='recent', page=0, rates=None):
     rows = []
     for row in ids:
         entry = entry_view(conn, row['id'])
-        converted = reference(entry['amount'], entry['currency'], conf, rates)
+        converted = entry_reference(entry, conf, rates)
         lines.append(f'\n#{entry["id"]} {entry_description(entry)}\n{original(entry,conf)} · {entry_status(entry)}\n'
                      f'{entry["payer_name"]} · {entry["date"]}' + ('\n' + converted if converted else ''))
         if entry['reimbursed_minor']:
@@ -358,12 +380,12 @@ def detail(conn, user, chat_id, entry_id, rates=None):
     lines = [f'🧾 #{entry_id} · {entry_status(entry)} · {entry_type_label(entry)}', entry_description(entry), original(entry, conf)]
     if entry.get('fee_minor') or (entry.get('fee_mode') and entry.get('fee_mode') != 'none'):
         lines.append(f'原金额：{amount_text(entry["gross_amount"], entry["currency"], conf)} · 手续费：{fee_label(entry, conf)}')
-    converted = reference(entry['amount'], entry['currency'], conf, rates)
+    converted = entry_reference(entry, conf, rates)
     if converted:
         lines.append(converted)
     if entry['kind'] == 'expense' and entry['expense_type'] == 'advance':
         lines.append(payment_totals(entry, conf))
-        remaining_reference = reference(entry['remaining_amount'], entry['currency'], conf, rates)
+        remaining_reference = entry_reference(entry, conf, rates, entry['remaining_amount'])
         if remaining_reference:
             lines.append('剩余待报 ' + remaining_reference)
     member_label = '转入成员' if (entry['kind'] == 'income' and entry.get('income_type') == 'capital') else '成员'
@@ -464,6 +486,15 @@ def show_field(conn, chat_id, draft, field):
         say(conn, chat_id, '选择手续费方式（默认 0）：\n支持填写任意比例（%），或手动填写固定手续费金额。',
             [[button('按比例（%）', f'd:{token}:fee:rate'), button('手动金额', f'd:{token}:fee:fixed')],
              [button('无手续费（0）', f'd:{token}:fee:none'), button('返回预览', f'd:{token}:back')]], edit=True)
+    elif field == 'fx':
+        if data['currency'] == conf['reference_currency']:
+            fail('当前记账币种与结算币种一致，无需指定外币汇率')
+        persist(conn, token, data, 'edit_fx')
+        cur_fx = (f'当前：手动汇率 1 {data["currency"]} = {data["fx_rate"]} {data.get("fx_currency") or conf["reference_currency"]}'
+                  if data.get('fx_rate') else '当前：自动参考汇率')
+        say(conn, chat_id, f'选择外币汇率方式（1 {data["currency"]} → {conf["reference_currency"]}）：\n{cur_fx}',
+            [[button('手动输入汇率', f'd:{token}:fx:manual'), button('自动参考汇率', f'd:{token}:fx:auto')],
+             [button('返回预览', f'd:{token}:back')]], edit=True)
     elif field in ('amount', 'description', 'note'):
         hints = {'amount': f'请输入金额（{data["currency"]}）。', 'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'note': '请输入备注，发送 - 清空。'}
         ask(conn, chat_id, draft, 'edit_' + field, hints[field])
@@ -509,6 +540,19 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
                 f'请输入手动手续费金额（{payload["currency"]}，默认 0，输入 0 或 - 清零）。')
         else:
             fail('手续费选项无效')
+    elif action == 'fx' and len(parts) == 4 and step == 'edit_fx':
+        mode = parts[3]
+        if mode == 'auto':
+            payload['fx_mode'] = 'auto'
+            payload.pop('fx_rate', None)
+            payload.pop('fx_currency', None)
+            persist(conn, token, payload, 'confirm')
+            preview(conn, user, chat_id, token, payload, rates)
+        elif mode == 'manual':
+            ask(conn, chat_id, draft, 'edit_fx_rate',
+                f'请输入外币汇率：1 {payload["currency"]} = ? {conf["reference_currency"]}（例如 7.25；输入 - 或 自动 恢复自动参考汇率）。')
+        else:
+            fail('汇率选项无效')
     elif action == 'resume':
         if payload.get('_flow') == 'funds':
             from . import bot_funds
@@ -526,12 +570,13 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
             show_payment_currencies(conn, chat_id, token, payload)
         elif step in ('currency', 'edit_currency'):
             show_currencies(conn, chat_id, token, conf)
-        elif step in ('edit_date', 'edit_payer', 'edit_fee'):
+        elif step in ('edit_date', 'edit_payer', 'edit_fee', 'edit_fx'):
             show_field(conn, chat_id, draft, step[5:])
         else:
             hints = {'amount': '请输入金额。', 'edit_amount': '请输入金额。',
                      'edit_fee_rate': '请输入手续费比例（%），例如 0.6 或 2.9（默认 0，输入 0 或 - 清零）。',
                      'edit_fee_amount': f'请输入手动手续费金额（{payload.get("currency","")}，默认 0，输入 0 或 - 清零）。',
+                     'edit_fx_rate': f'请输入外币汇率：1 {payload.get("currency","")} = ? {conf["reference_currency"]}（例如 7.25；输入 - 恢复自动汇率）。',
                      'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'edit_description': '用途 / 收入说明选填，发送 - 跳过 / 清空。',
                      'edit_note': '请输入备注，发送 - 清空。', 'pay_note': '请输入付款方式 / 付款参考号。',
                      'pay_amount': f'请输入本次实际已报销金额（{payload.get("_quote",{}).get("currency","")}），发送 全额 报销剩余全部。',
@@ -544,7 +589,7 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
         quote = payload['_quote']
         ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), 'pay_amount',
             f'请填写本次实际已报销金额（{quote["currency"]}）。\n剩余全额：{quote["maximum_amount"]} {quote["currency"]}。\n'
-            + (f'1 {quote["entry_currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"]}\n' if quote['currency'] != quote['entry_currency'] else '')
+            + (f'1 {quote["entry_currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"] or "手动汇率"}\n' if quote['currency'] != quote['entry_currency'] else '')
             + '可以只报一部分；发送 全额 报销剩余全部。换算确认有效 30 分钟，请先完成真实转账。')
     elif action == 'paychange' and payload.get('_action') == 'pay':
         show_payment_currencies(conn, chat_id, token, payload)
@@ -553,6 +598,10 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
         preview(conn, user, chat_id, token, payload, rates)
     elif action == 'cur' and len(parts) == 4 and step in ('currency', 'edit_currency'):
         cur_obj = currency(conf, parts[3])
+        if payload.get('currency') != parts[3]:
+            payload['fx_mode'] = 'auto'
+            payload.pop('fx_rate', None)
+            payload.pop('fx_currency', None)
         payload['currency'] = parts[3]
         if payload.get('fee_mode') == 'fixed' and payload.get('fee_amount'):
             try:
@@ -633,7 +682,7 @@ def action_preview(conn, chat_id, token, payload):
         payment_text += f'抵扣记账金额：{amount_text(Decimal(allocation)/(10**entry["decimals"]),entry["currency"],conf)}\n'
         payment_text += f'登记后累计已报：{amount_text(Decimal(paid)/(10**entry["decimals"]),entry["currency"],conf)}\n剩余待报：{amount_text(Decimal(entry["amount_minor"]-paid)/(10**entry["decimals"]),entry["currency"],conf)}\n'
         if quote['currency'] != entry['currency']:
-            payment_text += f'汇率：1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"]}\n'
+            payment_text += f'汇率：1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"] or "手动汇率"}\n'
         rows.append([button('修改币种 / 金额', f'd:{token}:paychange')])
     say(conn, chat_id, f'⚠️ 确认{label}\n#{entry["id"]} {entry_description(entry)}\n原金额 {original(entry,conf)}\n' + payment_text +
         f'成员：{entry["payer_name"]}\n备注：{payload["note"]}\n\n' +
@@ -784,6 +833,10 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
             body['fee_rate'] = entry.get('fee_rate') or ''
         elif body['fee_mode'] == 'fixed':
             body['fee_amount'] = entry.get('fee_amount') or ''
+        body['fx_mode'] = entry.get('fx_mode') or ('manual' if entry.get('fx_rate') else 'auto')
+        if body['fx_mode'] == 'manual' and entry.get('fx_rate') and entry.get('fx_currency'):
+            body['fx_rate'] = entry['fx_rate']
+            body['fx_currency'] = entry['fx_currency']
         body.update(_edit_id=entry['id'], _snapshot=entry_snapshot(conn, entry['id']))
         token, body = new_draft(conn, user, telegram_id, chat_id, body)
         preview(conn, user, chat_id, token, body, rates)
@@ -859,7 +912,7 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
             persist(conn, draft['token'], payload, 'action_confirm')
             action_preview(conn, chat_id, draft['token'], payload)
             return
-        elif step in ('amount', 'description', 'edit_amount', 'edit_description', 'edit_note', 'edit_date', 'edit_fee_rate', 'edit_fee_amount'):
+        elif step in ('amount', 'description', 'edit_amount', 'edit_description', 'edit_note', 'edit_date', 'edit_fee_rate', 'edit_fee_amount', 'edit_fx_rate'):
             if step in ('amount', 'edit_amount'):
                 minor_amount(text, currency(conf, payload['currency'])['decimals'])
                 payload['amount'] = text
@@ -883,6 +936,16 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
                     payload['fee_mode'] = 'fixed'
                     payload['fee_amount'] = cleaned_fee
                     payload.pop('fee_rate', None)
+            elif step == 'edit_fx_rate':
+                cleaned_fx = text.strip().translate(str.maketrans('０１２３４５６７８９．', '0123456789.'))
+                if cleaned_fx in ('', '-', '自动'):
+                    payload['fx_mode'] = 'auto'
+                    payload.pop('fx_rate', None)
+                    payload.pop('fx_currency', None)
+                else:
+                    payload['fx_mode'] = 'manual'
+                    payload['fx_rate'] = cleaned_fx
+                    payload['fx_currency'] = conf['reference_currency']
             elif step in ('description', 'edit_description'):
                 payload['description'] = '' if text == '-' else text_value(text, '用途', 120, False)
             elif step == 'edit_note':
@@ -903,6 +966,14 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
             else:
                 payload.pop('fee_rate', None)
                 payload.pop('fee_amount', None)
+            if norm['fx_rate'] and norm['fx_currency']:
+                payload['fx_mode'] = 'manual'
+                payload['fx_rate'] = norm['fx_rate']
+                payload['fx_currency'] = norm['fx_currency']
+            else:
+                payload['fx_mode'] = 'auto'
+                payload.pop('fx_rate', None)
+                payload.pop('fx_currency', None)
             persist(conn, draft['token'], payload, 'confirm')
             preview(conn, user, chat_id, draft['token'], payload, rates)
             return

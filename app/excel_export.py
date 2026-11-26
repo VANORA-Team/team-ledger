@@ -761,8 +761,7 @@ def build_excel_export(
     payments_flat.sort(key=lambda pair: (pair[1]['created_at'], pair[1]['id']))
 
     # Fetch / read reference FX rates outside the database lock.
-    fx_codes = {e['currency'] for e in raw_entries if e['status'] in ('posted', 'pending', 'reimbursed')}
-    fx_codes.update(p['currency'] for p in raw_payments)
+    fx_codes = fx.required_codes(raw_entries, raw_payments, filters['base'])
     fx_rates = fx.rates_for(filters['base'], fx_codes)
     report_data = fx.calculate(raw_entries, conf, fx_rates, payments=raw_payments)
 
@@ -997,40 +996,55 @@ def build_excel_export(
         ws_summary.row_dimensions[row_cursor].height = 24
         row_cursor += 1
 
-    # Section C: FX rates table (if multi-currency rates were used)
+    # Section C: FX rates table (if multi-currency rates or manual entry rates were used)
     used_rates = [
         (code, info)
         for code, info in sorted(report_data['fx']['rates'].items())
         if code != base_code
     ]
-    if used_rates:
+    manual_fx_count = report_data.get('manual_fx_count') or 0
+    if used_rates or manual_fx_count:
         row_cursor += 1
-        _style_section_banner(ws_summary, row_cursor, 11, '三、本次报表参考汇率')
+        _style_section_banner(ws_summary, row_cursor, 11, '三、本次报表汇率说明')
         row_cursor += 1
-        _style_table_header(ws_summary, row_cursor, ['原币种', '换算币种', '参考汇率（1 原币 = ?）', '汇率日期', '汇率来源', '', '', '', '', '', ''])
-        ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=11)
-        row_cursor += 1
-        fx_source = report_data['fx'].get('source') or 'Frankfurter · 每日参考汇率'
-        for idx, (code, rate_info) in enumerate(used_rates):
-            ws_summary.row_dimensions[row_cursor].height = 21
+        if used_rates:
+            _style_table_header(ws_summary, row_cursor, ['原币种', '换算币种', '参考汇率（1 原币 = ?）', '汇率日期', '汇率来源', '', '', '', '', '', ''])
             ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=11)
-            row_fill = PatternFill('solid', fgColor=COLOR_ZEBRA_BG if idx % 2 else 'FFFFFF')
-            c1 = _set_text(ws_summary.cell(row=row_cursor, column=1), code)
-            c1.alignment = Alignment(horizontal='center', vertical='center')
-            c2 = _set_text(ws_summary.cell(row=row_cursor, column=2), base_code)
-            c2.alignment = Alignment(horizontal='center', vertical='center')
-            c3 = ws_summary.cell(row=row_cursor, column=3, value=Decimal(str(rate_info['rate'])))
-            c3.number_format = '0.######'
-            c3.alignment = Alignment(horizontal='right', vertical='center')
-            c4 = _set_text(ws_summary.cell(row=row_cursor, column=4), rate_info.get('date') or '—')
-            c4.alignment = Alignment(horizontal='center', vertical='center')
-            c5 = _set_text(ws_summary.cell(row=row_cursor, column=5), fx_source)
-            c5.alignment = Alignment(horizontal='left', vertical='center')
+            row_cursor += 1
+            fx_source = report_data['fx'].get('source') or 'Frankfurter · 每日参考汇率'
+            for idx, (code, rate_info) in enumerate(used_rates):
+                ws_summary.row_dimensions[row_cursor].height = 21
+                ws_summary.merge_cells(start_row=row_cursor, start_column=5, end_row=row_cursor, end_column=11)
+                row_fill = PatternFill('solid', fgColor=COLOR_ZEBRA_BG if idx % 2 else 'FFFFFF')
+                c1 = _set_text(ws_summary.cell(row=row_cursor, column=1), code)
+                c1.alignment = Alignment(horizontal='center', vertical='center')
+                c2 = _set_text(ws_summary.cell(row=row_cursor, column=2), base_code)
+                c2.alignment = Alignment(horizontal='center', vertical='center')
+                c3 = ws_summary.cell(row=row_cursor, column=3, value=Decimal(str(rate_info['rate'])))
+                c3.number_format = '0.######'
+                c3.alignment = Alignment(horizontal='right', vertical='center')
+                c4 = _set_text(ws_summary.cell(row=row_cursor, column=4), rate_info.get('date') or '—')
+                c4.alignment = Alignment(horizontal='center', vertical='center')
+                c5 = _set_text(ws_summary.cell(row=row_cursor, column=5), fx_source)
+                c5.alignment = Alignment(horizontal='left', vertical='center')
+                for col_i in range(1, 12):
+                    cell = ws_summary.cell(row=row_cursor, column=col_i)
+                    cell.font = val_font
+                    cell.fill = row_fill
+                    cell.border = border_thin
+                row_cursor += 1
+        if manual_fx_count:
+            ws_summary.row_dimensions[row_cursor].height = 22
+            ws_summary.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor, end_column=11)
+            note_cell = _set_text(
+                ws_summary.cell(row=row_cursor, column=1),
+                f'手动汇率说明：范围内有 {manual_fx_count} 笔外币账目使用了记账时手动指定的汇率，折算汇总与明细优先按指定汇率计算（详见「收支明细」汇率列）。',
+            )
+            note_cell.font = Font(name=FONT_FAMILY, size=9.5, color=COLOR_MUTED)
+            note_cell.fill = PatternFill('solid', fgColor=COLOR_ZEBRA_BG)
+            note_cell.alignment = Alignment(horizontal='left', vertical='center')
             for col_i in range(1, 12):
-                cell = ws_summary.cell(row=row_cursor, column=col_i)
-                cell.font = val_font
-                cell.fill = row_fill
-                cell.border = border_thin
+                ws_summary.cell(row=row_cursor, column=col_i).border = border_thin
             row_cursor += 1
 
     # =========================================================================
@@ -1054,6 +1068,7 @@ def build_excel_export(
         '累计已报销（原币种）', '剩余待报销（原币种）', '来源',
         '收据预览', '凭证文件',
         '原金额（原币种）', '手续费方式', '手续费（原币种）',
+        '汇率方式', '指定汇率',
         '备注', '处理 / 付款备注', '最近付款时间', '创建人',
     ]
     _style_table_header(ws_entries, 1, entry_headers)
@@ -1071,10 +1086,12 @@ def build_excel_export(
         rem_dec = _minor_to_decimal(entry['remaining_minor'], entry['decimals'])
 
         converted_dec = None
-        if entry['status'] != 'voided' and entry['currency'] in rate_map:
-            converted_dec = (amt_dec * Decimal(str(rate_map[entry['currency']]['rate']))).quantize(
-                base_quantum, rounding=ROUND_HALF_UP
-            )
+        if entry['status'] != 'voided':
+            eff_rate, _ = fx.effective_rate(entry, base_code, rate_map)
+            if eff_rate is not None:
+                converted_dec = (amt_dec * eff_rate).quantize(
+                    base_quantum, rounding=ROUND_HALF_UP
+                )
 
         c_id = ws_entries.cell(row=row_idx, column=1, value=entry['id'])
         c_id.number_format = '0'
@@ -1161,16 +1178,27 @@ def build_excel_export(
         c_fee = _set_money(ws_entries.cell(row=row_idx, column=17), fee_dec, entry['decimals'])
         c_fee.alignment = Alignment(horizontal='right', vertical='center')
 
-        c_note = _set_text(ws_entries.cell(row=row_idx, column=18), entry['note'])
+        has_manual_fx = bool(entry.get('fx_rate') and entry.get('fx_currency'))
+        fx_mode_label = (f'手动指定（{entry["fx_currency"]}）' if has_manual_fx
+                         else ('—' if entry['currency'] == base_code else '自动参考'))
+        c_fxmode = _set_text(ws_entries.cell(row=row_idx, column=18), fx_mode_label)
+        c_fxmode.alignment = Alignment(horizontal='center', vertical='center')
+
+        c_fxrate = ws_entries.cell(row=row_idx, column=19, value=Decimal(str(entry['fx_rate'])) if has_manual_fx else None)
+        if has_manual_fx:
+            c_fxrate.number_format = '0.00######'
+        c_fxrate.alignment = Alignment(horizontal='right', vertical='center')
+
+        c_note = _set_text(ws_entries.cell(row=row_idx, column=20), entry['note'])
         c_note.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
-        c_rnote = _set_text(ws_entries.cell(row=row_idx, column=19), entry['review_note'])
+        c_rnote = _set_text(ws_entries.cell(row=row_idx, column=21), entry['review_note'])
         c_rnote.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
-        c_paid_at = _set_text(ws_entries.cell(row=row_idx, column=20), _format_timestamp(entry['paid_at']))
+        c_paid_at = _set_text(ws_entries.cell(row=row_idx, column=22), _format_timestamp(entry['paid_at']))
         c_paid_at.alignment = Alignment(horizontal='center', vertical='center')
 
-        c_creator = _set_text(ws_entries.cell(row=row_idx, column=21), entry['creator_name'])
+        c_creator = _set_text(ws_entries.cell(row=row_idx, column=23), entry['creator_name'])
         c_creator.alignment = Alignment(horizontal='left', vertical='center')
 
         ws_entries.row_dimensions[row_idx].height = row_height
@@ -1234,7 +1262,7 @@ def build_excel_export(
         _set_text(ws_payments.cell(row=row_idx, column=11), entry['currency'])
         rate_cell = ws_payments.cell(row=row_idx, column=12, value=Decimal(str(p['fx_rate'])))
         rate_cell.number_format = '0.######'
-        _set_text(ws_payments.cell(row=row_idx, column=13), p['fx_date'] or '—')
+        _set_text(ws_payments.cell(row=row_idx, column=13), p['fx_date'] or ('手动汇率' if p['currency'] != entry['currency'] else '—'))
         _set_text(ws_payments.cell(row=row_idx, column=14), p['note'])
 
         for col_i in range(1, len(payment_headers) + 1):
@@ -1428,8 +1456,8 @@ def build_excel_export(
     )
     _auto_fit_columns(
         ws_entries,
-        min_widths={1: 9, 2: 13, 3: 12, 4: 22, 5: 14, 6: 16, 7: 9, 8: 16, 9: 12, 10: 16, 11: 16, 12: 10, 14: 18, 15: 16, 16: 14, 17: 16, 18: 20, 19: 20, 20: 20, 21: 13},
-        max_widths={4: 36, 14: 28, 18: 36, 19: 32},
+        min_widths={1: 9, 2: 13, 3: 12, 4: 22, 5: 14, 6: 16, 7: 9, 8: 16, 9: 12, 10: 16, 11: 16, 12: 10, 14: 18, 15: 16, 16: 14, 17: 16, 18: 16, 19: 14, 20: 20, 21: 20, 22: 20, 23: 13},
+        max_widths={4: 36, 14: 28, 20: 36, 21: 32},
         skip_cols={13},
     )
     ws_entries.column_dimensions['M'].width = 24 if filters['include_receipts'] else 16

@@ -84,6 +84,65 @@ def rates_for(base, codes, force=False):
     return result
 
 
+def manual_rate_for(item, parent_entry=None):
+    """Return (Decimal_rate, fx_currency) if item (or parent entry for same-currency payment) has a manual FX rate."""
+    if parent_entry is not None:
+        if item.get('currency') == parent_entry.get('currency') and parent_entry.get('fx_rate') and parent_entry.get('fx_currency'):
+            return Decimal(str(parent_entry['fx_rate'])), parent_entry['fx_currency']
+        return None, ''
+    if item.get('fx_rate') and item.get('fx_currency'):
+        return Decimal(str(item['fx_rate'])), item['fx_currency']
+    return None, ''
+
+
+def effective_rate(item, base, rates_map, *, parent_entry=None):
+    """Resolve conversion rate from item's currency to base. Returns (Decimal_rate_or_None, is_manual)."""
+    code = item['currency']
+    if code == base:
+        return Decimal(1), False
+    m_rate, m_cur = manual_rate_for(item, parent_entry=parent_entry)
+    if m_rate is not None:
+        if m_cur == base:
+            return m_rate, True
+        bridge = (rates_map or {}).get(m_cur)
+        if bridge:
+            return m_rate * Decimal(str(bridge['rate'])), True
+        return None, True
+    row = (rates_map or {}).get(code)
+    if row:
+        return Decimal(str(row['rate'])), False
+    return None, False
+
+
+def required_codes(entries, payments, base, extra_codes=None):
+    """Return the set of currency codes that need external FX rates to convert into base."""
+    entry_by_id = {e['id']: e for e in entries}
+    codes = set(extra_codes or ())
+    for e in entries:
+        if e['status'] not in ('posted', 'pending', 'reimbursed'):
+            continue
+        if e['currency'] == base:
+            continue
+        m_rate, m_cur = manual_rate_for(e)
+        if m_rate is not None:
+            if m_cur != base:
+                codes.add(m_cur)
+        else:
+            codes.add(e['currency'])
+    for p in payments or ():
+        if p['currency'] == base:
+            continue
+        parent = entry_by_id.get(p.get('entry_id'))
+        m_rate, m_cur = manual_rate_for(p, parent_entry=parent)
+        if m_rate is not None:
+            if m_cur != base:
+                codes.add(m_cur)
+        else:
+            codes.add(p['currency'])
+    codes.discard(base)
+    return codes
+
+
 def _income_type(entry):
     return 'capital' if entry.get('income_type') == 'capital' else 'operating'
 
@@ -232,8 +291,10 @@ def _shareholder_contributions(capital_incomes, conf, fx_data=None, complete=Fal
         g['count'] += 1
         amt = Decimal(e['amount_minor']) / (10 ** e['decimals'])
         g['currencies'][e['currency']] = g['currencies'].get(e['currency'], Decimal(0)) + amt
-        if complete and fx_data and e['currency'] in fx_data['rates']:
-            g['total_dec'] += amt * Decimal(fx_data['rates'][e['currency']]['rate'])
+        if complete and fx_data:
+            rate, _ = effective_rate(e, fx_data['base'], fx_data['rates'])
+            if rate is not None:
+                g['total_dec'] += amt * rate
 
     items = []
     for g in groups.values():
@@ -263,7 +324,7 @@ def _shareholder_contributions(capital_incomes, conf, fx_data=None, complete=Fal
     return items
 
 
-def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=None):
+def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=None, extra_codes=None):
     base = fx['base']
     base_decimals = currency(conf, base)['decimals']
     quantum = Decimal(1).scaleb(-base_decimals)
@@ -271,10 +332,27 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
     def formatted(value):
         return format(value.quantize(quantum, rounding=ROUND_HALF_UP), f'.{base_decimals}f')
 
-    def convert(entry, units=None):
-        return Decimal(entry['amount_minor'] if units is None else units) / (10 ** entry['decimals']) * Decimal(fx['rates'][entry['currency']]['rate'])
-
     payments = payments or []
+    entry_by_id = {e['id']: e for e in entries}
+    all_extra = set(extra_codes or ())
+    if scenario:
+        all_extra.add(scenario['currency'])
+    needed = required_codes(entries, payments, base, all_extra)
+    actual_missing = sorted(needed - set(fx['rates'].keys()))
+    manual_fx_count = sum(
+        1 for e in entries
+        if e['status'] in ('posted', 'pending', 'reimbursed')
+        and e['currency'] != base and e.get('fx_rate') and e.get('fx_currency')
+    )
+
+    def convert(entry, units=None):
+        rate, _ = effective_rate(entry, base, fx['rates'])
+        return Decimal(entry['amount_minor'] if units is None else units) / (10 ** entry['decimals']) * rate
+
+    def convert_payment(payment):
+        rate, _ = effective_rate(payment, base, fx['rates'], parent_entry=entry_by_id.get(payment.get('entry_id')))
+        return Decimal(payment['amount_minor']) / (10 ** payment['decimals']) * rate
+
     posted_incomes = [e for e in entries if e['kind'] == 'income' and e['status'] == 'posted']
     operating_incomes = [e for e in posted_incomes if _income_type(e) == 'operating']
     capital_incomes = [e for e in posted_incomes if _income_type(e) == 'capital']
@@ -285,11 +363,12 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
         balances[key] = balances.get(key, Decimal(0)) + factor * Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
     choice = reimbursement_plan.normalize(entries, conf, base, reimbursement)
     currency_accounts = _currency_accounts(entries, payments, conf)
-    common = {'reimbursement': choice, 'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
+    common = {'reimbursement': choice, 'base': base, 'fx': fx, 'manual_fx_count': manual_fx_count,
+              'balances': {k: str(v) for k, v in balances.items()},
               'currency_accounts': currency_accounts,
-              'complete': not fx['missing'], 'scenario': scenario, 'members': [],
+              'complete': not actual_missing, 'scenario': scenario, 'members': [],
               'shareholder_contributions': _shareholder_contributions(capital_incomes, conf)}
-    if fx['missing']:
+    if actual_missing:
         return common
     operating_income = sum((convert(e) for e in operating_incomes), Decimal(0))
     capital_income = sum((convert(e) for e in capital_incomes), Decimal(0))
@@ -298,7 +377,7 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
     today_operating_income = sum((convert(e) for e in operating_incomes if e['date'] == today_str), Decimal(0))
     today_capital_income = sum((convert(e) for e in capital_incomes if e['date'] == today_str), Decimal(0))
     today_income = today_operating_income + today_capital_income
-    paid = sum((convert(p) for p in payments), Decimal(0))
+    paid = sum((convert_payment(p) for p in payments), Decimal(0))
     public_paid = sum((convert(e) for e in public_expenses), Decimal(0))
     total_outflow = paid + public_paid
     due_entries = sorted((e for e in entries if e['kind'] == 'expense' and e.get('expense_type', 'advance') == 'advance' and e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
@@ -355,6 +434,9 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
             'fee_rate': entry.get('fee_rate') or '',
             'fee_minor': fee_minor,
             'fee_amount': format(Decimal(fee_minor) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
+            'fx_mode': 'manual' if (entry.get('fx_rate') and entry.get('fx_currency')) else 'auto',
+            'fx_rate': entry.get('fx_rate') or '',
+            'fx_currency': entry.get('fx_currency') or '',
             'reimbursed_amount': format(Decimal(entry['reimbursed_minor']) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
             'settlement': formatted(amount),
             'suggested': formatted(portion),
@@ -472,13 +554,10 @@ def public_balance_report(base=None, *, as_of='', adjustments=None, bank_actual=
     }
     parsed_bank = _parse_bank_actual(conf, base, bank_actual)
     entries, payments = _snapshot_as_of(entries, payments, as_of_iso)
-    codes = {e['currency'] for e in entries if e['status'] in ('posted', 'pending', 'reimbursed')}
-    codes.update(p['currency'] for p in payments)
-    for item in parsed_adj.values():
-        if item:
-            codes.add(item['currency'])
+    extra_codes = {item['currency'] for item in parsed_adj.values() if item}
+    codes = required_codes(entries, payments, base, extra_codes)
     fx_rates = rates_for(base, codes, force)
-    result = calculate(entries, conf, fx_rates, payments=payments)
+    result = calculate(entries, conf, fx_rates, payments=payments, extra_codes=extra_codes)
 
     sim_deltas = {}
     for key, field in (('operating_income', 'operating'), ('capital_income', 'capital'), ('public_expense', 'public_expense')):
@@ -611,13 +690,13 @@ def report(base=None, scenario=None, force=False, reimbursement=None):
         currency(conf, base)
         entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
         payments = [dict(p) for p in conn.execute('SELECT * FROM payments')]
-    # Ignore drafts and voided entries when looking up rates.
-    codes = {e['currency'] for e in entries if e['status'] in ('posted', 'pending', 'reimbursed')}
-    codes.update(p['currency'] for p in payments)
+    # Ignore drafts, voided entries and entries covered by manual rates when looking up external rates.
+    extra_codes = set()
     if scenario:
         currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], currency(conf, scenario['currency'])['decimals'])
-        codes.add(scenario['currency'])
+        extra_codes.add(scenario['currency'])
+    codes = required_codes(entries, payments, base, extra_codes)
     # Reject invalid choices before requesting external exchange rates.
     reimbursement = reimbursement_plan.normalize(entries, conf, base, reimbursement)
     return calculate(entries, conf, rates_for(base, codes, force), scenario, payments, reimbursement)

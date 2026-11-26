@@ -566,9 +566,13 @@ def payment_quotes(body: dict, request: Request):
         fail('请选择 1–100 笔不同账目')
     with db() as conn:
         conf = settings(conn)
-        codes = {entry_view(conn, entry_id)['currency'] for entry_id in ids}
+        entry_views = [entry_view(conn, entry_id) for entry_id in ids]
     code = body.get('currency', 'original')
-    rates = fx.rates_for(conf['reference_currency'], codes) if code == conf['reference_currency'] else None
+    codes = {
+        e['currency'] for e in entry_views
+        if e['currency'] != code and not (e.get('fx_rate') and e.get('fx_currency') == code)
+    }
+    rates = fx.rates_for(conf['reference_currency'], codes) if code == conf['reference_currency'] and codes else None
     with db(write=True) as conn:
         return [make_payment_quote(conn, user, entry_id, code, rates) for entry_id in ids]
 

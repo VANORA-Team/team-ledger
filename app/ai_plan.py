@@ -4,7 +4,7 @@ import re
 import secrets
 import time
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from fastapi import HTTPException
 from . import config, fx
 from .db import settings
@@ -121,6 +121,32 @@ def _rate_value(value):
         return ''
     text = text.rstrip('%').strip()
     return text
+
+
+def _fx_rate_value(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return format(Decimal(str(value)), 'f')
+    text = str(value).strip().translate(str.maketrans('０１２３４５６７８９．', '0123456789.'))
+    return text
+
+
+def _fx_converted_amount(amount_minor, decimals, fx_rate, fx_currency, conf):
+    if not fx_rate or not fx_currency:
+        return ''
+    target_dec = next((c['decimals'] for c in conf['currencies'] if c['code'] == fx_currency), 2)
+    val = (Decimal(amount_minor) / (10 ** decimals) * Decimal(str(fx_rate))).quantize(
+        Decimal(1).scaleb(-target_dec), rounding=ROUND_HALF_UP
+    )
+    return format(val, f'.{target_dec}f')
+
+
+def _fx_summary_text(fx_rate, fx_currency, fx_amount, code, conf):
+    if not fx_rate or not fx_currency:
+        return ''
+    conv = f' ≈ {_money(fx_amount, fx_currency, conf)}' if fx_amount else ''
+    return f'（手动汇率 1 {code} = {fx_rate} {fx_currency}{conv}）'
 
 
 def _fee_summary_text(kind, fee_mode, fee_rate, fee_amount, effective_amount, code, conf):
@@ -284,6 +310,8 @@ def _resolve_create(conn, user, conf, action):
             card['errors'].append('手续费金额格式不正确')
         else:
             fee_amount_in = parsed_fee
+    raw_fx_mode = action.get('fx_mode')
+    fx_rate_in = _fx_rate_value(action.get('fx_rate')) if action.get('fx_rate') not in (None, '') else ''
     body = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount': amount or '', 'currency': code, 'description': description,
             'date': entry_date, 'payer_id': payer_id, 'status': status, 'note': note}
     if raw_fee_mode not in (None, ''):
@@ -292,6 +320,10 @@ def _resolve_create(conn, user, conf, action):
         body['fee_rate'] = fee_rate
     if fee_amount_in != '':
         body['fee_amount'] = fee_amount_in
+    if raw_fx_mode not in (None, ''):
+        body['fx_mode'] = raw_fx_mode
+    if fx_rate_in != '':
+        body['fx_rate'] = fx_rate_in
     norm = None
     if not card['errors']:
         try:
@@ -302,18 +334,24 @@ def _resolve_create(conn, user, conf, action):
     eff_fee_rate = norm['fee_rate'] if norm else fee_rate
     eff_fee_amount = format(Decimal(norm['fee_minor']) / (10 ** cur['decimals']), f'.{cur["decimals"]}f') if norm else fee_amount_in
     eff_amount = format(Decimal(norm['amount_minor']) / (10 ** cur['decimals']), f'.{cur["decimals"]}f') if norm else (amount or '')
+    eff_fx_rate = norm['fx_rate'] if norm else fx_rate_in
+    eff_fx_currency = norm['fx_currency'] if norm else (conf['reference_currency'] if fx_rate_in else '')
+    eff_fx_mode = 'manual' if (eff_fx_rate and eff_fx_currency) else 'auto'
+    eff_fx_amount = _fx_converted_amount(norm['amount_minor'], cur['decimals'], eff_fx_rate, eff_fx_currency, conf) if norm else ''
     resolved_amount = eff_amount if eff_fee_mode != 'none' else (amount or '')
     label = ('公户转入' if income_type == 'capital' else '营业收入') if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
     card['label'] = label
     card['resolved'] = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type,
                         'amount': resolved_amount, 'gross_amount': amount or '',
                         'fee_mode': eff_fee_mode, 'fee_rate': eff_fee_rate, 'fee_amount': eff_fee_amount if eff_fee_mode != 'none' else '',
+                        'fx_mode': eff_fx_mode, 'fx_rate': eff_fx_rate, 'fx_currency': eff_fx_currency, 'fx_amount': eff_fx_amount,
                         'currency': code, 'description': description,
                         'date': entry_date, 'payer_id': payer_id, 'payer_name': payer_name,
                         'status': status, 'note': note}
     state = '草稿' if status == 'draft' else ('公户转入 · 计入公户/不计利润' if income_type == 'capital' else '营业收入 · 计入公户与利润') if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
     fee_text = _fee_summary_text(kind, eff_fee_mode, eff_fee_rate, eff_fee_amount, eff_amount, code, conf) if norm else ''
-    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)}{fee_text} · {entry_date} · {payer_name} · {state}'
+    fx_text = _fx_summary_text(eff_fx_rate, eff_fx_currency, eff_fx_amount, code, conf) if norm else ''
+    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)}{fee_text}{fx_text} · {entry_date} · {payer_name} · {state}'
     return card
 
 
@@ -338,6 +376,9 @@ def _resolve_edit(conn, user, conf, action, context_ids):
             'fee_mode': entry.get('fee_mode') or 'none',
             'fee_rate': entry.get('fee_rate') or '',
             'fee_amount': entry['fee_amount'] if entry.get('fee_mode') == 'fixed' else '',
+            'fx_mode': entry.get('fx_mode') or ('manual' if entry.get('fx_rate') else 'auto'),
+            'fx_rate': entry.get('fx_rate') or '',
+            'fx_currency': entry.get('fx_currency') or '',
             'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
             'note': entry['note'], 'status': entry['status']}
     if entry['kind'] == 'expense' and 'expense_type' in action:
@@ -352,11 +393,35 @@ def _resolve_edit(conn, user, conf, action, context_ids):
             card['errors'].append('修改金额需要明确数字')
         else:
             body['amount'] = amount
+    currency_changed = False
     if 'currency' in action and action.get('currency'):
         try:
-            body['currency'] = currency(conf, action['currency'])['code']
+            next_code = currency(conf, action['currency'])['code']
+            currency_changed = next_code != body['currency']
+            body['currency'] = next_code
         except HTTPException as exc:
             _error(card, exc)
+    has_fx_mode = 'fx_mode' in action and action.get('fx_mode') not in (None, '')
+    has_fx_rate = 'fx_rate' in action and action.get('fx_rate') is not None
+    if has_fx_mode or has_fx_rate:
+        if action.get('fx_mode') == 'auto':
+            body['fx_mode'] = 'auto'
+            body['fx_rate'] = ''
+            body['fx_currency'] = ''
+        else:
+            parsed_fx = _fx_rate_value(action.get('fx_rate')) if has_fx_rate else body['fx_rate']
+            if parsed_fx in (None, '') and not has_fx_mode:
+                body['fx_mode'] = 'auto'
+                body['fx_rate'] = ''
+                body['fx_currency'] = ''
+            else:
+                body['fx_mode'] = action.get('fx_mode') if has_fx_mode else 'manual'
+                body['fx_rate'] = parsed_fx or ''
+                body['fx_currency'] = conf['reference_currency'] if (has_fx_rate or currency_changed or not body['fx_currency']) else body['fx_currency']
+    elif currency_changed:
+        body['fx_mode'] = 'auto'
+        body['fx_rate'] = ''
+        body['fx_currency'] = ''
     has_mode = 'fee_mode' in action and action.get('fee_mode') not in (None, '')
     has_rate = 'fee_rate' in action and action.get('fee_rate') not in (None, '')
     has_famt = 'fee_amount' in action and action.get('fee_amount') not in (None, '')
@@ -405,6 +470,10 @@ def _resolve_edit(conn, user, conf, action, context_ids):
     eff_fee_rate = norm['fee_rate'] if norm else body['fee_rate']
     eff_fee_amount = format(Decimal(norm['fee_minor']) / (10 ** cur_obj['decimals']), f'.{cur_obj["decimals"]}f') if norm else body['fee_amount']
     eff_amount = format(Decimal(norm['amount_minor']) / (10 ** cur_obj['decimals']), f'.{cur_obj["decimals"]}f') if norm else body['amount']
+    eff_fx_rate = norm['fx_rate'] if norm else body['fx_rate']
+    eff_fx_currency = norm['fx_currency'] if norm else body['fx_currency']
+    eff_fx_mode = 'manual' if (eff_fx_rate and eff_fx_currency) else 'auto'
+    eff_fx_amount = _fx_converted_amount(norm['amount_minor'], cur_obj['decimals'], eff_fx_rate, eff_fx_currency, conf) if norm else ''
     resolved_body = {
         **body,
         'gross_amount': body['amount'],
@@ -412,11 +481,16 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         'fee_mode': eff_fee_mode,
         'fee_rate': eff_fee_rate,
         'fee_amount': eff_fee_amount if eff_fee_mode != 'none' else '',
+        'fx_mode': eff_fx_mode,
+        'fx_rate': eff_fx_rate,
+        'fx_currency': eff_fx_currency,
+        'fx_amount': eff_fx_amount,
     }
     card['resolved'] = {'id': entry['id'], 'version': entry['version'], **resolved_body, 'payer_name': payer_name}
     before = f'{_money(entry["amount"], entry["currency"], conf)} · {entry["description"] or "未填写说明"}'
     fee_text = _fee_summary_text(entry['kind'], eff_fee_mode, eff_fee_rate, eff_fee_amount, eff_amount, body['currency'], conf) if norm else ''
-    after = f'{_money(body["amount"], body["currency"], conf)}{fee_text} · {body["description"] or "未填写说明"}'
+    fx_text = _fx_summary_text(eff_fx_rate, eff_fx_currency, eff_fx_amount, body['currency'], conf) if norm else ''
+    after = f'{_money(body["amount"], body["currency"], conf)}{fee_text}{fx_text} · {body["description"] or "未填写说明"}'
     card['summary'] = f'#{entry["id"]} 修改：{before} → {after} · {body["date"]}'
     return card
 
@@ -715,13 +789,12 @@ def _report_with_conn(conn, base=None, scenario=None):
     entries = [dict(row) for row in conn.execute(
         'SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
     payments = [dict(row) for row in conn.execute('SELECT * FROM payments')]
-    codes = {e['currency'] for e in entries
-             if e['status'] in ('posted', 'pending', 'reimbursed')}
-    codes.update(payment['currency'] for payment in payments)
+    extra_codes = set()
     if scenario:
         cur = currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], cur['decimals'])
-        codes.add(cur['code'])
+        extra_codes.add(cur['code'])
+    codes = fx.required_codes(entries, payments, base, extra_codes)
     return fx.calculate(entries, conf, fx.cached_rates(base, codes), scenario, payments)
 
 
@@ -961,6 +1034,18 @@ def _create_body(resolved):
             body['fee_rate'] = resolved['fee_rate']
         if resolved.get('fee_amount') not in (None, ''):
             body['fee_amount'] = resolved['fee_amount']
+    fx_mode = resolved.get('fx_mode')
+    if fx_mode == 'manual' and resolved.get('fx_rate') not in (None, ''):
+        body['fx_mode'] = 'manual'
+        body['fx_rate'] = resolved['fx_rate']
+        if resolved.get('fx_currency'):
+            body['fx_currency'] = resolved['fx_currency']
+    elif fx_mode == 'auto':
+        body['fx_mode'] = 'auto'
+    elif resolved.get('fx_rate') not in (None, ''):
+        body['fx_rate'] = resolved['fx_rate']
+        if resolved.get('fx_currency'):
+            body['fx_currency'] = resolved['fx_currency']
     body['expense_type'] = resolved.get('expense_type', 'advance') if body['kind'] == 'expense' else ''
     body['income_type'] = (resolved.get('income_type') or 'operating') if body['kind'] == 'income' else ''
     return body
@@ -1088,17 +1173,19 @@ def needed_rates(conn, conf, raw):
                 pass
     if not need and not query_bases:
         return None
-    codes = {row['currency'] for row in conn.execute("SELECT DISTINCT currency FROM entries WHERE status IN ('pending','reimbursed','posted')")}
-    codes.add(conf['reference_currency'])
+    entries = [dict(row) for row in conn.execute("SELECT id,currency,status,fx_rate,fx_currency FROM entries WHERE status IN ('pending','reimbursed','posted')")]
+    payments = [dict(row) for row in conn.execute('SELECT entry_id,currency FROM payments')]
     # Warm query-only bases before the write lock; _report_with_conn then uses cache only.
     for base in query_bases - {conf['reference_currency']}:
         try:
-            fx.rates_for(base, codes)
+            base_codes = fx.required_codes(entries, payments, base)
+            fx.rates_for(base, base_codes)
         except Exception:
             pass
     if not need:
         return None
     try:
-        return fx.rates_for(conf['reference_currency'], codes)
+        ref_codes = fx.required_codes(entries, payments, conf['reference_currency'])
+        return fx.rates_for(conf['reference_currency'], ref_codes)
     except Exception:
         return None

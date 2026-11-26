@@ -211,15 +211,25 @@ def _raw_input(text, conf):
             'description': desc,
             'date': config.today(),
         }
-        fee_match = re.search(r'(?:^|\s)手续费\s*[:：]?\s*(\d+(?:\.\d+)?)(%|％)?\s*$', desc)
-        if fee_match:
-            action['description'] = desc[:fee_match.start()].strip()
-            if fee_match[2]:
-                action['fee_mode'] = 'rate'
-                action['fee_rate'] = fee_match[1]
-            else:
-                action['fee_mode'] = 'fixed'
-                action['fee_amount'] = fee_match[1]
+        while True:
+            fee_match = re.search(r'(?:^|\s)手续费\s*[:：]?\s*(\d+(?:\.\d+)?)(%|％)?\s*$', desc)
+            if fee_match and 'fee_mode' not in action:
+                desc = desc[:fee_match.start()].strip()
+                if fee_match[2]:
+                    action['fee_mode'] = 'rate'
+                    action['fee_rate'] = fee_match[1]
+                else:
+                    action['fee_mode'] = 'fixed'
+                    action['fee_amount'] = fee_match[1]
+                continue
+            fx_match = re.search(r'(?:^|\s)汇率\s*[:：]?\s*(\d+(?:\.\d+)?)\s*$', desc)
+            if fx_match and 'fx_rate' not in action:
+                desc = desc[:fx_match.start()].strip()
+                action['fx_mode'] = 'manual'
+                action['fx_rate'] = fx_match[1]
+                continue
+            break
+        action['description'] = desc
         return {'reply': '', 'questions': [], 'actions': [action]}
     queries = {'最近账目': 'list_entries', '余额': 'balance', '公户结余': 'balance', '待报销': 'due'}
     if text in queries:

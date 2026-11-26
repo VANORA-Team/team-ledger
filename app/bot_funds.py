@@ -155,7 +155,7 @@ def show_plan(conn, chat_id, token, plan, page=0, done=False):
         lines += [f'#{item["id"]} {entry_description(item)[:60]}\n{item["name"][:40]} · {item["date"]}\n实际付款：' + amount_text(item['amount'], item['currency'], conf) +
                   '\n抵扣记账：' + amount_text(item['credited'], item['entry_currency'], conf) + ' · 剩余：' + amount_text(item['remaining'], item['entry_currency'], conf)]
         if item['currency'] != item['entry_currency']:
-            lines.append(f'1 {item["entry_currency"]} = {item["rate"]} {item["currency"]} · {item["rate_date"]}')
+            lines.append(f'1 {item["entry_currency"]} = {item["rate"]} {item["currency"]} · {item["rate_date"] or "手动汇率"}')
     lines.append('\n付款备注：' + plan['note'])
     if not done:
         lines.append('请确认以上每笔已实际转账。点击确认后一次登记全部项目，未结清部分继续待报销。确认有效 30 分钟，账本变化后需重新计算。')
