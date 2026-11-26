@@ -11,7 +11,7 @@ import tempfile
 import threading
 import zipfile
 import zlib
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -24,6 +24,19 @@ from .locks import data_guard, file_lock
 
 log = logging.getLogger(__name__)
 TARGETS = ('local', 'webdav', 's3')
+RETRY_DELAYS_MINUTES = (5, 15, 30, 60)
+FIELD_LABELS = {
+    'username': 'WebDAV 用户名',
+    'region': 'S3 区域',
+    'bucket': 'S3 存储桶名称',
+    'access_key_id': 'S3 Access Key ID',
+}
+CLOUD_VIRTUAL_S3_SUFFIXES = (
+    '.amazonaws.com', '.amazonaws.com.cn',
+    '.aliyuncs.com', '.myqcloud.com', '.myhuaweicloud.com',
+    '.r2.cloudflarestorage.com', '.backblazeb2.com',
+    '.digitaloceanspaces.com', '.wasabisys.com',
+)
 DEFAULT = {
     'webdav': {'url': '', 'username': '', 'password': '', 'prefix': 'team-ledger'},
     's3': {'endpoint': '', 'region': 'us-east-1', 'bucket': '', 'access_key_id': '',
@@ -40,11 +53,21 @@ EPHEMERAL = ('sessions', 'oidc_flows', 'oidc_invites', 'oidc_revoked_jti',
              'fsui_prompts', 'fsui_actions', 'feishu_pending', 'feishu_outbox')
 # Newer tables and columns may be absent in older backups and will be
 # created by init_db() right after restore.
-OPTIONAL_TABLES = {'ai_config', 'oidc_flows', 'oidc_revoked_jti'}
+OPTIONAL_TABLES = {
+    'ai_config', 'oidc_flows', 'oidc_revoked_jti',
+    'fsui_identities', 'fsui_links', 'fsui_updates', 'fsui_drafts',
+    'fsui_outbox', 'fsui_prompts', 'fsui_messages', 'fsui_actions',
+}
 OPTIONAL_COLUMNS = {
     'users': {'oidc_issuer', 'oidc_sub', 'oidc_email'},
     'sessions': {'oidc_sid'},
-    'entries': {'income_type', 'gross_amount_minor', 'fee_mode', 'fee_rate', 'fee_minor', 'fx_rate', 'fx_currency'},
+    'entries': {
+        'reimbursed_minor', 'expense_type', 'income_type',
+        'gross_amount_minor', 'fee_mode', 'fee_rate', 'fee_minor',
+        'fx_rate', 'fx_currency',
+    },
+    'feishu_config': {'domain'},
+    'feishu_outbox': {'attempts'},
 }
 
 
@@ -62,11 +85,29 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def _merge_config(raw):
+    merged = copy.deepcopy(DEFAULT)
+    if not isinstance(raw, dict):
+        return merged
+    for section in ('webdav', 's3', 'schedule'):
+        if isinstance(raw.get(section), dict):
+            for key in merged[section]:
+                if key in raw[section]:
+                    merged[section][key] = raw[section][key]
+    if type(raw.get('keep')) is int and 1 <= raw['keep'] <= 1000:
+        merged['keep'] = raw['keep']
+    return merged
+
+
 def _read_control():
     path = config.DATA / 'backup-control.json'
     if not path.exists():
         return {'config': copy.deepcopy(DEFAULT), 'status': {}}
-    return json.loads(path.read_text(encoding='utf-8'))
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict):
+        return {'config': copy.deepcopy(DEFAULT), 'status': {}}
+    status = data.get('status')
+    return {'config': _merge_config(data.get('config')), 'status': status if isinstance(status, dict) else {}}
 
 
 def _write_control(value):
@@ -166,6 +207,36 @@ def next_run(schedule, after=None):
     return result.isoformat(timespec='seconds')
 
 
+def _validate_s3_endpoint(endpoint, bucket):
+    if not endpoint or not bucket:
+        return
+    parsed = urlsplit(endpoint)
+    path_parts = [p for p in parsed.path.split('/') if p]
+    if path_parts and path_parts[-1] == bucket:
+        clean_path = '/' + '/'.join(path_parts[:-1]) if len(path_parts) > 1 else ''
+        suggestion = f'{parsed.scheme}://{parsed.netloc}{clean_path}'
+        raise BackupError(f'S3 Endpoint 请勿包含存储桶路径，请改为 {suggestion}')
+    host = (parsed.hostname or '').lower()
+    prefix = bucket.lower() + '.'
+    if host.startswith(prefix):
+        rest = host[len(prefix):]
+        if any(('.' + rest).endswith(suffix) for suffix in CLOUD_VIRTUAL_S3_SUFFIXES):
+            port_part = f':{parsed.port}' if parsed.port else ''
+            suggestion = f'{parsed.scheme}://{rest}{port_part}{parsed.path}'
+            raise BackupError(f'S3 Endpoint 请填写不含存储桶前缀的服务端点（如 {suggestion}），并按需关闭 Path style')
+
+
+@contextmanager
+def _open_remote(target, conf):
+    store = remote(target, conf)
+    try:
+        yield store
+    finally:
+        close = getattr(store, 'close', None)
+        if callable(close):
+            close()
+
+
 def save_config(body):
     if not isinstance(body, dict):
         raise BackupError('备份配置格式不正确')
@@ -173,6 +244,8 @@ def save_config(body):
         control = _read_control()
         conf = control['config']
         previous = copy.deepcopy(conf['schedule'])
+        previous_s3 = copy.deepcopy(conf['s3'])
+        previous_webdav = copy.deepcopy(conf['webdav'])
         for section in ('webdav', 's3'):
             incoming = body.get(section, {})
             if not isinstance(incoming, dict):
@@ -184,8 +257,9 @@ def save_config(body):
                 if key in ('password', 'secret_access_key'):
                     if not isinstance(value, str) or len(value) > 2000 or '\r' in value or '\n' in value:
                         raise BackupError('密码或密钥格式不正确')
-                    if value:
-                        conf[section][key] = value
+                    cleaned = value.strip() if key == 'secret_access_key' else value
+                    if cleaned:
+                        conf[section][key] = cleaned
                 elif key == 'path_style':
                     if type(value) is not bool:
                         raise BackupError('S3 路径风格格式不正确')
@@ -195,11 +269,18 @@ def save_config(body):
                 elif key == 'prefix':
                     conf[section][key] = _prefix(value)
                 else:
-                    conf[section][key] = _text(value, key, 200)
+                    conf[section][key] = _text(value, FIELD_LABELS.get(key, key), 200)
+        if isinstance(body.get('webdav'), dict) and not conf['webdav']['url'] and not conf['webdav']['username'] and not body['webdav'].get('password'):
+            conf['webdav']['password'] = ''
+        if isinstance(body.get('s3'), dict) and not conf['s3']['bucket'] and not conf['s3']['access_key_id'] and not (body['s3'].get('secret_access_key') or '').strip():
+            conf['s3']['secret_access_key'] = ''
+        if not conf['s3']['region']:
+            conf['s3']['region'] = 'us-east-1'
         if conf['s3']['bucket'] and not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}', conf['s3']['bucket']):
             raise BackupError('S3 存储桶名称不正确')
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', conf['s3']['region']):
+        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}', conf['s3']['region']):
             raise BackupError('S3 区域格式不正确')
+        _validate_s3_endpoint(conf['s3']['endpoint'], conf['s3']['bucket'])
         if 'keep' in body:
             if type(body['keep']) is not int or not 1 <= body['keep'] <= 1000:
                 raise BackupError('备份保留份数需为 1–1000')
@@ -218,12 +299,17 @@ def save_config(body):
             targets = schedule['targets']
             if not isinstance(targets, list) or not targets or any(t not in TARGETS for t in targets) or len(set(targets)) != len(targets):
                 raise BackupError('请至少选择一个有效的自动备份位置')
-            if schedule['enabled']:
-                for target in targets:
-                    require_target(target, conf)
             conf['schedule'] = schedule
+        if conf['schedule']['enabled']:
+            for target in conf['schedule']['targets']:
+                require_target(target, conf)
         if conf['schedule'] != previous or not control['status'].get('next_run'):
+            for k in ('retry_name', 'retry_targets', 'retry_count', 'schedule_due'):
+                control['status'].pop(k, None)
             control['status']['next_run'] = next_run(conf['schedule']) if conf['schedule']['enabled'] else None
+        elif (conf['s3'] != previous_s3 or conf['webdav'] != previous_webdav) and control['status'].get('retry_targets'):
+            control['status']['retry_count'] = 0
+            control['status']['next_run'] = utcnow().isoformat(timespec='seconds')
         _write_control(control)
     return public_config()
 
@@ -252,9 +338,10 @@ def list_backups(target='local'):
                        for p in local_folder().iterdir() if p.is_file() and not p.is_symlink() and valid_name(p.name)],
                       key=lambda p: p['modified_at'], reverse=True)
     try:
-        return remote(target, conf).list()
+        with _open_remote(target, conf) as store:
+            return store.list()
     except StorageError as exc:
-        raise BackupError(str(exc), 502) from None
+        raise BackupError(str(exc), getattr(exc, 'status', 502)) from None
 
 
 def _name(prefix='team-ledger'):
@@ -297,23 +384,56 @@ def _snapshot(output, work):
             raise BackupError('备份文件超过服务器允许的大小，请调整 BACKUP_MAX_BYTES', 413)
 
 
-def _prune(target, conf, preserve=None):
-    items = list_backups(target) if target == 'local' else remote(target, conf).list()
-    regular = sorted([i for i in items if i['name'].startswith('team-ledger-')],
-                     key=lambda i: i['name'], reverse=True)
-    regular.sort(key=lambda i: i['name'] != preserve)
-    for item in regular[conf['keep']:]:
-        if target == 'local':
-            local_path(item['name']).unlink(missing_ok=True)
-        else:
-            remote(target, conf).delete(item['name'])
-    # Keep a separate bounded set of automatic safety copies.
+def _prune(target, conf, preserve=None, store=None):
     if target == 'local':
+        items = list_backups('local')
+        regular = sorted([i for i in items if i['name'].startswith('team-ledger-')],
+                         key=lambda i: i['name'], reverse=True)
+        regular.sort(key=lambda i: i['name'] != preserve)
+        for item in regular[conf['keep']:]:
+            local_path(item['name']).unlink(missing_ok=True)
+        # Keep a separate bounded set of automatic safety copies.
         safety = sorted([i for i in items if i['name'].startswith('before-restore-')],
                         key=lambda i: i['name'], reverse=True)
         safety.sort(key=lambda i: i['name'] != preserve)
         for item in safety[conf['keep']:]:
             local_path(item['name']).unlink(missing_ok=True)
+        return
+
+    @contextmanager
+    def _use_store():
+        if store is not None:
+            yield store
+        else:
+            with _open_remote(target, conf) as opened:
+                yield opened
+
+    with _use_store() as client:
+        items = client.list()
+        regular = sorted([i for i in items if i['name'].startswith('team-ledger-')],
+                         key=lambda i: i['name'], reverse=True)
+        regular.sort(key=lambda i: i['name'] != preserve)
+        for item in regular[conf['keep']:]:
+            client.delete(item['name'])
+
+
+def _upload_remote_targets(name, targets, conf, results, errors):
+    local_file = local_path(name)
+    for target in targets:
+        if target == 'local':
+            continue
+        try:
+            require_target(target, conf)
+            with _open_remote(target, conf) as store:
+                store.upload(name, local_file)
+                results[target] = 'ok'
+                try:
+                    _prune(target, conf, preserve=name, store=store)
+                except (BackupError, StorageError, OSError):
+                    errors.append(f'{target} 备份已保存，但旧备份清理失败')
+        except (BackupError, StorageError) as exc:
+            results[target] = str(exc)
+            errors.append(str(exc))
 
 
 def _perform_backup(targets, conf, automatic=False):
@@ -326,21 +446,11 @@ def _perform_backup(targets, conf, automatic=False):
         _snapshot(output, work)
         os.replace(output, local_folder() / name)
     results['local'] = 'ok'
-    for target in targets:
-        if target == 'local':
-            continue
-        try:
-            remote(target, conf).upload(name, local_path(name))
-            results[target] = 'ok'
-        except StorageError as exc:
-            results[target] = str(exc)
-            errors.append(str(exc))
-    for target, result in list(results.items()):
-        if result == 'ok':
-            try:
-                _prune(target, conf, preserve=name)
-            except (BackupError, StorageError, OSError):
-                errors.append(f'{target} 备份已保存，但旧备份清理失败')
+    try:
+        _prune('local', conf, preserve=name)
+    except (BackupError, StorageError, OSError):
+        errors.append('local 备份已保存，但旧备份清理失败')
+    _upload_remote_targets(name, targets, conf, results, errors)
     values = {'last_name': name, 'last_results': results, 'last_automatic': automatic,
               'last_error': '；'.join(errors) or None}
     if not errors:
@@ -351,6 +461,20 @@ def _perform_backup(targets, conf, automatic=False):
     return {'name': name, 'targets': list(results), 'size': local_path(name).stat().st_size}
 
 
+def _retry_remote_backup(name, targets, conf, prior_results):
+    _status(last_attempt=utcnow().isoformat(timespec='seconds'))
+    results = dict(prior_results) if isinstance(prior_results, dict) else {'local': 'ok'}
+    errors = []
+    _upload_remote_targets(name, targets, conf, results, errors)
+    values = {'last_name': name, 'last_results': results, 'last_automatic': True,
+              'last_error': '；'.join(errors) or None}
+    if not errors:
+        values['last_success'] = utcnow().isoformat(timespec='seconds')
+    _status(**values)
+    if errors:
+        raise BackupError('本地备份已保存；' + '；'.join(errors), 502)
+
+
 def create_backup(targets):
     conf = read_control()['config']
     if not isinstance(targets, list) or not targets or any(t not in TARGETS for t in targets):
@@ -359,7 +483,16 @@ def create_backup(targets):
         require_target(target, conf)
     try:
         with file_lock('.backup-operation.lock', timeout=0):
-            return _perform_backup(list(dict.fromkeys(targets)), conf)
+            result = _perform_backup(list(dict.fromkeys(targets)), conf)
+            status = read_control()['status']
+            if status.get('retry_targets'):
+                remaining = [t for t in status['retry_targets'] if t not in result['targets']]
+                if remaining:
+                    _status(retry_targets=remaining)
+                else:
+                    due = status.get('schedule_due') or (next_run(conf['schedule']) if conf['schedule']['enabled'] else None)
+                    _status(next_run=due, retry_name=None, retry_targets=None, retry_count=0, schedule_due=None)
+            return result
     except TimeoutError:
         raise BackupError('已有备份或恢复任务正在执行，请稍后重试', 409) from None
     except (OSError, sqlite3.Error):
@@ -389,21 +522,32 @@ def test_storage(target):
                     finally:
                         probe.unlink(missing_ok=True)
                 else:
-                    store = remote(target, conf)
-                    try:
-                        store.upload(name, path)
-                        if name not in {i['name'] for i in store.list()}:
-                            raise StorageError('连接成功，但无法列出刚写入的测试文件')
-                        downloaded = Path(directory) / 'probe'
-                        store.download(name, downloaded, 1024)
-                        if downloaded.read_bytes() != path.read_bytes():
-                            raise StorageError('远程文件读写校验失败')
-                    finally:
-                        store.delete(name)
+                    with _open_remote(target, conf) as store:
+                        uploaded = False
+                        primary_error = None
+                        try:
+                            store.upload(name, path)
+                            uploaded = True
+                            if name not in {i['name'] for i in store.list()}:
+                                raise StorageError('连接成功，但无法列出刚写入的测试文件')
+                            downloaded = Path(directory) / 'probe'
+                            store.download(name, downloaded, 1024)
+                            if downloaded.read_bytes() != path.read_bytes():
+                                raise StorageError('远程文件读写校验失败')
+                        except Exception as exc:
+                            primary_error = exc
+                            raise
+                        finally:
+                            if uploaded:
+                                try:
+                                    store.delete(name)
+                                except Exception:
+                                    if primary_error is None:
+                                        raise
     except TimeoutError:
         raise BackupError('已有备份或恢复任务正在执行', 409) from None
     except StorageError as exc:
-        raise BackupError(str(exc), 502) from None
+        raise BackupError(str(exc), getattr(exc, 'status', 502)) from None
     return {'ok': True}
 
 
@@ -553,14 +697,25 @@ def restore_backup(target=None, name=None, uploaded=None):
                         path = local_path(name)
                     else:
                         path = work / 'download.zip'
-                        remote(target, conf).download(name, path, max_bytes())
+                        with _open_remote(target, conf) as store:
+                            store.download(name, path, max_bytes())
                 return _restore(path, work)
     except TimeoutError:
         raise BackupError('已有备份或恢复任务正在执行，请稍后重试', 409) from None
     except StorageError as exc:
-        raise BackupError(str(exc), 502) from None
+        raise BackupError(str(exc), getattr(exc, 'status', 502)) from None
     except (OSError, sqlite3.Error):
         raise BackupError('恢复失败，已尝试回退原账本，请检查服务器日志和存储空间', 500) from None
+
+
+def _next_retry_time(retry_count, schedule_due):
+    delay = RETRY_DELAYS_MINUTES[min(max(retry_count - 1, 0), len(RETRY_DELAYS_MINUTES) - 1)]
+    candidate = utcnow() + timedelta(minutes=delay)
+    if schedule_due:
+        due_dt = datetime.fromisoformat(schedule_due)
+        if due_dt < candidate:
+            candidate = due_dt
+    return candidate.isoformat(timespec='seconds')
 
 
 def scheduler_tick():
@@ -574,18 +729,74 @@ def scheduler_tick():
             if not due:
                 _status(next_run=next_run(conf['schedule']))
                 return
-            if datetime.fromisoformat(due) > utcnow() and not status.get('scheduled_running'):
+            now = utcnow()
+            if datetime.fromisoformat(due) > now and not status.get('scheduled_running'):
                 return
+
+            retry_name = status.get('retry_name')
+            retry_targets = [t for t in (status.get('retry_targets') or [])
+                             if t in conf['schedule']['targets'] and t != 'local']
+            schedule_due = status.get('schedule_due')
+            can_retry_remote = (
+                not status.get('scheduled_running')
+                and valid_name(retry_name)
+                and bool(retry_targets)
+                and bool(schedule_due)
+                and now < datetime.fromisoformat(schedule_due)
+                and (local_folder() / retry_name).is_file()
+            )
+            if can_retry_remote:
+                _status(scheduled_running=True)
+                try:
+                    _retry_remote_backup(retry_name, retry_targets, conf, status.get('last_results'))
+                    _status(scheduled_running=False, next_run=schedule_due,
+                            retry_name=None, retry_targets=None, retry_count=0, schedule_due=None)
+                except Exception as exc:
+                    latest = read_control()['status']
+                    still_failed = [t for t in retry_targets if (latest.get('last_results') or {}).get(t) != 'ok']
+                    count = int(status.get('retry_count') or 1) + 1
+                    message = str(exc) if isinstance(exc, BackupError) else '自动备份失败，请检查存储配置和服务器空间'
+                    if still_failed:
+                        _status(last_error=message, scheduled_running=False,
+                                retry_targets=still_failed, retry_count=count,
+                                next_run=_next_retry_time(count, schedule_due))
+                    else:
+                        _status(last_error=message, scheduled_running=False, next_run=schedule_due,
+                                retry_name=None, retry_targets=None, retry_count=0, schedule_due=None)
+                    log.exception('Scheduled remote backup retry failed')
+                return
+
             # Persist the claim while holding the operation lock across all workers.
             # An interrupted run remains retryable after a process restart.
-            _status(next_run=next_run(conf['schedule']), scheduled_running=True)
+            upcoming = next_run(conf['schedule'], now)
+            _status(next_run=upcoming, scheduled_running=True,
+                    retry_name=None, retry_targets=None, retry_count=0, schedule_due=upcoming)
             try:
                 _perform_backup(conf['schedule']['targets'], conf, automatic=True)
-                _status(scheduled_running=False)
+                _status(scheduled_running=False, retry_name=None, retry_targets=None,
+                        retry_count=0, schedule_due=None)
             except Exception as exc:
+                latest = read_control()['status']
+                last_results = latest.get('last_results') or {}
+                last_name = latest.get('last_name')
+                failed_remotes = (
+                    [t for t in conf['schedule']['targets'] if t != 'local' and last_results.get(t) != 'ok']
+                    if last_results.get('local') == 'ok' and valid_name(last_name)
+                    else []
+                )
                 message = str(exc) if isinstance(exc, BackupError) else '自动备份失败，请检查存储配置和服务器空间'
-                _status(last_error=message, scheduled_running=False,
-                        next_run=(utcnow() + timedelta(minutes=5)).isoformat(timespec='seconds'))
+                if failed_remotes:
+                    _status(last_error=message, scheduled_running=False,
+                            retry_name=last_name, retry_targets=failed_remotes,
+                            retry_count=1, schedule_due=upcoming,
+                            next_run=_next_retry_time(1, upcoming))
+                elif last_results.get('local') == 'ok':
+                    _status(last_error=message, scheduled_running=False, next_run=upcoming,
+                            retry_name=None, retry_targets=None, retry_count=0, schedule_due=None)
+                else:
+                    _status(last_error=message, scheduled_running=False,
+                            retry_name=None, retry_targets=None, retry_count=0, schedule_due=None,
+                            next_run=(utcnow() + timedelta(minutes=5)).isoformat(timespec='seconds'))
                 log.exception('Scheduled backup failed')
     except TimeoutError:
         return

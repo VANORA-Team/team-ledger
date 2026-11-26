@@ -10,10 +10,31 @@ from urllib.parse import quote, unquote, urlsplit
 
 NAME = re.compile(r'(?:team-ledger|before-restore)-\d{8}T\d{6}Z-[0-9a-f]{8}\.zip')
 TIMEOUT = 30
+S3_READ_TIMEOUT = 60
+S3_ERROR_MESSAGES = {
+    'NoSuchBucket': 'S3 存储桶不存在，请先在对象存储控制台创建该存储桶并核对名称',
+    'InvalidBucketName': 'S3 存储桶名称无效，请核对存储桶配置',
+    'InvalidAccessKeyId': 'S3 Access Key ID 无效，请核对访问密钥',
+    'SignatureDoesNotMatch': 'S3 签名校验失败，请检查 Secret Access Key、区域（Region）或 Endpoint 是否正确',
+    'AccessDenied': 'S3 权限不足（AccessDenied），请确认密钥具备该前缀下的 List / Get / Put / Delete 权限，或检查是否需关闭 Path style',
+    'AccountProblem': 'S3 账户状态异常，请检查对象存储服务账户状态',
+    'AllAccessDisabled': 'S3 存储桶访问已被禁用，请检查存储桶权限策略',
+    'SecondLevelDomainForbidden': '该 S3 服务商要求虚拟主机风格访问，请关闭「路径风格访问（Path style）」后重试',
+    'InvalidAddressingHeader': 'S3 访问风格不受支持，请切换「路径风格访问（Path style）」后重试',
+    'PermanentRedirect': 'S3 存储桶区域或访问风格不匹配，请核对区域（Region）或切换「路径风格访问（Path style）」',
+    'AuthorizationHeaderMalformed': 'S3 授权区域不匹配，请将存储桶所在实际区域填入「区域」字段',
+    'IllegalLocationConstraintException': 'S3 区域（Region）与存储桶所在区域不匹配，请核对区域配置',
+    'InvalidRegion': 'S3 区域（Region）无效，请核对服务商要求的区域标识',
+    'RequestTimeTooSkewed': '服务器时间与 S3 服务端偏差过大，请同步服务器系统时钟（NTP）',
+    'EntityTooLarge': '备份文件超过 S3 服务端允许的单次上传大小限制',
+    'SlowDown': 'S3 请求频率受限，请稍后重试',
+}
 
 
 class StorageError(Exception):
-    pass
+    def __init__(self, message, status=502):
+        super().__init__(message)
+        self.status = status
 
 
 def valid_name(name):
@@ -22,12 +43,16 @@ def valid_name(name):
 
 def bounded_copy(source, destination, maximum):
     total = 0
-    with destination.open('wb') as output:
-        while chunk := source.read(1024 * 1024):
-            total += len(chunk)
-            if total > maximum:
-                raise StorageError('备份文件超过服务器允许的大小')
-            output.write(chunk)
+    try:
+        with destination.open('wb') as output:
+            while chunk := source.read(1024 * 1024):
+                total += len(chunk)
+                if total > maximum:
+                    raise StorageError('备份文件超过服务器允许的大小')
+                output.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -123,7 +148,12 @@ class WebDAV:
     def download(self, name, destination, maximum):
         try:
             with self.request('GET', self.folder + quote(name)) as response:
+                length = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
+                if length and length.isdigit() and int(length) > maximum:
+                    raise StorageError('备份文件超过服务器允许的大小')
                 bounded_copy(response, destination, maximum)
+        except StorageError:
+            raise
         except (OSError, http.client.HTTPException):
             raise StorageError('WebDAV 下载失败，请检查网络及服务器存储空间') from None
 
@@ -131,50 +161,142 @@ class WebDAV:
         with self.request('DELETE', self.folder + quote(name)):
             pass
 
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 class S3:
     def __init__(self, conf):
         try:
-            import boto3
+            import boto3  # noqa: F401
+            import botocore.session
             from botocore.config import Config
+            from botocore.configprovider import ConstantProvider
         except ImportError:
             raise StorageError('S3 依赖未安装，请更新服务器依赖') from None
         self.bucket = conf['bucket']
         self.prefix = conf['prefix'].strip('/')
-        self.client = boto3.client(
-            's3', endpoint_url=conf['endpoint'] or None, region_name=conf['region'],
-            aws_access_key_id=conf['access_key_id'], aws_secret_access_key=conf['secret_access_key'],
-            config=Config(signature_version='s3v4', connect_timeout=10, read_timeout=TIMEOUT,
-                          retries={'max_attempts': 2, 'mode': 'standard'},
-                          request_checksum_calculation='when_required',
-                          response_checksum_validation='when_required',
-                          s3={'addressing_style': 'path' if conf['path_style'] else 'virtual'}))
+        try:
+            # Isolate S3 backup client from host AWS_* profile/endpoint/config files
+            # and avoid sharing global boto3.DEFAULT_SESSION across worker threads.
+            session = botocore.session.Session()
+            session._config = {'profiles': {}}
+            config_store = session.get_component('config_store')
+            for var, val in (('profile', None), ('config_file', None),
+                             ('credentials_file', None), ('ignore_configured_endpoint_urls', True)):
+                config_store.set_config_provider(var, ConstantProvider(val))
+            base_kwargs = dict(
+                signature_version='s3v4',
+                connect_timeout=10,
+                read_timeout=S3_READ_TIMEOUT,
+                retries={'max_attempts': 2, 'mode': 'standard'},
+                s3={
+                    'addressing_style': 'path' if conf.get('path_style', True) else 'virtual',
+                    'us_east_1_regional_endpoint': 'regional',
+                },
+            )
+            try:
+                client_cfg = Config(
+                    **base_kwargs,
+                    request_checksum_calculation='when_required',
+                    response_checksum_validation='when_required',
+                )
+            except TypeError:
+                client_cfg = Config(**base_kwargs)
+            self.client = session.create_client(
+                's3',
+                endpoint_url=conf.get('endpoint') or None,
+                region_name=conf.get('region') or 'us-east-1',
+                aws_access_key_id=conf['access_key_id'],
+                aws_secret_access_key=conf['secret_access_key'],
+                aws_session_token=None,
+                config=client_cfg,
+            )
+        except Exception:
+            raise StorageError('S3 客户端初始化失败，请检查 Endpoint、区域及访问密钥配置') from None
+
+    def close(self):
+        client = getattr(self, 'client', None)
+        if client is not None and hasattr(client, 'close'):
+            client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def key(self, name=''):
         return (self.prefix + '/' if self.prefix else '') + name
 
     def _call(self, method, **kwargs):
+        from botocore.exceptions import (
+            ClientError, ConnectTimeoutError, EndpointConnectionError,
+            ParamValidationError, ProxyConnectionError, ReadTimeoutError, SSLError,
+        )
         try:
             return getattr(self.client, method)(Bucket=self.bucket, **kwargs)
+        except ClientError as exc:
+            err = exc.response.get('Error') or {}
+            code = str(err.get('Code') or '')
+            http_status = (exc.response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+            if code in ('NoSuchKey', 'NotFound') or (method == 'get_object' and http_status == 404 and code != 'NoSuchBucket'):
+                if method == 'delete_object':
+                    return {}
+                raise StorageError('远程备份文件不存在或已被删除', 404) from None
+            if code in S3_ERROR_MESSAGES:
+                raise StorageError(S3_ERROR_MESSAGES[code]) from None
+            if http_status == 404:
+                raise StorageError('S3 存储桶或 Endpoint 路径不存在（HTTP 404），请检查 Endpoint 与存储桶名称') from None
+            if http_status == 403:
+                raise StorageError(S3_ERROR_MESSAGES['AccessDenied']) from None
+            if http_status in (301, 307):
+                raise StorageError(S3_ERROR_MESSAGES['PermanentRedirect']) from None
+            status_hint = f'（HTTP {http_status}）' if isinstance(http_status, int) else ''
+            code_hint = f'：{code}' if re.fullmatch(r'[A-Za-z0-9._-]{1,64}', code) else ''
+            raise StorageError(f'S3 请求失败{status_hint}{code_hint}，请检查 Endpoint、区域、存储桶、凭据及读写权限') from None
+        except SSLError:
+            raise StorageError('S3 TLS 证书校验失败，请检查 HTTPS Endpoint、证书链或尝试开启 Path style') from None
+        except (ConnectTimeoutError, EndpointConnectionError, ProxyConnectionError):
+            raise StorageError('无法连接 S3 Endpoint，请检查服务地址、端口及服务器网络') from None
+        except ReadTimeoutError:
+            raise StorageError('S3 请求超时，请检查网络连接速度或对象存储服务状态') from None
+        except ParamValidationError:
+            raise StorageError('S3 参数格式不受支持，请检查存储桶名称、区域及备份目录配置') from None
         except Exception:
             # SDK error messages can include endpoints or credential identifiers.
             raise StorageError('S3 请求失败，请检查 Endpoint、区域、存储桶、凭据及读写权限') from None
 
     def list(self):
-        result, token = [], None
+        result, token, pages = [], None, 0
+        prefix = self.key()
         while True:
-            page = self._call('list_objects_v2', Prefix=self.key(), **({'ContinuationToken': token} if token else {}))
+            pages += 1
+            if pages > 1000:
+                raise StorageError('S3 目录分页数量超出限制，请使用独立的备份子目录前缀')
+            page = self._call('list_objects_v2', Prefix=prefix, **({'ContinuationToken': token} if token else {}))
             for item in page.get('Contents', []):
-                name = item['Key'][len(self.key()):]
+                key = item.get('Key', '')
+                if not isinstance(key, str) or not key.startswith(prefix):
+                    continue
+                name = key[len(prefix):]
                 if valid_name(name):
                     modified = item.get('LastModified', datetime.now(timezone.utc))
-                    result.append({'name': name, 'size': item.get('Size', 0),
-                                   'modified_at': modified.isoformat()})
+                    iso_modified = modified.isoformat() if isinstance(modified, datetime) else str(modified)
+                    result.append({'name': name, 'size': int(item.get('Size', 0) or 0),
+                                   'modified_at': iso_modified})
             if not page.get('IsTruncated'):
                 break
-            token = page.get('NextContinuationToken')
-            if not token:
+            next_token = page.get('NextContinuationToken')
+            if not next_token or next_token == token:
                 raise StorageError('S3 目录分页响应不正确')
+            token = next_token
         return sorted(result, key=lambda item: item['name'], reverse=True)
 
     def upload(self, name, path):
@@ -184,6 +306,9 @@ class S3:
     def download(self, name, destination, maximum):
         response = self._call('get_object', Key=self.key(name))
         try:
+            length = response.get('ContentLength')
+            if isinstance(length, int) and length > maximum:
+                raise StorageError('备份文件超过服务器允许的大小')
             bounded_copy(response['Body'], destination, maximum)
         except StorageError:
             raise

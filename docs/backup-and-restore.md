@@ -22,8 +22,8 @@
 
 - **服务器本地**：选择「服务器本地」点击「立即备份」，ZIP 保存于 `DATA_DIR/backups/`，可在列表中「刷新列表」、下载到电脑，或通过「从本地恢复」上传原 ZIP 恢复。由于本地文件仍依赖宿主机磁盘，建议配合远程存储或定期另存。
 - **WebDAV**：填写已有目录 URL、用户名、密码（或应用密码）及备份子目录，点击「保存并测试 WebDAV」验证创建目录、写入、列表、读取与删除权限后即可使用。采用 Basic 认证，建议使用 HTTPS。
-- **S3 兼容存储桶**：填写存储桶（须预先创建）、区域、Access Key ID、Secret Access Key 与备份目录；AWS S3 可留空 Endpoint，其余兼容服务填写完整 HTTP / HTTPS Endpoint。默认开启 Path style，可按服务商要求关闭。凭据需具备目标前缀下的 `List` / `Get` / `Put` / `Delete` 权限；点击「保存并测试 S3」验证通过即可启用。
-- **本地保底与独立重试**：执行远程备份时会同时保留一份服务器本地副本；多位置自动备份若某一目标失败，其余位置仍会继续执行并在界面分别记录状态。
+- **S3 兼容存储桶**：填写存储桶（须预先创建）、区域（如 `us-east-1`、Cloudflare R2 可填 `auto`，留空默认 `us-east-1`）、Access Key ID、Secret Access Key 与备份目录；AWS S3 可留空 Endpoint，其余兼容服务填写不含存储桶名称前缀或路径的服务端点（例如 `https://oss-cn-hangzhou.aliyuncs.com` 或 `https://<account_id>.r2.cloudflarestorage.com`）。MinIO 等自建对象存储建议开启 Path style，AWS S3、阿里云 OSS、腾讯云 COS 等虚拟主机风格服务请关闭 Path style。凭据需具备目标前缀下的 `List` / `Get` / `Put` / `Delete` 权限；点击「保存并测试 S3」验证通过即可启用。
+- **本地保底与独立重试**：执行远程备份时会同时保留一份服务器本地副本；多位置自动备份若某一远程目标失败，系统会按退避间隔（5 / 15 / 30 / 60 分钟）仅对失败的远程目标重传该次快照，不会在重试期间重复生成本地快照或冲刷历史本地备份。
 
 ---
 

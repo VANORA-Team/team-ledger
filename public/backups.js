@@ -51,8 +51,12 @@ function renderBackupSettings() {
   if (!root || !c) return;
   const s = c.schedule, status = c.status || {}, weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
   const tab = backupUI.tab === 'config' ? 'config' : 'files';
-  const webdavReady = Boolean(c.webdav.url);
-  const s3Ready = Boolean(c.s3.bucket);
+  const webdavReady = Boolean(c.webdav.url && c.webdav.username && c.webdav.has_password);
+  const s3Ready = Boolean(c.s3.bucket && c.s3.access_key_id && c.s3.has_secret_access_key);
+  const prevWebdavOpen = root.querySelector('[data-backup-disclosure="webdav"]')?.open;
+  const prevS3Open = root.querySelector('[data-backup-disclosure="s3"]')?.open;
+  const webdavOpen = prevWebdavOpen ?? (webdavReady || Boolean(c.webdav.url || c.webdav.username || c.webdav.has_password));
+  const s3Open = prevS3Open ?? (s3Ready || Boolean(c.s3.endpoint || c.s3.bucket || c.s3.access_key_id || c.s3.has_secret_access_key));
   const statusSummary = [
     s.enabled ? `下次 ${backupDate(status.next_run)}` : '定时未启用',
     status.last_success ? `最近成功 ${backupDate(status.last_success)}` : null,
@@ -102,16 +106,16 @@ function renderBackupSettings() {
       </section>
     </div>
 
-    <form id="backup-config-form" class="backup-tab-panel" ${tab === 'config' ? '' : 'hidden'}>
+    <form id="backup-config-form" class="backup-tab-panel" novalidate ${tab === 'config' ? '' : 'hidden'}>
       <section class="panel">
         <div class="panel-inner">
           <h3>定时自动备份</h3>
           <label class="backup-check"><input class="settings-switch" name="schedule_enabled" type="checkbox" ${s.enabled ? 'checked' : ''}><span>启用定时自动备份（按 ${esc(c.timezone)}）</span></label>
           <div class="form-grid">
             <label><span>备份频率</span><select name="schedule_frequency"><option value="hourly" ${s.frequency === 'hourly' ? 'selected' : ''}>每小时整点</option><option value="daily" ${s.frequency === 'daily' ? 'selected' : ''}>每天</option><option value="weekly" ${s.frequency === 'weekly' ? 'selected' : ''}>每周</option></select></label>
-            <label data-backup-time ${s.frequency === 'hourly' ? 'hidden' : ''}><span>备份时间</span><input name="schedule_time" type="time" value="${esc(s.time)}" required></label>
+            <label data-backup-time ${s.frequency === 'hourly' ? 'hidden' : ''}><span>备份时间</span><input name="schedule_time" type="time" value="${esc(s.time)}"></label>
             <label data-backup-weekday ${s.frequency !== 'weekly' ? 'hidden' : ''}><span>星期</span><select name="schedule_weekday">${weekdays.map((day, i) => `<option value="${i}" ${i === s.weekday ? 'selected' : ''}>${day}</option>`).join('')}</select></label>
-            <label><span>每个位置保留份数</span><input name="keep" type="number" min="1" max="1000" step="1" value="${c.keep}" required></label>
+            <label><span>每个位置保留份数</span><input name="keep" type="number" min="1" max="1000" step="1" value="${c.keep}"></label>
           </div>
           <fieldset class="backup-targets"><legend>自动备份目标</legend>${Object.entries(BACKUP_TARGETS).map(([key, label]) => `<label class="backup-check"><input type="checkbox" name="schedule_targets" value="${key}" ${s.targets.includes(key) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</fieldset>
           ${status.last_attempt || status.last_restore || status.last_results ? `<div class="backup-run-log">
@@ -123,7 +127,7 @@ function renderBackupSettings() {
         <div class="panel-divider"></div>
         <div class="panel-inner backup-remote-stack">
           <h3>远程存储目标</h3>
-          <details class="disclosure-box" ${webdavReady ? 'open' : ''}>
+          <details class="disclosure-box" data-backup-disclosure="webdav" ${webdavOpen ? 'open' : ''}>
             <summary>
               <span>WebDAV</span>
               <span class="badge ${webdavReady ? 'good' : 'draft'}">${webdavReady ? '已配置' : '未配置'}</span>
@@ -138,15 +142,15 @@ function renderBackupSettings() {
               <div class="integration-actions"><button type="button" class="button button-outline" data-backup-test="webdav">保存并测试 WebDAV</button></div>
             </div>
           </details>
-          <details class="disclosure-box" ${s3Ready ? 'open' : ''}>
+          <details class="disclosure-box" data-backup-disclosure="s3" ${s3Open ? 'open' : ''}>
             <summary>
               <span>S3 兼容存储桶</span>
               <span class="badge ${s3Ready ? 'good' : 'draft'}">${s3Ready ? '已配置' : '未配置'}</span>
             </summary>
             <div class="disclosure-body">
-              <label><span>Endpoint <small class="optional">AWS S3 可留空</small></span><input name="s3_endpoint" type="url" value="${esc(c.s3.endpoint)}" placeholder="https://s3.example.com" autocomplete="off"></label>
+              <label><span>Endpoint <small class="optional">AWS S3 留空；其余填写服务端点（勿含存储桶名称）</small></span><input name="s3_endpoint" type="url" value="${esc(c.s3.endpoint)}" placeholder="https://s3.example.com" autocomplete="off"></label>
               <div class="form-grid">
-                <label><span>区域</span><input name="s3_region" value="${esc(c.s3.region)}" required placeholder="us-east-1"></label>
+                <label><span>区域 <small class="optional">如 us-east-1、auto</small></span><input name="s3_region" value="${esc(c.s3.region)}" placeholder="us-east-1"></label>
                 <label><span>存储桶名称</span><input name="s3_bucket" value="${esc(c.s3.bucket)}" autocomplete="off"></label>
               </div>
               <div class="form-grid">
@@ -154,7 +158,7 @@ function renderBackupSettings() {
                 <label><span>Secret Access Key</span><input name="s3_secret_access_key" type="password" autocomplete="new-password" placeholder="${c.s3.has_secret_access_key ? '已保存，留空保留原密钥' : '填写密钥'}"></label>
               </div>
               <label><span>备份目录</span><input name="s3_prefix" value="${esc(c.s3.prefix)}" placeholder="team-ledger"></label>
-              <label class="backup-check"><input class="settings-switch" name="s3_path_style" type="checkbox" ${c.s3.path_style ? 'checked' : ''}><span>路径风格访问（Path style）</span></label>
+              <label class="backup-check"><input class="settings-switch" name="s3_path_style" type="checkbox" ${c.s3.path_style ? 'checked' : ''}><span>路径风格访问（Path style）<small class="optional">MinIO 等自建存储建议开启；AWS S3、阿里云 OSS、腾讯云 COS 请关闭</small></span></label>
               <div class="integration-actions"><button type="button" class="button button-outline" data-backup-test="s3">保存并测试 S3</button></div>
             </div>
           </details>
@@ -226,6 +230,7 @@ document.addEventListener('submit', async event => {
   event.preventDefault();
   await backupTask(async () => {
     await saveBackupForm();
+    if (backupUI.target !== 'local' || backupUI.listError) await loadBackupList();
     renderBackupSettings();
     toast('备份设置已保存');
   });
@@ -299,15 +304,21 @@ document.addEventListener('click', async event => {
   }
   await backupTask(async () => {
     if (button.hasAttribute('data-backup-test')) {
+      const testedTarget = button.dataset.backupTest;
       await saveBackupForm();
-      await api('/backups/test', 'POST', {target: button.dataset.backupTest});
-      renderBackupSettings();
+      try {
+        await api('/backups/test', 'POST', {target: testedTarget});
+        if (backupUI.target === testedTarget || backupUI.listError) await loadBackupList();
+      } finally {
+        renderBackupSettings();
+      }
       toast('连接成功，已验证读写权限');
     } else if (button.hasAttribute('data-backup-create')) {
+      const targetLabel = BACKUP_TARGETS[backupUI.target] || backupUI.target;
       try {
         await api('/backups', 'POST', {target: backupUI.target});
         await reloadBackups();
-        toast('完整备份已保存');
+        toast(`完整备份已保存（${targetLabel}）`);
       } catch (error) {
         await reloadBackups();
         throw error;

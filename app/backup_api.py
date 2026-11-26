@@ -63,16 +63,22 @@ def backup_download(name: str, request: Request, target: str = 'local'):
         raise backups.BackupError('备份文件名不正确')
     directory = tempfile.TemporaryDirectory(prefix='.backup-download-', dir=config.DATA)
     path = Path(directory.name) / name
+    store = None
     try:
-        remote(target, conf).download(name, path, backups.max_bytes())
+        store = remote(target, conf)
+        store.download(name, path, backups.max_bytes())
         return FileResponse(path, media_type='application/zip', filename=name,
                             background=BackgroundTask(directory.cleanup))
     except StorageError as exc:
         directory.cleanup()
-        raise backups.BackupError(str(exc), 502) from None
+        raise backups.BackupError(str(exc), getattr(exc, 'status', 502)) from None
     except Exception:
         directory.cleanup()
         raise
+    finally:
+        close = getattr(store, 'close', None)
+        if callable(close):
+            close()
 
 
 @router.post('/restore')
