@@ -54,6 +54,11 @@ def _process_update(update, db_provider, platform):
                 row = conn.execute('SELECT currency,fx_rate,fx_currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
                 if row and not (row['fx_rate'] and row['fx_currency'] == parts[3]):
                     payment_code = row['currency']
+        elif not callback and draft and draft['step'] == 'pay_fx_rate' and payload.get('_action') == 'pay':
+            if text.strip() in ('', '-', '自动'):
+                row = conn.execute('SELECT currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
+                if row:
+                    payment_code = row['currency']
     if linked_any and linked_any['oidc_sub']:
         if permissions_sync.sync_member(linked_any['oidc_sub'], force=False, db_provider=db_provider):
             with db_provider() as conn:
@@ -118,7 +123,7 @@ def _process_update(update, db_provider, platform):
             callback_data.startswith(f'f:{draft["token"]}:') and fund_action in ('plan', 'receipt', 'note', 'commit')
             or callback_data == f'd:{draft["token"]}:resume' and draft['step'] in ('funds_confirm', 'funds_note', 'funds_receipt')
             or not callback and not command and draft['step'] == 'funds_note')
-        if not frozen_funds and (funds_flow or wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description', 'amount')))):
+        if not frozen_funds and (funds_flow or wants_rates or payment_code or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description', 'amount')))):
             try:
                 rates = fx.rates_for(conf['reference_currency'], codes)
             except Exception:

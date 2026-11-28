@@ -65,6 +65,7 @@ OPTIONAL_COLUMNS = {
         'reimbursed_minor', 'expense_type', 'income_type',
         'gross_amount_minor', 'fee_mode', 'fee_rate', 'fee_minor',
         'fx_rate', 'fx_currency',
+        'merchant_currency', 'merchant_decimals', 'merchant_amount_minor',
     },
     'feishu_config': {'domain'},
     'feishu_outbox': {'attempts'},

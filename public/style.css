@@ -3064,13 +3064,75 @@ button:disabled:focus-visible {
   color: var(--ink-strong);
 }
 
-.fee-subline {
+.fee-subline,
+.merchant-subline {
   display: block;
   margin-top: 2px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--quiet);
   font-variant-numeric: tabular-nums;
+}
+
+.merchant-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-soft);
+}
+
+.merchant-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.merchant-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--meta);
+  white-space: nowrap;
+}
+
+.merchant-input-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.merchant-inline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.merchant-inline-field input {
+  font-family: var(--mono);
+}
+
+.merchant-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.merchant-preview.is-error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-text);
 }
 
 .fx-group {
@@ -3189,7 +3251,25 @@ button:disabled:focus-visible {
   color: var(--danger-text);
 }
 
-.detail-fee-breakdown {
+.payment-fx-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+
+.payment-fx-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-fee-breakdown,
+.detail-merchant-breakdown {
   padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
@@ -4420,6 +4500,24 @@ dialog.modal.modal-drawer .modal-heading {
   margin-top: 14px;
 }
 
+.detail-lock-hint {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--quiet);
+  line-height: 1.55;
+}
+
+.entry-reimbursed-banner {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.entry-reimbursed-banner .callout-body strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
 .drawer-footer {
   flex-shrink: 0;
   display: flex;
@@ -4922,6 +5020,7 @@ dialog.modal.modal-drawer .modal-heading {
   }
 
   .income-type-row,
+  .merchant-header-row,
   .fee-header-row,
   .fx-header-row {
     flex-direction: column;

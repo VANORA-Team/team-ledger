@@ -201,6 +201,7 @@ def parse_export_filters(
     kind='all',
     status=None,
     currency_code='all',
+    merchant_currency='all',
     payer_id=None,
     date_from='',
     date_to='',
@@ -237,6 +238,12 @@ def parse_export_filters(
     else:
         currency(conf, cur_val)
 
+    mcur_val = (merchant_currency or 'all').strip().upper()
+    if mcur_val == 'ALL':
+        mcur_val = 'all'
+    else:
+        currency(conf, mcur_val)
+
     payer_val = None
     payer_name = ''
     if payer_id not in (None, '', 'all', 'ALL'):
@@ -267,6 +274,7 @@ def parse_export_filters(
         'kind': kind_val,
         'status': status_val,
         'currency': cur_val,
+        'merchant_currency': mcur_val,
         'payer_id': payer_val,
         'payer_name': payer_name,
         'date_from': from_val,
@@ -298,6 +306,8 @@ def _matches_filters(entry, filters):
 
     if filters['currency'] != 'all' and entry['currency'] != filters['currency']:
         return False
+    if filters.get('merchant_currency', 'all') != 'all' and (entry.get('merchant_currency') or '') != filters['merchant_currency']:
+        return False
     if filters['payer_id'] is not None and entry['payer_id'] != filters['payer_id']:
         return False
 
@@ -326,6 +336,8 @@ def _matches_filters(entry, filters):
             entry.get('note') or '',
             entry.get('payer_name') or '',
             entry.get('review_note') or '',
+            entry.get('merchant_currency') or '',
+            entry.get('merchant_amount') or '',
         ]).lower()
         if needle not in haystack:
             return False
@@ -346,7 +358,9 @@ def _build_scope_label(filters):
     if filters['kind'] != 'all':
         parts.append(KIND_LABELS.get(filters['kind'], filters['kind']))
     if filters['currency'] != 'all':
-        parts.append(f'币种 {filters["currency"]}')
+        parts.append(f'付款币种 {filters["currency"]}')
+    if filters.get('merchant_currency', 'all') != 'all':
+        parts.append(f'商家货币 {filters["merchant_currency"]}')
     if filters['payer_id'] is not None:
         parts.append(f'成员 {filters["payer_name"]}')
     if filters['status'] == 'all_with_voided' and not filters['ids']:
@@ -365,6 +379,7 @@ def _is_filtered(filters):
         filters['ids']
         or filters['kind'] != 'all'
         or filters['currency'] != 'all'
+        or filters.get('merchant_currency', 'all') != 'all'
         or filters['payer_id'] is not None
         or filters['status'] not in ('all', 'all_with_voided')
         or filters['date_from']
@@ -706,6 +721,7 @@ def build_excel_export(
     kind='all',
     status=None,
     currency_code='all',
+    merchant_currency='all',
     payer_id=None,
     date_from='',
     date_to='',
@@ -722,6 +738,7 @@ def build_excel_export(
             kind=kind,
             status=status,
             currency_code=currency_code,
+            merchant_currency=merchant_currency,
             payer_id=payer_id,
             date_from=date_from,
             date_to=date_to,
@@ -1069,6 +1086,7 @@ def build_excel_export(
         '收据预览', '凭证文件',
         '原金额（原币种）', '手续费方式', '手续费（原币种）',
         '汇率方式', '指定汇率',
+        '商家货币', '商家金额',
         '备注', '处理 / 付款备注', '最近付款时间', '创建人',
     ]
     _style_table_header(ws_entries, 1, entry_headers)
@@ -1189,16 +1207,26 @@ def build_excel_export(
             c_fxrate.number_format = '0.00######'
         c_fxrate.alignment = Alignment(horizontal='right', vertical='center')
 
-        c_note = _set_text(ws_entries.cell(row=row_idx, column=20), entry['note'])
+        has_merchant = bool(entry.get('merchant_currency'))
+        has_merchant_amt = bool(has_merchant and (entry.get('merchant_amount_minor') or 0) > 0)
+        c_mcur = _set_text(ws_entries.cell(row=row_idx, column=20), entry['merchant_currency'] if has_merchant else '—')
+        c_mcur.alignment = Alignment(horizontal='center', vertical='center')
+
+        m_dec = entry.get('merchant_decimals') or 2
+        m_amt_val = _minor_to_decimal(entry['merchant_amount_minor'], m_dec) if has_merchant_amt else None
+        c_mamt = _set_money(ws_entries.cell(row=row_idx, column=21), m_amt_val, m_dec)
+        c_mamt.alignment = Alignment(horizontal='right', vertical='center')
+
+        c_note = _set_text(ws_entries.cell(row=row_idx, column=22), entry['note'])
         c_note.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
-        c_rnote = _set_text(ws_entries.cell(row=row_idx, column=21), entry['review_note'])
+        c_rnote = _set_text(ws_entries.cell(row=row_idx, column=23), entry['review_note'])
         c_rnote.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
-        c_paid_at = _set_text(ws_entries.cell(row=row_idx, column=22), _format_timestamp(entry['paid_at']))
+        c_paid_at = _set_text(ws_entries.cell(row=row_idx, column=24), _format_timestamp(entry['paid_at']))
         c_paid_at.alignment = Alignment(horizontal='center', vertical='center')
 
-        c_creator = _set_text(ws_entries.cell(row=row_idx, column=23), entry['creator_name'])
+        c_creator = _set_text(ws_entries.cell(row=row_idx, column=25), entry['creator_name'])
         c_creator.alignment = Alignment(horizontal='left', vertical='center')
 
         ws_entries.row_dimensions[row_idx].height = row_height
@@ -1304,7 +1332,8 @@ def build_excel_export(
     pending_headers = [
         '垫付成员', '账目编号', '发生日期', '用途 / 说明',
         '原金额', '累计已报销', '剩余待报销（原币种）', '币种',
-        f'参考换算（{base_code}）', f'建议安排付款（{base_code}）', '安排状态', '收据状态', '其中手续费', '备注',
+        f'参考换算（{base_code}）', f'建议安排付款（{base_code}）', '安排状态', '收据状态', '其中手续费',
+        '商家货币', '商家金额', '备注',
     ]
     _style_table_header(ws_pending, 1, pending_headers)
     ws_pending.freeze_panes = 'A2'
@@ -1348,16 +1377,25 @@ def build_excel_export(
             r_label = '图片凭证'
         _set_text(ws_pending.cell(row=row_idx, column=12), r_label)
         _set_money(ws_pending.cell(row=row_idx, column=13), fee_dec, entry['decimals'])
-        _set_text(ws_pending.cell(row=row_idx, column=14), entry['note'])
+        has_merchant = bool(entry.get('merchant_currency'))
+        has_merchant_amt = bool(has_merchant and (entry.get('merchant_amount_minor') or 0) > 0)
+        m_dec = entry.get('merchant_decimals') or 2
+        _set_text(ws_pending.cell(row=row_idx, column=14), entry['merchant_currency'] if has_merchant else '—')
+        _set_money(
+            ws_pending.cell(row=row_idx, column=15),
+            _minor_to_decimal(entry['merchant_amount_minor'], m_dec) if has_merchant_amt else None,
+            m_dec,
+        )
+        _set_text(ws_pending.cell(row=row_idx, column=16), entry['note'])
 
         for col_i in range(1, len(pending_headers) + 1):
             cell = ws_pending.cell(row=row_idx, column=col_i)
             cell.fill = row_fill
             cell.border = border_thin
             cell.font = Font(name=FONT_FAMILY, size=10, bold=(col_i == 7), color=COLOR_INK)
-            if col_i in (2, 3, 8, 11, 12):
+            if col_i in (2, 3, 8, 11, 12, 14):
                 cell.alignment = Alignment(horizontal='center', vertical='center')
-            elif col_i in (5, 6, 7, 9, 10, 13):
+            elif col_i in (5, 6, 7, 9, 10, 13, 15):
                 cell.alignment = Alignment(horizontal='right', vertical='center')
             else:
                 cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
@@ -1456,8 +1494,8 @@ def build_excel_export(
     )
     _auto_fit_columns(
         ws_entries,
-        min_widths={1: 9, 2: 13, 3: 12, 4: 22, 5: 14, 6: 16, 7: 9, 8: 16, 9: 12, 10: 16, 11: 16, 12: 10, 14: 18, 15: 16, 16: 14, 17: 16, 18: 16, 19: 14, 20: 20, 21: 20, 22: 20, 23: 13},
-        max_widths={4: 36, 14: 28, 20: 36, 21: 32},
+        min_widths={1: 9, 2: 13, 3: 12, 4: 22, 5: 14, 6: 16, 7: 9, 8: 16, 9: 12, 10: 16, 11: 16, 12: 10, 14: 18, 15: 16, 16: 14, 17: 16, 18: 16, 19: 14, 20: 11, 21: 15, 22: 20, 23: 20, 24: 20, 25: 13},
+        max_widths={4: 36, 14: 28, 22: 36, 23: 32},
         skip_cols={13},
     )
     ws_entries.column_dimensions['M'].width = 24 if filters['include_receipts'] else 16
@@ -1469,8 +1507,8 @@ def build_excel_export(
     )
     _auto_fit_columns(
         ws_pending,
-        min_widths={1: 14, 2: 10, 3: 13, 4: 22, 5: 14, 6: 14, 7: 16, 8: 9, 9: 16, 10: 16, 11: 12, 12: 12, 13: 14, 14: 22},
-        max_widths={4: 34, 14: 34},
+        min_widths={1: 14, 2: 10, 3: 13, 4: 22, 5: 14, 6: 14, 7: 16, 8: 9, 9: 16, 10: 16, 11: 12, 12: 12, 13: 14, 14: 11, 15: 15, 16: 22},
+        max_widths={4: 34, 16: 34},
     )
 
     output = io.BytesIO()

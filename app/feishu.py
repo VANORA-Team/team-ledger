@@ -228,6 +228,21 @@ def _raw_input(text, conf):
                 action['fx_mode'] = 'manual'
                 action['fx_rate'] = fx_match[1]
                 continue
+            m_amt_cur = re.search(r'(?:^|\s)商家(?:货币|标价)?\s*[:：]?\s*(\d+(?:\.\d+)?)\s*([A-Za-z]{3})\s*$', desc)
+            if m_amt_cur and 'merchant_currency' not in action:
+                desc = desc[:m_amt_cur.start()].strip()
+                action['merchant_mode'] = 'different'
+                action['merchant_amount'] = m_amt_cur[1]
+                action['merchant_currency'] = m_amt_cur[2].upper()
+                continue
+            m_cur_amt = re.search(r'(?:^|\s)商家(?:货币|标价)?\s*[:：]?\s*([A-Za-z]{3})(?:\s+(\d+(?:\.\d+)?))?\s*$', desc)
+            if m_cur_amt and 'merchant_currency' not in action:
+                desc = desc[:m_cur_amt.start()].strip()
+                action['merchant_mode'] = 'different'
+                action['merchant_currency'] = m_cur_amt[1].upper()
+                if m_cur_amt[2]:
+                    action['merchant_amount'] = m_cur_amt[2]
+                continue
             break
         action['description'] = desc
         return {'reply': '', 'questions': [], 'actions': [action]}

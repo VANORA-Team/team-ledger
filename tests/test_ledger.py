@@ -584,7 +584,18 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api'+url).status_code,200)
         self.assertEqual(self.post(url,{'data':base64.b64encode(b'%PDF-1.4 updated').decode(),'name':'updated.pdf'}).status_code,200)
         self.action(e,'pay','付款后锁定凭证')
-        self.assertEqual(self.post(url,{'data':base64.b64encode(b'%PDF-1.4 other').decode(),'name':'other.pdf'}).status_code,409)
+        self.new_member(sub='vanora-fin-receipt', username='finreceipt', name='财务', role='finance')
+        with TestClient(app) as fin_client:
+            fin_session = self.login_as(fin_client, 'vanora-fin-receipt', preferred_username='finreceipt', name='财务', roles=('finance',))
+            self.assertEqual(
+                fin_client.post('/api'+url, json={'data':base64.b64encode(b'%PDF-1.4 fin').decode(),'name':'fin.pdf'},
+                                headers={'X-CSRF-Token':fin_session['csrf']}).status_code,
+                403,
+            )
+        self.assertEqual(self.post(url,{'data':base64.b64encode(b'%PDF-1.4 owner').decode(),'name':'owner.pdf'}).status_code,200)
+        voided=self.entry(description='作废不可传凭证')
+        self.assertEqual(self.action(voided,'void','作废').status_code,200)
+        self.assertEqual(self.post(f'/entries/{voided["id"]}/receipt',{'data':base64.b64encode(b'%PDF-1.4 v').decode(),'name':'v.pdf'}).status_code,409)
         self.post('/logout')
         self.assertEqual(self.client.get('/api'+url).status_code,401)
 

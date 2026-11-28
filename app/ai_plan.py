@@ -8,8 +8,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from fastapi import HTTPException
 from . import config, fx
 from .db import settings
-from .domain import (add_entry, admin, currency, delete_entry, edit_entry, entry_view, fail, make_payment_quote,
-                     minor_amount, normalized_entry, payment_preview, require_entry_access, text_value, transition)
+from .domain import (add_entry, admin, currency, delete_entry, edit_entry, entry_view, fail, has_reimbursements,
+                     make_payment_quote, minor_amount, normalized_entry, payment_preview,
+                     require_entry_access, require_entry_edit_access, text_value, transition)
 from .funds_plan import build_plan as build_funds_plan, snapshot as funds_snapshot
 
 PLAN_TTL = 1800
@@ -149,6 +150,14 @@ def _fx_summary_text(fx_rate, fx_currency, fx_amount, code, conf):
     return f'（手动汇率 1 {code} = {fx_rate} {fx_currency}{conv}）'
 
 
+def _merchant_summary_text(merchant_currency, merchant_amount, conf):
+    if not merchant_currency:
+        return ''
+    if merchant_amount:
+        return f'（商家标价 {_money(merchant_amount, merchant_currency, conf)}）'
+    return f'（商家货币 {merchant_currency}）'
+
+
 def _fee_summary_text(kind, fee_mode, fee_rate, fee_amount, effective_amount, code, conf):
     if fee_mode == 'rate' and fee_rate:
         label = '实收' if kind == 'income' else '实付'
@@ -249,7 +258,11 @@ def _resolve_create(conn, user, conf, action):
     kind = action.get('kind') if action.get('kind') in ('expense', 'income') else 'expense'
     if action.get('kind') and action.get('kind') not in ('expense', 'income'):
         card['errors'].append('账目类型只能是支出或收入')
-    code = action.get('currency') or conf['default_currency']
+    raw_cur = action.get('currency')
+    raw_pay_cur = action.get('payment_currency')
+    if raw_cur and raw_pay_cur and str(raw_cur).strip().upper() != str(raw_pay_cur).strip().upper():
+        card['errors'].append('付款货币与币种参数不一致')
+    code = str(raw_cur or raw_pay_cur or conf['default_currency']).strip().upper()
     try:
         cur = currency(conf, code)
         code = cur['code']
@@ -312,6 +325,17 @@ def _resolve_create(conn, user, conf, action):
             fee_amount_in = parsed_fee
     raw_fx_mode = action.get('fx_mode')
     fx_rate_in = _fx_rate_value(action.get('fx_rate')) if action.get('fx_rate') not in (None, '') else ''
+    raw_merchant_mode = action.get('merchant_mode')
+    raw_merchant_cur = action.get('merchant_currency')
+    merchant_cur_in = str(raw_merchant_cur).strip().upper() if raw_merchant_cur not in (None, '') else ''
+    raw_merchant_amt = action.get('merchant_amount')
+    merchant_amt_in = ''
+    if raw_merchant_amt not in (None, ''):
+        parsed_m_amt = _amount_value(raw_merchant_amt)
+        if parsed_m_amt in (None, 'FULL'):
+            card['errors'].append('商家金额格式不正确')
+        else:
+            merchant_amt_in = parsed_m_amt
     body = {'kind': kind, 'expense_type': expense_type, 'income_type': income_type, 'amount': amount or '', 'currency': code, 'description': description,
             'date': entry_date, 'payer_id': payer_id, 'status': status, 'note': note}
     if raw_fee_mode not in (None, ''):
@@ -324,6 +348,12 @@ def _resolve_create(conn, user, conf, action):
         body['fx_mode'] = raw_fx_mode
     if fx_rate_in != '':
         body['fx_rate'] = fx_rate_in
+    if raw_merchant_mode not in (None, ''):
+        body['merchant_mode'] = raw_merchant_mode
+    if merchant_cur_in != '':
+        body['merchant_currency'] = merchant_cur_in
+    if merchant_amt_in != '':
+        body['merchant_amount'] = merchant_amt_in
     norm = None
     if not card['errors']:
         try:
@@ -338,6 +368,11 @@ def _resolve_create(conn, user, conf, action):
     eff_fx_currency = norm['fx_currency'] if norm else (conf['reference_currency'] if fx_rate_in else '')
     eff_fx_mode = 'manual' if (eff_fx_rate and eff_fx_currency) else 'auto'
     eff_fx_amount = _fx_converted_amount(norm['amount_minor'], cur['decimals'], eff_fx_rate, eff_fx_currency, conf) if norm else ''
+    eff_m_cur = norm['merchant_currency'] if norm else merchant_cur_in
+    eff_m_dec = norm['merchant_decimals'] if norm else 0
+    eff_m_minor = norm['merchant_amount_minor'] if norm else 0
+    eff_m_mode = 'different' if eff_m_cur else 'same'
+    eff_m_amt = format(Decimal(eff_m_minor) / (10 ** eff_m_dec), f'.{eff_m_dec}f') if (norm and eff_m_cur and eff_m_minor > 0) else (merchant_amt_in if (not norm and eff_m_cur) else '')
     resolved_amount = eff_amount if eff_fee_mode != 'none' else (amount or '')
     label = ('公户转入' if income_type == 'capital' else '营业收入') if kind == 'income' else ('新增草稿' if status == 'draft' else '公账支出' if expense_type == 'public' else '成员垫付')
     card['label'] = label
@@ -345,30 +380,36 @@ def _resolve_create(conn, user, conf, action):
                         'amount': resolved_amount, 'gross_amount': amount or '',
                         'fee_mode': eff_fee_mode, 'fee_rate': eff_fee_rate, 'fee_amount': eff_fee_amount if eff_fee_mode != 'none' else '',
                         'fx_mode': eff_fx_mode, 'fx_rate': eff_fx_rate, 'fx_currency': eff_fx_currency, 'fx_amount': eff_fx_amount,
-                        'currency': code, 'description': description,
+                        'merchant_mode': eff_m_mode, 'merchant_currency': eff_m_cur, 'merchant_amount': eff_m_amt,
+                        'currency': code, 'payment_currency': code, 'description': description,
                         'date': entry_date, 'payer_id': payer_id, 'payer_name': payer_name,
                         'status': status, 'note': note}
     state = '草稿' if status == 'draft' else ('公户转入 · 计入公户/不计利润' if income_type == 'capital' else '营业收入 · 计入公户与利润') if kind == 'income' else '公账支出 · 已扣款' if expense_type == 'public' else '成员垫付 · 待报销'
     fee_text = _fee_summary_text(kind, eff_fee_mode, eff_fee_rate, eff_fee_amount, eff_amount, code, conf) if norm else ''
     fx_text = _fx_summary_text(eff_fx_rate, eff_fx_currency, eff_fx_amount, code, conf) if norm else ''
-    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)}{fee_text}{fx_text} · {entry_date} · {payer_name} · {state}'
+    merchant_text = _merchant_summary_text(eff_m_cur, eff_m_amt, conf) if norm else ''
+    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)}{merchant_text}{fee_text}{fx_text} · {entry_date} · {payer_name} · {state}'
     return card
 
 
 def _resolve_edit(conn, user, conf, action, context_ids):
     card = _card('edit_entry', '修改账目')
     entry, warning = _target(conn, action.get('id'), context_ids)
-    require_entry_access(user, entry)
     if warning:
         card['warnings'].append(warning)
-    editable_income = entry['kind'] == 'income' and entry['status'] == 'posted'
-    editable_expense = (entry['kind'] == 'expense' and not entry['reimbursed_minor']
-                        and entry['status'] in (('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')))
-    if not (editable_income or editable_expense):
-        card['errors'].append('仅已入账收入或尚无报销记录的支出可以修改')
-        card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · 当前状态不允许修改'
+    try:
+        require_entry_edit_access(user, entry)
+    except HTTPException as exc:
+        card['errors'].append(str(exc.detail))
+        card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · {exc.detail}'
         card['resolved'] = {'id': entry['id'], 'version': entry['version']}
         return card
+    reimbursed_flow = has_reimbursements(entry)
+    if reimbursed_flow:
+        card['label'] = '修改历史账目'
+        card['warnings'].append(
+            f'此账目已有报销记录（累计已报 {_money(entry["reimbursed_amount"], entry["currency"], conf)}），历史付款记录将保留。'
+        )
     if action.get('kind') and action.get('kind') != entry['kind']:
         card['errors'].append('不支持更改账目类型')
     body = {'kind': entry['kind'], 'amount': entry['gross_amount'], 'currency': entry['currency'],
@@ -379,12 +420,20 @@ def _resolve_edit(conn, user, conf, action, context_ids):
             'fx_mode': entry.get('fx_mode') or ('manual' if entry.get('fx_rate') else 'auto'),
             'fx_rate': entry.get('fx_rate') or '',
             'fx_currency': entry.get('fx_currency') or '',
+            'merchant_mode': entry.get('merchant_mode') or ('different' if entry.get('merchant_currency') else 'same'),
+            'merchant_currency': entry.get('merchant_currency') or '',
+            'merchant_amount': entry.get('merchant_amount') or '',
             'description': entry['description'], 'date': entry['date'], 'payer_id': entry['payer_id'],
-            'note': entry['note'], 'status': entry['status']}
+            'note': entry['note'], 'status': 'pending' if reimbursed_flow else entry['status']}
+    if reimbursed_flow and action.get('status') == 'draft':
+        card['errors'].append('已有报销记录的账目不能转为草稿')
     if entry['kind'] == 'expense' and 'expense_type' in action:
-        body['expense_type'] = action['expense_type']
-        if body['status'] != 'draft':
-            body['status'] = 'posted' if action['expense_type'] == 'public' else 'pending'
+        if reimbursed_flow and action['expense_type'] not in (None, '', entry['expense_type']):
+            card['errors'].append('已有报销记录的支出不能更改支出方式')
+        elif not reimbursed_flow:
+            body['expense_type'] = action['expense_type']
+            if body['status'] != 'draft':
+                body['status'] = 'posted' if action['expense_type'] == 'public' else 'pending'
     if entry['kind'] == 'income' and 'income_type' in action and action['income_type'] not in (None, ''):
         body['income_type'] = action['income_type']
     if 'amount' in action:
@@ -394,13 +443,53 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         else:
             body['amount'] = amount
     currency_changed = False
-    if 'currency' in action and action.get('currency'):
+    raw_cur_edit = action.get('currency') or action.get('payment_currency')
+    if action.get('currency') and action.get('payment_currency') and str(action['currency']).strip().upper() != str(action['payment_currency']).strip().upper():
+        card['errors'].append('付款货币与币种参数不一致')
+    if raw_cur_edit:
         try:
-            next_code = currency(conf, action['currency'])['code']
+            next_code = currency(conf, str(raw_cur_edit).strip().upper())['code']
             currency_changed = next_code != body['currency']
-            body['currency'] = next_code
+            if reimbursed_flow and currency_changed:
+                card['errors'].append('已有报销记录的账目不能修改记账币种')
+            else:
+                body['currency'] = next_code
         except HTTPException as exc:
             _error(card, exc)
+    has_m_mode = 'merchant_mode' in action and action.get('merchant_mode') not in (None, '')
+    has_m_cur = 'merchant_currency' in action and action.get('merchant_currency') is not None
+    has_m_amt = 'merchant_amount' in action and action.get('merchant_amount') is not None
+    if has_m_mode or has_m_cur or has_m_amt:
+        if action.get('merchant_mode') == 'same':
+            body['merchant_mode'] = 'same'
+            body['merchant_currency'] = ''
+            body['merchant_amount'] = ''
+        else:
+            next_m_cur = str(action.get('merchant_currency') or '').strip().upper() if has_m_cur else body['merchant_currency']
+            if has_m_cur and not next_m_cur and not has_m_mode and not has_m_amt:
+                body['merchant_mode'] = 'same'
+                body['merchant_currency'] = ''
+                body['merchant_amount'] = ''
+            else:
+                m_cur_changed = has_m_cur and next_m_cur != body['merchant_currency']
+                body['merchant_mode'] = action.get('merchant_mode') if has_m_mode else 'different'
+                body['merchant_currency'] = next_m_cur
+                if has_m_amt:
+                    raw_ma = action.get('merchant_amount')
+                    if raw_ma in ('', None):
+                        body['merchant_amount'] = ''
+                    else:
+                        parsed_ma = _amount_value(raw_ma)
+                        if parsed_ma in (None, 'FULL'):
+                            card['errors'].append('商家金额格式不正确')
+                        else:
+                            body['merchant_amount'] = parsed_ma
+                elif m_cur_changed:
+                    body['merchant_amount'] = ''
+    elif currency_changed and body['currency'] == body['merchant_currency']:
+        body['merchant_mode'] = 'same'
+        body['merchant_currency'] = ''
+        body['merchant_amount'] = ''
     has_fx_mode = 'fx_mode' in action and action.get('fx_mode') not in (None, '')
     has_fx_rate = 'fx_rate' in action and action.get('fx_rate') is not None
     if has_fx_mode or has_fx_rate:
@@ -462,9 +551,22 @@ def _resolve_edit(conn, user, conf, action, context_ids):
     norm = None
     if not card['errors']:
         try:
-            norm = normalized_entry(conn, user, body)
+            norm = normalized_entry(conn, user, body, existing_payer_id=entry['payer_id'])
         except HTTPException as exc:
             _error(card, exc)
+    if norm and reimbursed_flow:
+        if norm['amount_minor'] < entry['reimbursed_minor']:
+            card['errors'].append(
+                f'修改后的实付总额不能低于累计已报销金额（{_money(entry["reimbursed_amount"], entry["currency"], conf)}）'
+            )
+        else:
+            next_status = 'reimbursed' if norm['amount_minor'] == entry['reimbursed_minor'] else 'pending'
+            body['status'] = next_status
+            if next_status != entry['status']:
+                if next_status == 'pending':
+                    card['warnings'].append('修改后实付总额高于累计已报销金额，状态将由「已报销」转为「部分报销」，差额可继续报销。')
+                else:
+                    card['warnings'].append('修改后实付总额等于累计已报销金额，状态将由「部分报销」自动结清为「已报销」。')
     cur_obj = next((c for c in conf['currencies'] if c['code'] == body['currency']), {'decimals': 2})
     eff_fee_mode = norm['fee_mode'] if norm else body['fee_mode']
     eff_fee_rate = norm['fee_rate'] if norm else body['fee_rate']
@@ -474,6 +576,11 @@ def _resolve_edit(conn, user, conf, action, context_ids):
     eff_fx_currency = norm['fx_currency'] if norm else body['fx_currency']
     eff_fx_mode = 'manual' if (eff_fx_rate and eff_fx_currency) else 'auto'
     eff_fx_amount = _fx_converted_amount(norm['amount_minor'], cur_obj['decimals'], eff_fx_rate, eff_fx_currency, conf) if norm else ''
+    eff_m_cur = norm['merchant_currency'] if norm else body['merchant_currency']
+    eff_m_dec = norm['merchant_decimals'] if norm else 0
+    eff_m_minor = norm['merchant_amount_minor'] if norm else 0
+    eff_m_mode = 'different' if eff_m_cur else 'same'
+    eff_m_amt = format(Decimal(eff_m_minor) / (10 ** eff_m_dec), f'.{eff_m_dec}f') if (norm and eff_m_cur and eff_m_minor > 0) else (body['merchant_amount'] if (not norm and eff_m_cur) else '')
     resolved_body = {
         **body,
         'gross_amount': body['amount'],
@@ -485,12 +592,17 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         'fx_rate': eff_fx_rate,
         'fx_currency': eff_fx_currency,
         'fx_amount': eff_fx_amount,
+        'merchant_mode': eff_m_mode,
+        'merchant_currency': eff_m_cur,
+        'merchant_amount': eff_m_amt,
+        'payment_currency': body['currency'],
     }
     card['resolved'] = {'id': entry['id'], 'version': entry['version'], **resolved_body, 'payer_name': payer_name}
     before = f'{_money(entry["amount"], entry["currency"], conf)} · {entry["description"] or "未填写说明"}'
     fee_text = _fee_summary_text(entry['kind'], eff_fee_mode, eff_fee_rate, eff_fee_amount, eff_amount, body['currency'], conf) if norm else ''
     fx_text = _fx_summary_text(eff_fx_rate, eff_fx_currency, eff_fx_amount, body['currency'], conf) if norm else ''
-    after = f'{_money(body["amount"], body["currency"], conf)}{fee_text}{fx_text} · {body["description"] or "未填写说明"}'
+    merchant_text = _merchant_summary_text(eff_m_cur, eff_m_amt, conf) if norm else ''
+    after = f'{_money(body["amount"], body["currency"], conf)}{merchant_text}{fee_text}{fx_text} · {body["description"] or "未填写说明"}'
     card['summary'] = f'#{entry["id"]} 修改：{before} → {after} · {body["date"]}'
     return card
 
@@ -560,10 +672,16 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
     except PlanQuestion as exc:
         card['errors'].append(str(exc))
         note = '通过 AI 助手登记付款'
+    raw_fx_mode = action.get('fx_mode')
+    fx_rate_in = _fx_rate_value(action.get('fx_rate')) if action.get('fx_rate') not in (None, '') else ''
     quote = None
     if not card['errors']:
         try:
-            quote = make_payment_quote(conn, user, entry['id'], code, rates)
+            quote = make_payment_quote(
+                conn, user, entry['id'], code, rates,
+                manual_fx_rate=fx_rate_in or None,
+                fx_mode=raw_fx_mode,
+            )
             if amount in (None, 'FULL'):
                 amount = quote['maximum_amount']
             entry_after, _, units, allocation = payment_preview(conn, user, entry['id'], amount, quote['id'])
@@ -577,8 +695,14 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
         card['resolved'] = {'id': entry['id'], 'version': entry['version'], 'amount': pay_amount,
                             'currency': quote['currency'], 'quote_id': quote['id'], 'note': note,
                             'entry_amount': allocation_text, 'entry_currency': entry['currency'],
-                            'remaining_amount': remaining_text}
-        card['summary'] = (f'#{entry["id"]} {_entry_desc(entry)} · 本次付款 {_money(pay_amount, quote["currency"], conf)}'
+                            'remaining_amount': remaining_text,
+                            'fx_rate': quote['rate'] if quote['currency'] != entry['currency'] else '',
+                            'fx_date': quote['rate_date']}
+        rate_part = ''
+        if quote['currency'] != entry['currency']:
+            rate_tag = quote['rate_date'] or '手动汇率'
+            rate_part = f'（1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {rate_tag}）'
+        card['summary'] = (f'#{entry["id"]} {_entry_desc(entry)} · 本次付款 {_money(pay_amount, quote["currency"], conf)}{rate_part}'
                            f' · 抵扣 {_money(allocation_text, entry["currency"], conf)} · 剩余 {_money(remaining_text, entry["currency"], conf)}')
         card['warnings'].append('请确认这笔转账已经实际完成；系统只登记，不会发起付款。')
     elif quote:
@@ -691,14 +815,21 @@ def _query_clauses(conn, user, conf, action, default_status=True):
             params.append(currency(conf, str(code).upper())['code'])
         except HTTPException:
             raise PlanQuestion(f'没有启用币种 {code}。')
+    m_code = action.get('filter_merchant_currency')
+    if m_code:
+        try:
+            clauses.append('e.merchant_currency=?')
+            params.append(currency(conf, str(m_code).upper())['code'])
+        except HTTPException:
+            raise PlanQuestion(f'没有启用币种 {m_code}。')
     if action.get('filter_payer'):
         payer_id, _ = _member(conn, action['filter_payer'], user)
         clauses.append('e.payer_id=?')
         params.append(payer_id)
     if action.get('text'):
         needle = '%' + str(action['text']).strip()[:60] + '%'
-        clauses.append('(e.description LIKE ? OR e.note LIKE ? OR u.name LIKE ?)')
-        params += [needle, needle, needle]
+        clauses.append('(e.description LIKE ? OR e.note LIKE ? OR u.name LIKE ? OR e.merchant_currency LIKE ?)')
+        params += [needle, needle, needle, needle]
     date_from = _strict_date(action.get('date_from'), '开始日期')
     date_to = _strict_date(action.get('date_to'), '结束日期')
     if date_from:
@@ -1046,6 +1177,18 @@ def _create_body(resolved):
         body['fx_rate'] = resolved['fx_rate']
         if resolved.get('fx_currency'):
             body['fx_currency'] = resolved['fx_currency']
+    merchant_mode = resolved.get('merchant_mode')
+    if merchant_mode == 'different' and resolved.get('merchant_currency'):
+        body['merchant_mode'] = 'different'
+        body['merchant_currency'] = resolved['merchant_currency']
+        if resolved.get('merchant_amount') not in (None, ''):
+            body['merchant_amount'] = resolved['merchant_amount']
+    elif merchant_mode == 'same':
+        body['merchant_mode'] = 'same'
+    elif resolved.get('merchant_currency'):
+        body['merchant_currency'] = resolved['merchant_currency']
+        if resolved.get('merchant_amount') not in (None, ''):
+            body['merchant_amount'] = resolved['merchant_amount']
     body['expense_type'] = resolved.get('expense_type', 'advance') if body['kind'] == 'expense' else ''
     body['income_type'] = (resolved.get('income_type') or 'operating') if body['kind'] == 'income' else ''
     return body
@@ -1085,7 +1228,8 @@ def execute(conn, user, plan_id, selected):
             if kind == 'create_entry':
                 normalized_entry(conn, user, _create_body(resolved))
             elif kind == 'edit_entry':
-                _check_version(conn, resolved['id'], resolved['version'])
+                current = _check_version(conn, resolved['id'], resolved['version'])
+                require_entry_edit_access(user, current)
             elif kind in ('void_entry', 'submit_entry'):
                 _check_version(conn, resolved['id'], resolved['version'])
             elif kind == 'delete_entry':
@@ -1163,7 +1307,8 @@ def needed_rates(conn, conf, raw):
         if action.get('type') == 'batch_pay':
             need = True
         elif action.get('type') == 'pay_entry' and action.get('settlement_currency') not in (None, '', 'original'):
-            need = True
+            if action.get('fx_rate') in (None, '') or action.get('fx_mode') == 'auto':
+                need = True
         elif action.get('type') == 'query' and action.get('query') in ('balance', 'due', 'funds', 'simulate_income'):
             base = str(action.get('base') or conf['reference_currency']).upper()
             try:

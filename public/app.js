@@ -102,12 +102,12 @@ const state = {
   user: null, csrf: '', accountUrl: '', adminUrl: '', boot: null, authError: '',
   conf: null, members: [], entries: [], integrations: {}, report: null, page: 'overview',
   pendingEntryId: null,
-  filter: {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''},
+  filter: {text: '', kind: 'all', currency: 'all', merchant_currency: 'all', payer: 'all', status: 'all', from: '', to: ''},
   filterOpen: false,
   reimburseMode: 'queue',
   reimburseTab: 'pending',
   settingsTab: 'members',
-  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', entryFeeMode: 'none', entryFxMode: 'auto', entryFxCurrency: '', editing: null, entryKey: null,
+  selected: new Set(), entryKind: 'expense', entryIncomeType: 'operating', entryMerchantMode: 'same', entryFeeMode: 'none', entryFxMode: 'auto', entryFxCurrency: '', editing: null, editingEntry: null, editingReimbursed: false, editingReimbursedMinor: 0, editingReimbursedAmount: '', entryKey: null,
   action: null, base: null, loadId: 0,
   exportState: {ids: [], source: 'overview', activePreset: 'all'},
   calculator: {mode: 'auto', budget: '', budgetBase: null, ids: new Set(), amount: '', currency: null, report: null, request: 0},
@@ -127,6 +127,21 @@ const isOwner = () => state.user?.role === 'owner';
 const canManage = () => isOwner() || state.user?.role === 'finance';
 const canManageEntry = entry => canManage() ||
   (entry.kind === 'expense' && entry.expense_type === 'advance' && entry.payer_id === state.user?.id);
+const hasReimbursements = entry => Boolean(entry && (Number(entry.reimbursed_minor) > 0 || entry.status === 'reimbursed'));
+const canEditEntry = entry => {
+  if (!entry || entry.status === 'voided') return false;
+  if (hasReimbursements(entry)) return isOwner();
+  if (!canManageEntry(entry)) return false;
+  if (entry.kind === 'income') return entry.status === 'posted';
+  return entry.expense_type === 'public'
+    ? ['draft', 'posted'].includes(entry.status)
+    : ['draft', 'pending'].includes(entry.status);
+};
+const canUploadReceipt = entry => {
+  if (!entry) return false;
+  if (entry.status === 'reimbursed') return isOwner();
+  return canManageEntry(entry) && (canManage() || !entry.reimbursed_minor) && ['draft', 'pending', 'posted'].includes(entry.status);
+};
 const cur = code => state.conf?.currencies.find(c => c.code === code) || {code, symbol: code, decimals: 2};
 
 const money = (amount, code, withCode = true) => {
@@ -445,6 +460,10 @@ function feeDetailTag(e) {
 
 function compactAmountSubline(e) {
   const parts = [];
+  if (e.merchant_currency) {
+    const mDisplay = e.merchant_amount ? `${money(e.merchant_amount, e.merchant_currency, false)} ${esc(e.merchant_currency)}` : esc(e.merchant_currency);
+    parts.push(`<span class="merchant-subline">商家 ${mDisplay}</span>`);
+  }
   if (Number(e.fee_minor) > 0) {
     const rateSuffix = e.fee_mode === 'rate' && e.fee_rate ? ` · ${esc(e.fee_rate)}%` : '';
     parts.push(`<span class="fee-subline">${e.kind === 'income' ? '已扣' : '含'}手续费 ${money(e.fee_amount, e.currency, false)}${rateSuffix}</span>`);
@@ -519,13 +538,18 @@ function aiFieldRows(action) {
   const add = (label, value) => { if (value !== undefined && value !== null && value !== '') rows.push(`<span><b>${esc(label)}</b> ${esc(value)}</span>`); };
   if (action.type === 'create_entry') {
     const hasFee = r.fee_mode && r.fee_mode !== 'none';
+    const hasMerchant = Boolean(r.merchant_currency);
     add('类型', entryType(r));
+    if (hasMerchant) {
+      const mVal = r.merchant_amount ? `${r.merchant_amount} ${r.merchant_currency}（仅展示）` : `${r.merchant_currency}（仅展示）`;
+      add('商家货币', mVal);
+    }
     if (hasFee) {
-      add('原金额', `${r.gross_amount || r.amount} ${r.currency}`);
+      add(hasMerchant ? '付款原金额' : '原金额', `${r.gross_amount || r.amount} ${r.currency}`);
       add('手续费', r.fee_mode === 'rate' && r.fee_rate ? `${r.fee_rate}%（${r.fee_amount} ${r.currency}）` : `${r.fee_amount} ${r.currency}`);
       add(r.kind === 'income' ? '实收金额' : '实付金额', `${r.amount} ${r.currency}`);
     } else {
-      add('金额', `${r.amount} ${r.currency}`);
+      add(hasMerchant ? '实际付款' : '金额', `${r.amount} ${r.currency}`);
     }
     if (r.fx_mode === 'manual' && r.fx_rate && r.fx_currency) {
       add('外币汇率', `手动 1 ${r.currency} = ${r.fx_rate} ${r.fx_currency}${r.fx_amount ? `（折合 ${r.fx_amount} ${r.fx_currency}）` : ''}`);
@@ -534,13 +558,18 @@ function aiFieldRows(action) {
     add('日期', r.date); add('成员', r.payer_name || r.payer_id); add('状态', AI_STATUS[r.status] || r.status); add('备注', r.note);
   } else if (action.type === 'edit_entry') {
     const hasFee = r.fee_mode && r.fee_mode !== 'none';
+    const hasMerchant = Boolean(r.merchant_currency);
     add('编号', `#${r.id}`); add('类型', r.kind ? entryType(r) : '');
+    if (hasMerchant) {
+      const mVal = r.merchant_amount ? `${r.merchant_amount} ${r.merchant_currency}（仅展示）` : `${r.merchant_currency}（仅展示）`;
+      add('商家货币', mVal);
+    }
     if (hasFee) {
-      add('原金额', `${r.gross_amount || r.amount} ${r.currency}`);
+      add(hasMerchant ? '付款原金额' : '原金额', `${r.gross_amount || r.amount} ${r.currency}`);
       add('手续费', r.fee_mode === 'rate' && r.fee_rate ? `${r.fee_rate}%（${r.fee_amount} ${r.currency}）` : `${r.fee_amount} ${r.currency}`);
       add(r.kind === 'income' ? '实收金额' : '实付金额', `${r.amount} ${r.currency}`);
     } else {
-      add('金额', `${r.amount} ${r.currency}`);
+      add(hasMerchant ? '实际付款' : '金额', `${r.amount} ${r.currency}`);
     }
     if (r.fx_mode === 'manual' && r.fx_rate && r.fx_currency) {
       add('外币汇率', `手动 1 ${r.currency} = ${r.fx_rate} ${r.fx_currency}${r.fx_amount ? `（折合 ${r.fx_amount} ${r.fx_currency}）` : ''}`);
@@ -550,6 +579,9 @@ function aiFieldRows(action) {
     add('编号', `#${r.id}`); add('备注', r.note);
   } else if (action.type === 'pay_entry') {
     add('编号', `#${r.id}`); add('本次付款', `${r.amount} ${r.currency}`); add('抵扣', `${r.entry_amount} ${r.entry_currency}`);
+    if (r.fx_rate && r.currency !== r.entry_currency) {
+      add('报销汇率', `1 ${r.entry_currency} = ${r.fx_rate} ${r.currency}（${r.fx_date || '手动汇率'}）`);
+    }
     add('登记后剩余', `${r.remaining_amount} ${r.entry_currency}`); add('付款备注', r.note);
   } else if (action.type === 'batch_pay') {
     add('付款币种', r.mode === 'settlement' ? '团队结算货币' : '各笔记账货币');
@@ -783,6 +815,7 @@ function aiEditInForm(index) {
   openEntry(r.kind, {
     kind: r.kind, expense_type: r.expense_type, income_type: r.income_type,
     amount: r.gross_amount || r.amount, gross_amount: r.gross_amount || r.amount,
+    merchant_mode: r.merchant_mode || 'same', merchant_currency: r.merchant_currency || '', merchant_amount: r.merchant_amount || '',
     fee_mode: r.fee_mode || 'none', fee_rate: r.fee_rate || '', fee_amount: r.fee_amount || '',
     fx_mode: r.fx_mode || 'auto', fx_rate: r.fx_rate || '', fx_currency: r.fx_currency || '',
     currency: r.currency, description: r.description, date: r.date, payer_id: r.payer_id, note: r.note, status: r.status,
@@ -1005,11 +1038,12 @@ function renderOverview() {
 function filteredEntries() {
   const f = state.filter;
   return state.entries.filter(e =>
-    (!f.text || [e.description, e.note, e.payer_name].join(' ').toLowerCase().includes(f.text.toLowerCase())) &&
+    (!f.text || [e.description, e.note, e.payer_name, e.merchant_currency, e.merchant_amount].join(' ').toLowerCase().includes(f.text.toLowerCase())) &&
     (f.kind === 'all' || e.kind === f.kind ||
       (e.kind === 'expense' && e.expense_type === f.kind) ||
       (e.kind === 'income' && (e.income_type || 'operating') === f.kind)) &&
     (f.currency === 'all' || e.currency === f.currency) &&
+    (f.merchant_currency === 'all' || (e.merchant_currency || '') === f.merchant_currency) &&
     (f.payer === 'all' || e.payer_id === Number(f.payer)) &&
     (f.status === 'all' ? e.status !== 'voided' : f.status === 'partial' ? entryStatus(e) === 'partial' : e.status === f.status) &&
     (!f.from || e.date >= f.from) &&
@@ -1019,12 +1053,12 @@ function filteredEntries() {
 
 function secondaryFilterCount() {
   const f = state.filter;
-  return [f.currency !== 'all', f.payer !== 'all', Boolean(f.from), Boolean(f.to)].filter(Boolean).length;
+  return [f.currency !== 'all', f.merchant_currency !== 'all', f.payer !== 'all', Boolean(f.from), Boolean(f.to)].filter(Boolean).length;
 }
 
 function ledgerHasFilter() {
   const f = state.filter;
-  return Boolean(f.text || f.kind !== 'all' || f.currency !== 'all' || f.payer !== 'all' || f.status !== 'all' || f.from || f.to);
+  return Boolean(f.text || f.kind !== 'all' || f.currency !== 'all' || f.merchant_currency !== 'all' || f.payer !== 'all' || f.status !== 'all' || f.from || f.to);
 }
 
 function ledgerResults() {
@@ -1077,7 +1111,8 @@ function renderLedger() {
         <button type="button" class="button button-quiet button-small" id="reset-filters" ${hasFilter ? '' : 'hidden'}>重置</button>
       </div>
       <div class="filters-secondary" id="more-filters-panel" ${state.filterOpen ? '' : 'hidden'}>
-        <select data-filter="currency" aria-label="筛选币种"><option value="all">全部币种</option>${options(state.conf.currencies, c => c.code, c => c.code, f.currency)}</select>
+        <select data-filter="currency" aria-label="筛选付款币种"><option value="all">全部付款币种</option>${options(state.conf.currencies, c => c.code, c => c.code, f.currency)}</select>
+        <select data-filter="merchant_currency" aria-label="筛选商家货币"><option value="all">全部商家货币</option>${options(state.conf.currencies, c => c.code, c => c.code, f.merchant_currency)}</select>
         <select data-filter="payer" aria-label="筛选成员"><option value="all">全部成员</option>${options(state.members, m => m.id, m => m.name, f.payer)}</select>
         <label class="filter-date-field"><span>从</span><input type="date" data-filter="from" value="${esc(f.from)}" aria-label="开始日期"></label>
         <label class="filter-date-field"><span>至</span><input type="date" data-filter="to" value="${esc(f.to)}" aria-label="结束日期"></label>
@@ -1283,7 +1318,7 @@ function planGroups(report, selectable = false) {
             <span class="plan-item-status">${status}</span>
             <div class="plan-item-main">
               <strong>${esc(entryDescription(entry))}</strong>
-              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${entry.fx_rate && entry.fx_currency ? ` · 手动汇率 ${esc(entry.fx_rate)}` : ''}${Number(entry.fee_minor) > 0 ? ` · 含手续费 ${money(entry.fee_amount, entry.currency, false)}` : ''}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
+              <small class="mono">#${entry.id} · ${esc(entry.date)} · 剩余 ${original} ${esc(entry.currency)}${convertedText}${entry.merchant_currency ? ` · 商家 ${entry.merchant_amount ? `${money(entry.merchant_amount, entry.merchant_currency, false)} ` : ''}${esc(entry.merchant_currency)}` : ''}${entry.fx_rate && entry.fx_currency ? ` · 手动汇率 ${esc(entry.fx_rate)}` : ''}${Number(entry.fee_minor) > 0 ? ` · 含手续费 ${money(entry.fee_amount, entry.currency, false)}` : ''}${Number(entry.reimbursed_amount) > 0 ? ` · 已报 ${money(entry.reimbursed_amount, entry.currency, false)}` : ''}</small>
             </div>
             <div class="plan-item-suggested">${hasSuggestion ? money(entry.suggested, report.base, false) : '—'}</div>
           </div>`;
@@ -2567,7 +2602,14 @@ function updateFeeUi() {
     b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   const amountLabel = $('#entry-amount-label');
-  if (amountLabel) amountLabel.textContent = mode === 'none' ? '金额' : '原金额（手续费前）';
+  const currencyLabel = $('#entry-currency-label');
+  const splitMerchant = !isIncome && state.entryMerchantMode === 'different';
+  if (amountLabel) {
+    amountLabel.textContent = isIncome
+      ? (mode === 'none' ? '金额' : '原金额（手续费前）')
+      : (mode === 'none' ? (splitMerchant ? '实际付款金额' : '付款金额') : '付款原金额（手续费前）');
+  }
+  if (currencyLabel) currencyLabel.textContent = isIncome ? '币种' : '付款货币';
   const rateWrap = $('#fee-rate-wrap');
   const fixedWrap = $('#fee-fixed-wrap');
   const rateInput = $('#entry-fee-rate');
@@ -2615,7 +2657,83 @@ function updateFeeUi() {
       }
     }
   }
+  updateMerchantUi();
   updateFxUi();
+}
+
+function defaultMerchantCurrency(payCode) {
+  const list = state.conf?.currencies || [];
+  const other = list.find(c => c.code !== payCode);
+  return other ? other.code : payCode;
+}
+
+function updateMerchantUi() {
+  const form = $('#entry-form');
+  const group = $('#merchant-group');
+  if (!form || !group || !state.conf) return;
+  const isIncome = state.entryKind === 'income';
+  const diffWrap = $('#merchant-diff-wrap');
+  const previewEl = $('#merchant-preview');
+  const amtInput = $('#entry-merchant-amount');
+  const curSelect = $('#entry-merchant-currency');
+  if (isIncome) {
+    group.hidden = true;
+    if (diffWrap) diffWrap.hidden = true;
+    if (previewEl) {
+      previewEl.hidden = true;
+      previewEl.classList.remove('is-error');
+      previewEl.innerHTML = '';
+    }
+    return;
+  }
+  group.hidden = false;
+  const mode = state.entryMerchantMode === 'different' ? 'different' : 'same';
+  $$('#entry-merchant-mode button').forEach(b => {
+    const active = b.dataset.merchantMode === mode;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  if (diffWrap) diffWrap.hidden = mode !== 'different';
+  if (mode !== 'different') {
+    if (previewEl) {
+      previewEl.hidden = true;
+      previewEl.classList.remove('is-error');
+      previewEl.innerHTML = '';
+    }
+    return;
+  }
+  const payCode = form.elements.currency.value || state.conf.default_currency;
+  const mCode = curSelect?.value || defaultMerchantCurrency(payCode);
+  const mCur = cur(mCode);
+  if (amtInput) {
+    amtInput.placeholder = mCur.decimals > 0 ? '0.' + '0'.repeat(mCur.decimals) : '0';
+  }
+  if (!previewEl) return;
+  previewEl.hidden = false;
+  previewEl.classList.remove('is-error');
+  if ((state.conf.currencies || []).length < 2) {
+    previewEl.classList.add('is-error');
+    previewEl.innerHTML = '<span>当前仅启用 1 个币种，如需区分请先在设置中添加其他币种</span>';
+    return;
+  }
+  if (mCode === payCode) {
+    previewEl.classList.add('is-error');
+    previewEl.innerHTML = '<span>商家货币不能与付款货币相同，请选择其他币种或切换为「与付款一致」</span>';
+    return;
+  }
+  const mAmtRaw = String(amtInput?.value || '').trim();
+  if (!mAmtRaw) {
+    previewEl.innerHTML = `<span class="muted">商家界面货币 ${esc(mCode)}（仅展示，不做汇率换算）· 实际报销与核算按付款货币 ${esc(payCode)}</span>`;
+    return;
+  }
+  const mMinor = parseMinorUnits(mAmtRaw, mCur.decimals);
+  if (mMinor === null || mMinor <= 0) {
+    previewEl.classList.add('is-error');
+    previewEl.innerHTML = `<span>商家金额需为正数，小数最多 ${mCur.decimals} 位</span>`;
+    return;
+  }
+  const mVal = mMinor / (10 ** mCur.decimals);
+  previewEl.innerHTML = `<span class="fee-preview-eq">商家标价 ${money(mVal, mCode)}（仅展示，不参与汇率换算）</span><strong class="fee-preview-total">按付款货币 ${esc(payCode)} 核算与报销</strong>`;
 }
 
 function formatFxRateText(raw) {
@@ -2716,14 +2834,20 @@ function updateFxUi() {
 }
 
 function openEntry(kind = 'expense', data = null) {
-  if ((!canManage() && kind !== 'expense') || (data && !canManageEntry(data))) return;
+  if ((!canManage() && kind !== 'expense') || (data?.id && !canEditEntry(data)) || (data && !data.id && !canManageEntry(data))) return;
   const form = $('#entry-form');
   form.reset();
   state.editing = data?.id || null;
+  state.editingEntry = data?.id ? data : null;
+  state.editingReimbursed = Boolean(data?.id && hasReimbursements(data));
+  state.editingReimbursedMinor = state.editingReimbursed ? Number(data.reimbursed_minor || 0) : 0;
+  state.editingReimbursedAmount = state.editingReimbursed ? String(data.reimbursed_amount || '0') : '';
   state.entryKey = randomId();
   if (data) {
     state.entryKind = data.kind === 'expense' && data.expense_type === 'public' ? 'public' : data.kind;
     state.entryIncomeType = data.kind === 'income' ? (data.income_type === 'capital' ? 'capital' : 'operating') : 'operating';
+    const hasMerchant = Boolean(data.kind === 'expense' && (data.merchant_mode === 'different' || data.merchant_currency) && data.merchant_currency);
+    state.entryMerchantMode = hasMerchant ? 'different' : 'same';
     state.entryFeeMode = ['rate', 'fixed'].includes(data.fee_mode) ? data.fee_mode : 'none';
     const hasManualFx = Boolean((data.fx_mode === 'manual' || data.fx_rate) && data.fx_rate);
     state.entryFxMode = hasManualFx ? 'manual' : 'auto';
@@ -2731,18 +2855,42 @@ function openEntry(kind = 'expense', data = null) {
   } else if (kind === 'capital') {
     state.entryKind = 'income';
     state.entryIncomeType = 'capital';
+    state.entryMerchantMode = 'same';
     state.entryFeeMode = 'none';
     state.entryFxMode = 'auto';
     state.entryFxCurrency = '';
   } else {
     state.entryKind = kind;
     state.entryIncomeType = 'operating';
+    state.entryMerchantMode = 'same';
     state.entryFeeMode = 'none';
     state.entryFxMode = 'auto';
     state.entryFxCurrency = '';
   }
-  form.elements.currency.innerHTML = currencyOptions(data?.currency || state.conf.default_currency);
-  form.elements.payer_id.innerHTML = options(state.members.filter(m => m.active), m => m.id, m => m.name, data?.payer_id || state.user.id);
+  const banner = $('#entry-reimbursed-banner');
+  if (banner) {
+    if (state.editingReimbursed) {
+      banner.innerHTML = `${icon('info')}<div class="callout-body"><strong>正在修改已报销历史账目（仅账本所有者）</strong>累计已报销 ${money(data.reimbursed_amount, data.currency)}。已有付款记录将保留；付款货币已锁定，修改后的实付总额不能低于累计已报销金额，状态将按差额自动同步。</div>`;
+      banner.hidden = false;
+    } else {
+      banner.hidden = true;
+      banner.innerHTML = '';
+    }
+  }
+  const initCurrency = data?.currency || state.conf.default_currency;
+  form.elements.currency.innerHTML = currencyOptions(initCurrency);
+  form.elements.currency.disabled = state.editingReimbursed;
+  if (form.elements.merchant_currency) {
+    const initMerchantCur = (state.entryMerchantMode === 'different' && data?.merchant_currency)
+      ? data.merchant_currency
+      : defaultMerchantCurrency(initCurrency);
+    form.elements.merchant_currency.innerHTML = currencyOptions(initMerchantCur);
+  }
+  if (form.elements.merchant_amount) {
+    form.elements.merchant_amount.value = state.entryMerchantMode === 'different' ? (data?.merchant_amount || '') : '';
+  }
+  const payerMembers = state.members.filter(m => m.active || (data?.payer_id && m.id === data.payer_id));
+  form.elements.payer_id.innerHTML = options(payerMembers, m => m.id, m => m.active ? m.name : `${m.name}（已停用）`, data?.payer_id || state.user.id);
   form.elements.payer_id.disabled = !canManage();
   form.elements.date.value = data?.date || state.conf.today;
   form.elements.amount.value = data?.gross_amount || data?.amount || '';
@@ -2754,7 +2902,7 @@ function openEntry(kind = 'expense', data = null) {
   $('#entry-kind').hidden = Boolean(data?.id);
   $$('#entry-kind button').forEach(b => { b.hidden = b.dataset.kind !== 'expense' && !canManage(); });
   $('#entry-error').textContent = '';
-  $('#upload-label').innerHTML = '添加发票或凭证 <small>PNG / JPG / PDF，上限 6 MB</small>';
+  $('#upload-label').innerHTML = `${data?.receipt ? '替换发票或凭证' : '添加发票或凭证'} <small>PNG / JPG / PDF，上限 6 MB</small>`;
   entryKindChanged();
   $('#entry-dialog').showModal();
   setTimeout(() => form.elements.amount.focus(), 40);
@@ -2775,8 +2923,8 @@ function entryKindChanged() {
     b.classList.toggle('active', active);
     b.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
-  $('#entry-title').textContent = state.editing ? '修改账目' : isCapital ? '登记公户转入' : income ? '登记营业收入' : publicExpense ? '记公账支出' : '记成员垫付';
-  $('#save-draft').hidden = income;
+  $('#entry-title').textContent = state.editing ? (state.editingReimbursed ? '修改历史账目' : '修改账目') : isCapital ? '登记公户转入' : income ? '登记营业收入' : publicExpense ? '记公账支出' : '记成员垫付';
+  $('#save-draft').hidden = income || state.editingReimbursed;
   const incomeHint = $('#income-type-hint');
   if (incomeHint) {
     incomeHint.textContent = isCapital ? '仅计入公户结余，不与营业收入一起计入利润' : '同时计入公户结余与经营利润';
@@ -2786,7 +2934,7 @@ function entryKindChanged() {
   if (descInput) {
     descInput.placeholder = isCapital ? '例如：股东出资、关联账户调拨、备用金转入' : income ? '例如：客户尾款、项目服务费' : '例如：服务器续费、团队聚餐';
   }
-  $('#save-entry').textContent = state.editing ? '保存修改' : income ? '确认入账' : '确认记账';
+  $('#save-entry').textContent = state.editing ? (state.editingReimbursed ? '保存历史修改' : '保存修改') : income ? '确认入账' : '确认记账';
   updateFeeUi();
 }
 
@@ -2800,10 +2948,22 @@ async function saveEntry(status, button) {
       if (file && file.size > 6 * 1024 * 1024) throw new Error('凭证大小不能超过 6 MB');
       const body = Object.fromEntries(new FormData(form).entries());
       delete body.receipt;
+      body.currency = form.elements.currency.value;
       body.payer_id = Number(form.elements.payer_id.value);
       body.kind = state.entryKind === 'income' ? 'income' : 'expense';
       body.expense_type = state.entryKind === 'public' ? 'public' : state.entryKind === 'expense' ? 'advance' : '';
       body.income_type = state.entryKind === 'income' ? state.entryIncomeType : '';
+      if (body.kind !== 'expense' || state.entryMerchantMode !== 'different') {
+        body.merchant_mode = 'same';
+        delete body.merchant_currency;
+        delete body.merchant_amount;
+      } else {
+        body.merchant_mode = 'different';
+        body.merchant_currency = form.elements.merchant_currency?.value || '';
+        const mAmt = String(form.elements.merchant_amount?.value || '').trim();
+        if (mAmt) body.merchant_amount = mAmt;
+        else delete body.merchant_amount;
+      }
       body.fee_mode = state.entryFeeMode || 'none';
       if (body.fee_mode === 'rate') {
         const rate = String(form.elements.fee_rate?.value || '').trim();
@@ -2837,7 +2997,9 @@ async function saveEntry(status, button) {
         body.fx_rate = String(form.elements.fx_rate?.value || '').trim();
         body.fx_currency = targetFxCur;
       }
-      body.status = state.entryKind === 'income' || (state.entryKind === 'public' && status !== 'draft') ? 'posted' : status;
+      body.status = state.editingReimbursed
+        ? (state.editingEntry?.status || 'pending')
+        : (state.entryKind === 'income' || (state.entryKind === 'public' && status !== 'draft') ? 'posted' : status);
       const entry = await api(state.editing ? `/entries/${state.editing}` : '/entries', state.editing ? 'PUT' : 'POST', body, {'Idempotency-Key': state.entryKey});
       if (file) {
         try {
@@ -2872,10 +3034,8 @@ async function openDetail(id) {
     const events = await api(`/entries/${id}/events`);
     const manageable = canManageEntry(e);
     const actions = [];
-    const editableIncome = e.kind === 'income' && e.status === 'posted';
-    const editableExpense = e.kind === 'expense' && !e.reimbursed_minor && (e.expense_type === 'public' ? ['draft', 'posted'] : ['draft', 'pending']).includes(e.status);
-    if (manageable && (editableIncome || editableExpense)) {
-      actions.push(`<button type="button" class="button button-outline" data-edit-entry="${id}">修改</button>`);
+    if (canEditEntry(e)) {
+      actions.push(`<button type="button" class="button button-outline" data-edit-entry="${id}">${hasReimbursements(e) ? '修改历史账目' : '修改'}</button>`);
     }
     if (!e.reimbursed_minor && !['reimbursed', 'voided'].includes(e.status) && manageable) {
       actions.push(`<button type="button" class="button button-outline button-danger-outline" data-action="void" data-id="${id}">作废</button>`);
@@ -2910,6 +3070,7 @@ async function openDetail(id) {
             <span class="badge ${e.kind === 'income' && e.income_type === 'capital' ? 'info' : 'neutral'}">${entryType(e)}</span>
           </div>
           <h3 class="detail-amount ${e.kind === 'income' ? 'income' : ''}">${e.kind === 'income' ? '+' : '−'} ${money(e.amount, e.currency)}</h3>
+          ${e.merchant_currency ? `<div class="detail-merchant-breakdown">${e.merchant_amount ? `商家标价 ${money(e.merchant_amount, e.merchant_currency)}（仅展示） · 实际付款 ${money(e.gross_amount, e.currency)}` : `商家货币 ${esc(e.merchant_currency)}（仅展示） · 付款货币 ${esc(e.currency)}`}</div>` : ''}
           ${(Number(e.fee_minor) > 0 || (e.fee_mode && e.fee_mode !== 'none')) ? `<div class="detail-fee-breakdown">原金额 ${money(e.gross_amount, e.currency)} ${e.kind === 'income' ? '−' : '+'} 手续费 ${money(e.fee_amount, e.currency)}${e.fee_mode === 'rate' && e.fee_rate ? `（${esc(e.fee_rate)}%）` : '（手动）'} = ${e.kind === 'income' ? '实收入账' : (e.expense_type === 'public' ? '公账实付' : '实付应报销')} ${money(e.amount, e.currency)}</div>` : ''}
           ${settlementDisplay(e)}
           <p class="detail-desc">${esc(entryDescription(e))}</p>
@@ -2919,6 +3080,7 @@ async function openDetail(id) {
         <section class="drawer-card">
           <h4>基本信息</h4>
           <dl class="detail-list">
+            ${e.merchant_currency ? `<div><dt>商家货币</dt><dd class="mono">${e.merchant_amount ? money(e.merchant_amount, e.merchant_currency) : esc(e.merchant_currency)} <small class="optional">仅展示</small></dd></div><div><dt>付款货币</dt><dd class="mono">${money(e.gross_amount, e.currency)}</dd></div>` : ''}
             ${(Number(e.fee_minor) > 0 || (e.fee_mode && e.fee_mode !== 'none')) ? `<div><dt>原金额（手续费前）</dt><dd class="mono">${money(e.gross_amount, e.currency)}</dd></div><div><dt>手续费</dt><dd class="mono">${feeDetailTag(e)}</dd></div>` : ''}
             ${e.fx_rate && e.fx_currency ? `<div><dt>外币汇率</dt><dd class="mono">手动指定 · 1 ${esc(e.currency)} = ${esc(e.fx_rate)} ${esc(e.fx_currency)}${e.fx_amount ? `（折合 ${money(e.fx_amount, e.fx_currency)}）` : ''}</dd></div>` : ''}
             <div><dt>${e.kind === 'income' && e.income_type === 'capital' ? '转入 / 经手成员' : (e.kind === 'income' || e.expense_type === 'public' ? '经手成员' : '垫付成员')}</dt><dd>${esc(e.payer_name)}</dd></div>
@@ -2928,7 +3090,8 @@ async function openDetail(id) {
             <div><dt>备注</dt><dd>${esc(e.note || '—')}</dd></div>
             ${e.review_note ? `<div><dt>处理备注</dt><dd>${esc(e.review_note)}</dd></div>` : ''}
           </dl>
-          ${manageable && (canManage() || !e.reimbursed_minor) && ['draft', 'pending', 'posted'].includes(e.status) ? `<label class="upload-zone detail-upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"><span>${e.receipt ? '替换凭证文件' : '补充发票或凭证'} <small>PNG / JPG / PDF，上限 6 MB</small></span></label>` : ''}
+          ${canUploadReceipt(e) ? `<label class="upload-zone detail-upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"><span>${e.receipt ? '替换凭证文件' : '补充发票或凭证'} <small>PNG / JPG / PDF，上限 6 MB</small></span></label>` : ''}
+          ${hasReimbursements(e) && !isOwner() && canManage() ? '<p class="detail-lock-hint">已有报销记录的历史账目已对财务锁定，如需修正请联系账本所有者修改。</p>' : ''}
         </section>
 
         ${paymentHistory(e)}
@@ -3028,7 +3191,7 @@ async function openAction(action, ids) {
   $('#action-note-label').hidden = action === 'submit';
   const base = state.conf.reference_currency;
   $('#action-payment-amounts').innerHTML = action === 'pay'
-    ? rows.map(e => `<div class="payment-item"><strong>#${e.id} ${esc(entryDescription(e))}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount, e.currency)} · 剩余 ${money(e.remaining_amount, e.currency)}</small><label><span>付款币种</span><select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">记账货币 · ${esc(e.currency)}</option>${base !== e.currency ? `<option value="${esc(base)}">结算货币 · ${esc(base)}</option>` : ''}</select></label><label><span>本次实付金额</span><input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join('')
+    ? rows.map(e => `<div class="payment-item"><strong>#${e.id} ${esc(entryDescription(e))}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount, e.currency)} · 剩余 ${money(e.remaining_amount, e.currency)}</small><label><span>付款币种</span><select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">付款货币 · ${esc(e.currency)}</option>${base !== e.currency ? `<option value="${esc(base)}">结算货币 · ${esc(base)}</option>` : ''}</select></label>${base !== e.currency ? `<div class="payment-fx-wrap" data-payment-fx-wrap="${e.id}" hidden><label><span>报销汇率 <small class="optional">不指定时使用系统汇率</small></span><div class="fx-rate-input-row"><span class="fx-rate-prefix">1 ${esc(e.currency)} =</span><input type="text" inputmode="decimal" autocomplete="off" data-payment-fx="${e.id}" value="${esc(e.fx_rate && e.fx_currency === base ? e.fx_rate : '')}" placeholder="留空使用系统参考汇率"><span class="fx-rate-suffix">${esc(base)}</span></div></label><div class="payment-fx-actions"><button type="button" class="pb-quick-btn" data-payment-fx-apply="${e.id}">应用汇率</button><button type="button" class="pb-quick-btn" data-payment-fx-reset="${e.id}">使用系统汇率</button></div></div>` : ''}<label><span>本次实付金额</span><input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join('')
     : '';
   $('#action-note-label > span').textContent = action === 'pay' ? '付款方式 / 参考号' : action === 'void' ? '作废原因' : '备注';
   $('#action-form [name=note]').required = ['pay', 'void'].includes(action);
@@ -3038,8 +3201,13 @@ async function openAction(action, ids) {
   if (action === 'pay') await Promise.all(rows.map(e => loadPaymentQuote(e.id, e.currency)));
 }
 
-async function loadPaymentQuote(id, code) {
+async function loadPaymentQuote(id, code, {fxRate = null, fxMode = null} = {}) {
   const action = state.action;
+  const entry = state.entries.find(item => item.id === id);
+  const fxWrap = $(`[data-payment-fx-wrap="${id}"]`);
+  const fxInput = $(`[data-payment-fx="${id}"]`);
+  const crossCurrency = Boolean(entry && code !== entry.currency);
+  if (fxWrap) fxWrap.hidden = !crossCurrency;
   action.loading++;
   delete action.quotes[id];
   $('#action-confirm').disabled = true;
@@ -3047,9 +3215,20 @@ async function loadPaymentQuote(id, code) {
   input.disabled = true;
   rateLabel.textContent = '正在取得付款换算…';
   $('#action-error').textContent = '';
+  const body = {ids: [id], currency: code};
+  const resolvedRate = fxRate !== null ? String(fxRate).trim() : (crossCurrency && fxMode !== 'auto' ? String(fxInput?.value || '').trim() : '');
+  if (crossCurrency) {
+    if (fxMode === 'auto') {
+      body.fx_mode = 'auto';
+    } else if (resolvedRate) {
+      body.fx_mode = 'manual';
+      body.fx_rate = resolvedRate;
+    }
+  }
   try {
-    const [quote] = await api('/entries/payment-quotes', 'POST', {ids: [id], currency: code});
+    const [quote] = await api('/entries/payment-quotes', 'POST', body);
     if (state.action !== action || $(`[data-payment-currency="${id}"]`).value !== code) return;
+    if (crossCurrency && fxInput && fxMode !== 'auto' && String(fxInput.value || '').trim() !== resolvedRate) return;
     action.quotes[id] = quote;
     input.step = 10 ** -quote.decimals;
     input.min = input.step;
@@ -3077,14 +3256,61 @@ function updatePaymentPreview() {
     const allocation = quote ? (value === Number(quote.maximum_amount) ? e.remaining_minor : Math.round(value / Number(quote.rate) * 10 ** e.decimals)) / 10 ** e.decimals : 0;
     $(`[data-payment-after="${e.id}"]`).innerHTML = valid
       ? `抵扣 ${money(allocation, e.currency)} · 登记后剩余 ${money(Math.max(0, Number(e.remaining_amount) - allocation), e.currency)}`
-      : '请输入大于 0 且不超过剩余待报销的金额';
+      : quote ? '请输入大于 0 且不超过剩余待报销的金额' : '等待汇率换算确认';
   });
 }
 
-$('#action-payment-amounts').addEventListener('input', updatePaymentPreview);
+$('#action-payment-amounts').addEventListener('input', event => {
+  if (event.target.matches('[data-payment-fx]')) {
+    const id = Number(event.target.dataset.paymentFx);
+    if (state.action) {
+      delete state.action.quotes[id];
+      $('#action-confirm').disabled = true;
+    }
+    const input = $(`[data-payment="${id}"]`);
+    const rateLabel = $(`[data-payment-rate="${id}"]`);
+    if (input) input.disabled = true;
+    if (rateLabel) rateLabel.textContent = '汇率已修改，请点击「应用汇率」或离开输入框更新换算';
+    updatePaymentPreview();
+    return;
+  }
+  updatePaymentPreview();
+});
 $('#action-payment-amounts').addEventListener('change', event => {
   if (event.target.matches('[data-payment-currency]')) {
     loadPaymentQuote(Number(event.target.dataset.paymentCurrency), event.target.value);
+    return;
+  }
+  if (event.target.matches('[data-payment-fx]')) {
+    const id = Number(event.target.dataset.paymentFx);
+    const code = $(`[data-payment-currency="${id}"]`)?.value;
+    if (code) loadPaymentQuote(id, code, {fxRate: event.target.value});
+  }
+});
+$('#action-payment-amounts').addEventListener('click', event => {
+  const applyBtn = event.target.closest('[data-payment-fx-apply]');
+  if (applyBtn) {
+    const id = Number(applyBtn.dataset.paymentFxApply);
+    const code = $(`[data-payment-currency="${id}"]`)?.value;
+    const val = $(`[data-payment-fx="${id}"]`)?.value || '';
+    if (code) loadPaymentQuote(id, code, {fxRate: val, fxMode: val.trim() ? 'manual' : 'auto'});
+    return;
+  }
+  const resetBtn = event.target.closest('[data-payment-fx-reset]');
+  if (resetBtn) {
+    const id = Number(resetBtn.dataset.paymentFxReset);
+    const code = $(`[data-payment-currency="${id}"]`)?.value;
+    const fxInput = $(`[data-payment-fx="${id}"]`);
+    if (fxInput) fxInput.value = '';
+    if (code) loadPaymentQuote(id, code, {fxRate: '', fxMode: 'auto'});
+  }
+});
+$('#action-payment-amounts').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target.matches('[data-payment-fx]')) {
+    event.preventDefault();
+    const id = Number(event.target.dataset.paymentFx);
+    const code = $(`[data-payment-currency="${id}"]`)?.value;
+    if (code) loadPaymentQuote(id, code, {fxRate: event.target.value, fxMode: event.target.value.trim() ? 'manual' : 'auto'});
   }
 });
 
@@ -3137,6 +3363,7 @@ function exportSpecFromForm() {
     kind: form.elements.kind.value || 'all',
     status: form.elements.status.value || 'all',
     currency: form.elements.currency.value || 'all',
+    merchant_currency: form.elements.merchant_currency?.value || 'all',
     payer: form.elements.payer.value || 'all',
     q: form.elements.q.value.trim(),
     base: form.elements.base.value || state.base || state.conf.reference_currency,
@@ -3155,6 +3382,7 @@ function exportMatchingEntries(spec) {
     if (spec.kind === 'public' && !(e.kind === 'expense' && e.expense_type === 'public')) return false;
     if (spec.kind === 'advance' && !(e.kind === 'expense' && e.expense_type === 'advance')) return false;
     if (spec.currency !== 'all' && e.currency !== spec.currency) return false;
+    if (spec.merchant_currency && spec.merchant_currency !== 'all' && (e.merchant_currency || '') !== spec.merchant_currency) return false;
     if (spec.payer !== 'all' && e.payer_id !== Number(spec.payer)) return false;
     if (spec.status === 'all') {
       if (e.status === 'voided') return false;
@@ -3168,7 +3396,7 @@ function exportMatchingEntries(spec) {
     if (spec.from && e.date < spec.from) return false;
     if (spec.to && e.date > spec.to) return false;
     if (needle) {
-      const hay = [`#${e.id}`, e.description, e.note, e.payer_name, e.review_note].join(' ').toLowerCase();
+      const hay = [`#${e.id}`, e.description, e.note, e.payer_name, e.review_note, e.merchant_currency, e.merchant_amount].join(' ').toLowerCase();
       if (!hay.includes(needle)) return false;
     }
     return true;
@@ -3220,6 +3448,7 @@ function updateExportPreview() {
       spec.kind !== 'all',
       spec.status !== 'all',
       spec.currency !== 'all',
+      spec.merchant_currency && spec.merchant_currency !== 'all',
       spec.payer !== 'all',
       Boolean(spec.q),
     ].filter(Boolean).length;
@@ -3267,6 +3496,7 @@ function applyExportPreset(preset) {
     form.elements.kind.value = 'all';
     form.elements.status.value = 'all';
     form.elements.currency.value = 'all';
+    if (form.elements.merchant_currency) form.elements.merchant_currency.value = 'all';
     form.elements.payer.value = 'all';
     form.elements.q.value = '';
   };
@@ -3278,6 +3508,7 @@ function applyExportPreset(preset) {
     form.elements.kind.value = f.kind || 'all';
     form.elements.status.value = f.status || 'all';
     form.elements.currency.value = f.currency || 'all';
+    if (form.elements.merchant_currency) form.elements.merchant_currency.value = f.merchant_currency || 'all';
     form.elements.payer.value = f.payer || 'all';
     form.elements.q.value = f.text || '';
   } else if (preset === 'all') {
@@ -3319,6 +3550,9 @@ function openExportDialog(source = 'overview', explicitIds = null) {
   ];
   form.elements.status.innerHTML = options(statusOptions, x => x[0], x => x[1], 'all');
   form.elements.currency.innerHTML = `<option value="all">全部币种</option>${options(state.conf.currencies, c => c.code, c => `${c.code} · ${c.name}`, 'all')}`;
+  if (form.elements.merchant_currency) {
+    form.elements.merchant_currency.innerHTML = `<option value="all">全部商家货币</option>${options(state.conf.currencies, c => c.code, c => `${c.code} · ${c.name}`, 'all')}`;
+  }
   form.elements.payer.innerHTML = `<option value="all">全部成员</option>${options(state.members, m => m.id, m => m.name, 'all')}`;
   form.elements.base.innerHTML = currencyOptions(state.base || state.conf.reference_currency);
   form.elements.include_receipts.checked = true;
@@ -3342,6 +3576,7 @@ function openExportDialog(source = 'overview', explicitIds = null) {
     form.elements.kind.value = 'advance';
     form.elements.status.value = state.reimburseTab || 'pending';
     form.elements.currency.value = 'all';
+    if (form.elements.merchant_currency) form.elements.merchant_currency.value = 'all';
     form.elements.payer.value = 'all';
     form.elements.q.value = '';
     renderExportPresets();
@@ -3375,6 +3610,7 @@ function buildExportUrl(spec) {
     if (spec.kind && spec.kind !== 'all') params.set('kind', spec.kind);
     if (spec.status && spec.status !== 'all') params.set('status', spec.status);
     if (spec.currency && spec.currency !== 'all') params.set('currency', spec.currency);
+    if (spec.merchant_currency && spec.merchant_currency !== 'all') params.set('merchant_currency', spec.merchant_currency);
     if (spec.payer && spec.payer !== 'all') params.set('payer', spec.payer);
     if (spec.from) params.set('from', spec.from);
     if (spec.to) params.set('to', spec.to);
@@ -3516,6 +3752,20 @@ document.addEventListener('click', async event => {
     entryKindChanged();
     return;
   }
+  if (b.hasAttribute('data-merchant-mode')) {
+    state.entryMerchantMode = b.dataset.merchantMode === 'different' ? 'different' : 'same';
+    if (state.entryMerchantMode === 'different') {
+      const form = $('#entry-form');
+      const payCode = form?.elements.currency?.value || state.conf.default_currency;
+      const mSel = $('#entry-merchant-currency');
+      if (mSel && (!mSel.value || mSel.value === payCode)) {
+        mSel.value = defaultMerchantCurrency(payCode);
+      }
+    }
+    updateFeeUi();
+    if (state.entryMerchantMode === 'different') setTimeout(() => $('#entry-merchant-amount')?.focus(), 20);
+    return;
+  }
   if (b.hasAttribute('data-fee-mode')) {
     state.entryFeeMode = ['rate', 'fixed'].includes(b.dataset.feeMode) ? b.dataset.feeMode : 'none';
     updateFeeUi();
@@ -3587,7 +3837,7 @@ document.addEventListener('click', async event => {
     return;
   }
   if (b.id === 'reset-filters') {
-    state.filter = {text: '', kind: 'all', currency: 'all', payer: 'all', status: 'all', from: '', to: ''};
+    state.filter = {text: '', kind: 'all', currency: 'all', merchant_currency: 'all', payer: 'all', status: 'all', from: '', to: ''};
     state.filterOpen = false;
     render();
     return;
@@ -3899,6 +4149,9 @@ document.addEventListener('input', event => {
   if (el.closest('#entry-form') && el.name === 'fx_rate') {
     updateFxUi();
   }
+  if (el.closest('#entry-form') && el.name === 'merchant_amount') {
+    updateMerchantUi();
+  }
   if (el.id === 'auth-team-name') {
     syncAuthExternalLink();
   }
@@ -3911,7 +4164,16 @@ document.addEventListener('change', async event => {
     state.entryFxCurrency = '';
     const fxInput = $('#entry-fx-rate');
     if (fxInput) fxInput.value = '';
+    const mSel = $('#entry-merchant-currency');
+    const mAmt = $('#entry-merchant-amount');
+    if (state.entryMerchantMode === 'different' && mSel && mSel.value === el.value && !String(mAmt?.value || '').trim()) {
+      mSel.value = defaultMerchantCurrency(el.value);
+    }
     updateFeeUi();
+    return;
+  }
+  if (el.closest('#entry-form') && el.name === 'merchant_currency') {
+    updateMerchantUi();
     return;
   }
   if (el.id === 'feishu-domain-preset') {

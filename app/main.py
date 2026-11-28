@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config, ai, ai_context, ai_plan, backups, excel_export, fx, oidc, permissions_sync
 from .backup_api import router as backup_router
 from .db import USER_ROLES, db, init_db, settings, remove_receipt_file, authenticated_session
-from .domain import (fail, admin, owner, is_finance, require_entry_access, public_user,
+from .domain import (fail, admin, owner, is_owner, is_finance, require_entry_access, public_user,
                      text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
                      save_settings, make_payment_quote, currency, receipt_media_type)
 
@@ -568,13 +568,35 @@ def payment_quotes(body: dict, request: Request):
         conf = settings(conn)
         entry_views = [entry_view(conn, entry_id) for entry_id in ids]
     code = body.get('currency', 'original')
+    raw_fx_mode = body.get('fx_mode')
+    raw_fx_rate = body.get('fx_rate')
+    raw_fx_rates = body.get('fx_rates')
+    if raw_fx_rates is not None and not isinstance(raw_fx_rates, dict):
+        fail('手动汇率参数格式不正确')
+
+    def entry_manual_rate(entry_id):
+        if isinstance(raw_fx_rates, dict):
+            val = raw_fx_rates.get(str(entry_id), raw_fx_rates.get(entry_id))
+            if val not in (None, ''):
+                return val
+        return raw_fx_rate if raw_fx_rate not in (None, '') else None
+
     codes = {
         e['currency'] for e in entry_views
-        if e['currency'] != code and not (e.get('fx_rate') and e.get('fx_currency') == code)
+        if e['currency'] != code
+        and not (entry_manual_rate(e['id']) is not None and raw_fx_mode != 'auto')
+        and not (raw_fx_mode != 'auto' and e.get('fx_rate') and e.get('fx_currency') == code)
     }
     rates = fx.rates_for(conf['reference_currency'], codes) if code == conf['reference_currency'] and codes else None
     with db(write=True) as conn:
-        return [make_payment_quote(conn, user, entry_id, code, rates) for entry_id in ids]
+        return [
+            make_payment_quote(
+                conn, user, entry_id, code, rates,
+                manual_fx_rate=entry_manual_rate(entry_id),
+                fx_mode=raw_fx_mode,
+            )
+            for entry_id in ids
+        ]
 
 
 @app.get('/api/entries/{entry_id}/events')
@@ -602,9 +624,13 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
         entry = conn.execute('SELECT * FROM entries WHERE id=?', (entry_id,)).fetchone()
         if not entry:
             fail('账目不存在', 404)
-        require_entry_access(user, entry)
-        if entry['status'] not in ('draft', 'pending', 'posted') or (entry['reimbursed_minor'] and not is_finance(user)):
-            fail('已报销或已作废的账目不能替换凭证', 409)
+        if entry['status'] == 'reimbursed':
+            if not is_owner(user):
+                fail('已报销的历史账目仅账本所有者可以补充或替换凭证', 403)
+        else:
+            require_entry_access(user, entry)
+            if entry['status'] not in ('draft', 'pending', 'posted') or (entry['reimbursed_minor'] and not is_finance(user)):
+                fail('已报销或已作废的账目不能替换凭证', 409)
         folder = config.DATA / 'receipts'
         folder.mkdir(exist_ok=True)
         filename = secrets.token_hex(24) + suffix
@@ -890,6 +916,7 @@ def export_excel(
     kind: str = 'all',
     status: str | None = None,
     currency: str = 'all',
+    merchant_currency: str = 'all',
     payer: str | None = None,
     date_from: str = Query(default='', alias='from'),
     date_to: str = Query(default='', alias='to'),
@@ -904,6 +931,7 @@ def export_excel(
         kind=kind,
         status=status,
         currency_code=currency,
+        merchant_currency=merchant_currency,
         payer_id=payer,
         date_from=date_from,
         date_to=date_to,

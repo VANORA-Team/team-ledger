@@ -421,6 +421,11 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
         original = Decimal(entry['amount_minor'] - entry['reimbursed_minor']) / (10 ** entry['decimals'])
         gross_minor = entry.get('gross_amount_minor') or entry['amount_minor']
         fee_minor = entry.get('fee_minor') or 0
+        m_cur = entry.get('merchant_currency') or ''
+        m_dec = entry.get('merchant_decimals') or 0
+        m_minor = entry.get('merchant_amount_minor') or 0
+        has_merchant = bool(m_cur and m_cur != entry['currency'])
+        m_amount_str = format(Decimal(m_minor) / (10 ** m_dec), f'.{m_dec}f') if (has_merchant and m_minor > 0) else ''
         groups[key]['entries'].append({
             'id': entry['id'],
             'selected': selected,
@@ -437,6 +442,9 @@ def calculate(entries, conf, fx, scenario=None, payments=None, reimbursement=Non
             'fx_mode': 'manual' if (entry.get('fx_rate') and entry.get('fx_currency')) else 'auto',
             'fx_rate': entry.get('fx_rate') or '',
             'fx_currency': entry.get('fx_currency') or '',
+            'merchant_mode': 'different' if has_merchant else 'same',
+            'merchant_currency': m_cur if has_merchant else '',
+            'merchant_amount': m_amount_str,
             'reimbursed_amount': format(Decimal(entry['reimbursed_minor']) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
             'settlement': formatted(amount),
             'suggested': formatted(portion),

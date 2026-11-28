@@ -161,6 +161,7 @@
         <button type="button" data-kind="expense" class="active" aria-pressed="true">成员垫付</button>
         <button type="button" data-kind="income" aria-pressed="false">团队收入</button>
       </div>
+      <div class="callout warning entry-reimbursed-banner" id="entry-reimbursed-banner" hidden></div>
       <div class="income-type-group" id="income-type-wrap" hidden>
         <div class="income-type-row">
           <span class="income-type-label">收入性质</span>
@@ -177,9 +178,31 @@
           <input name="amount" placeholder="0.00" inputmode="decimal" required autocomplete="off">
         </label>
         <label>
-          <span>币种</span>
+          <span id="entry-currency-label">币种</span>
           <select name="currency" required></select>
         </label>
+      </div>
+      <div class="merchant-group" id="merchant-group">
+        <div class="merchant-header-row">
+          <span class="merchant-label">商家货币 <small class="optional">商家界面显示</small></span>
+          <div class="segmented segmented-compact" id="entry-merchant-mode" role="group" aria-label="商家货币与付款货币">
+            <button type="button" data-merchant-mode="same" class="active" aria-pressed="true">与付款一致</button>
+            <button type="button" data-merchant-mode="different" aria-pressed="false">区分商家货币</button>
+          </div>
+        </div>
+        <div class="merchant-input-area" id="merchant-diff-wrap" hidden>
+          <div class="form-grid">
+            <label class="merchant-inline-field">
+              <span>商家标价金额 <small class="optional">选填</small></span>
+              <input name="merchant_amount" id="entry-merchant-amount" placeholder="0.00" inputmode="decimal" autocomplete="off">
+            </label>
+            <label class="merchant-inline-field">
+              <span>商家货币</span>
+              <select name="merchant_currency" id="entry-merchant-currency"></select>
+            </label>
+          </div>
+        </div>
+        <div class="merchant-preview" id="merchant-preview" aria-live="polite" hidden></div>
       </div>
       <div class="fee-group" id="fee-group">
         <div class="fee-header-row">
@@ -398,24 +421,28 @@
           </div>
           <div class="form-grid">
             <label>
-              <span>币种</span>
+              <span>付款 / 入账币种</span>
               <select name="currency"></select>
             </label>
             <label>
-              <span>成员 / 经手人</span>
-              <select name="payer"></select>
+              <span>商家货币</span>
+              <select name="merchant_currency"></select>
             </label>
           </div>
           <div class="form-grid">
             <label>
-              <span>关键词 <small class="optional">选填</small></span>
-              <input name="q" maxlength="120" placeholder="按用途、备注或成员筛选">
+              <span>成员 / 经手人</span>
+              <select name="payer"></select>
             </label>
             <label>
               <span>汇总参考币种</span>
               <select name="base"></select>
             </label>
           </div>
+          <label>
+            <span>关键词 <small class="optional">选填</small></span>
+            <input name="q" maxlength="120" placeholder="按用途、备注、成员或商家货币筛选">
+          </label>
         </div>
       </details>
       <label class="export-check-row">

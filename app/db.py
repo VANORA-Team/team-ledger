@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS entries (
  fee_minor INTEGER NOT NULL DEFAULT 0 CHECK(fee_minor>=0),
  currency TEXT NOT NULL, decimals INTEGER NOT NULL,
  fx_rate TEXT NOT NULL DEFAULT '', fx_currency TEXT NOT NULL DEFAULT '',
+ merchant_currency TEXT NOT NULL DEFAULT '', merchant_decimals INTEGER NOT NULL DEFAULT 0,
+ merchant_amount_minor INTEGER NOT NULL DEFAULT 0 CHECK(merchant_amount_minor>=0),
  description TEXT NOT NULL,
  category TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, payer_id INTEGER NOT NULL REFERENCES users(id),
  created_by INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL,
@@ -214,6 +216,12 @@ def _init_db():
             conn.execute("ALTER TABLE entries ADD COLUMN fx_rate TEXT NOT NULL DEFAULT ''")
         if 'fx_currency' not in entry_cols:
             conn.execute("ALTER TABLE entries ADD COLUMN fx_currency TEXT NOT NULL DEFAULT ''")
+        if 'merchant_currency' not in entry_cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN merchant_currency TEXT NOT NULL DEFAULT ''")
+        if 'merchant_decimals' not in entry_cols:
+            conn.execute('ALTER TABLE entries ADD COLUMN merchant_decimals INTEGER NOT NULL DEFAULT 0')
+        if 'merchant_amount_minor' not in entry_cols:
+            conn.execute('ALTER TABLE entries ADD COLUMN merchant_amount_minor INTEGER NOT NULL DEFAULT 0 CHECK(merchant_amount_minor>=0)')
         if 'domain' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_config)')}:
             conn.execute("ALTER TABLE feishu_config ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
         if 'attempts' not in {r[1] for r in conn.execute('PRAGMA table_info(feishu_outbox)')}:
@@ -238,6 +246,10 @@ def _init_db():
         conn.execute('UPDATE entries SET gross_amount_minor=amount_minor WHERE gross_amount_minor=0')
         conn.execute("UPDATE entries SET fee_mode='none', fee_rate='', fee_minor=0 WHERE fee_mode IS NULL OR fee_mode=''")
         conn.execute("UPDATE entries SET fx_rate='', fx_currency='' WHERE fx_rate IS NULL OR fx_rate='' OR fx_currency IS NULL OR fx_currency=''")
+        conn.execute(
+            "UPDATE entries SET merchant_currency='', merchant_decimals=0, merchant_amount_minor=0 "
+            "WHERE kind='income' OR merchant_currency IS NULL OR merchant_currency='' OR merchant_currency=currency"
+        )
         # Earlier versions only supported full payments. Preserve their dates and notes,
         # and create exactly one payment record without rewriting their audit history.
         conn.execute("""INSERT OR IGNORE INTO payments(entry_id,user_id,amount_minor,currency,decimals,note,entry_amount_minor,fx_rate,fx_date,source_key,created_at)

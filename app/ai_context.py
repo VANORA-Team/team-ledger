@@ -39,6 +39,11 @@ def _compact(row):
     if row['fx_rate'] and row['fx_currency']:
         item['fx_rate'] = row['fx_rate']
         item['fx_currency'] = row['fx_currency']
+    if row['merchant_currency'] and row['merchant_currency'] != row['currency']:
+        item['merchant_currency'] = row['merchant_currency']
+        if row['merchant_amount_minor']:
+            m_dec = row['merchant_decimals'] or 0
+            item['merchant_amount'] = format(Decimal(row['merchant_amount_minor']) / (10 ** m_dec), f'.{m_dec}f')
     if row['kind'] == 'expense' and row['expense_type'] == 'advance':
         item['remaining'] = _amount(row, row['amount_minor'] - row['reimbursed_minor'])
         if row['reimbursed_minor']:
@@ -50,7 +55,8 @@ def _compact(row):
 
 def _rows(conn, where='', params=(), limit=None):
     sql = ('SELECT e.id,e.kind,e.expense_type,e.income_type,e.amount_minor,e.gross_amount_minor,'
-           'e.fee_mode,e.fee_rate,e.fee_minor,e.currency,e.decimals,e.fx_rate,e.fx_currency,e.description,e.date,'
+           'e.fee_mode,e.fee_rate,e.fee_minor,e.currency,e.decimals,e.fx_rate,e.fx_currency,'
+           'e.merchant_currency,e.merchant_decimals,e.merchant_amount_minor,e.description,e.date,'
            'e.status,e.reimbursed_minor,e.note,u.name payer_name '
            'FROM entries e JOIN users u ON u.id=e.payer_id ' + where +
            ' ORDER BY e.date DESC,e.id DESC')
@@ -104,7 +110,7 @@ def build(conn, conf, user, limit=None):
     ai_cfg = ai.load_config(conn)
     context = {
         'timezone': config.TIMEZONE,
-        'current_user': {'id': user['id'], 'name': user['name']},
+        'current_user': {'id': user['id'], 'name': user['name'], 'role': user['role']},
         'currencies': currencies(conf),
         'members': members(conn),
         'entries': entries(conn, limit or ai_cfg['context_entries']),

@@ -26,6 +26,10 @@ def text_value(value, label, limit=200, required=True):
     return value
 
 
+def is_owner(user):
+    return bool(user['active'] and user['role'] == 'owner')
+
+
 def is_finance(user):
     return bool(user['active'] and user['role'] in ('owner', 'finance'))
 
@@ -36,8 +40,19 @@ def admin(user):
 
 
 def owner(user):
-    if not user['active'] or user['role'] != 'owner':
+    if not is_owner(user):
         fail('此操作需要账本所有者权限', 403)
+
+
+def has_reimbursements(entry):
+    keys = entry.keys()
+    expense_type = entry['expense_type'] if 'expense_type' in keys else 'advance'
+    reimbursed = entry['reimbursed_minor'] if 'reimbursed_minor' in keys else 0
+    return bool(
+        entry['kind'] == 'expense'
+        and expense_type == 'advance'
+        and (reimbursed or entry['status'] == 'reimbursed')
+    )
 
 
 def can_manage_entry(user, entry):
@@ -50,6 +65,38 @@ def can_manage_entry(user, entry):
 def require_entry_access(user, entry):
     if not can_manage_entry(user, entry):
         fail('仅财务管理员可管理这笔账目', 403)
+
+
+def can_edit_entry(user, entry):
+    if not user['active']:
+        return False
+    if entry['kind'] == 'income':
+        return entry['status'] == 'posted' and can_manage_entry(user, entry)
+    if entry['status'] == 'voided':
+        return False
+    if has_reimbursements(entry):
+        return is_owner(user)
+    allowed = ('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')
+    return entry['status'] in allowed and can_manage_entry(user, entry)
+
+
+def require_entry_edit_access(user, entry):
+    if entry['kind'] == 'income':
+        require_entry_access(user, entry)
+        if entry['status'] != 'posted':
+            fail('仅已入账的收入可以修改', 409)
+        return
+    if entry['status'] == 'voided':
+        require_entry_access(user, entry)
+        fail('已作废的账目不能修改', 409)
+    if has_reimbursements(entry):
+        if not is_owner(user):
+            fail('已有报销记录的历史账目仅账本所有者可以修改', 403)
+        return
+    require_entry_access(user, entry)
+    allowed = ('draft', 'posted') if entry['expense_type'] == 'public' else ('draft', 'pending')
+    if entry['status'] not in allowed:
+        fail('仅没有报销记录的支出可以修改', 409)
 
 
 def public_user(user):
@@ -85,6 +132,7 @@ def minor_amount(value, decimals, *, allow_zero=False, label='金额'):
 INCOME_TYPES = ('operating', 'capital')
 FEE_MODES = ('none', 'rate', 'fixed')
 FX_MODES = ('auto', 'manual')
+MERCHANT_MODES = ('same', 'different')
 
 
 def income_type_label(income_type):
@@ -137,6 +185,46 @@ def compute_fx(cur_code, conf, body):
 
     _, rate_str = parse_fx_rate(raw_rate)
     return rate_str, target_code
+
+
+def compute_merchant(kind, cur_code, pay_decimals, gross_minor, conf, body):
+    raw_mode = body.get('merchant_mode', None)
+    raw_cur = body.get('merchant_currency', None)
+    raw_amt = body.get('merchant_amount', None)
+    has_cur = raw_cur is not None and str(raw_cur).strip() != ''
+    has_amt = raw_amt is not None and str(raw_amt).strip() != ''
+
+    if raw_mode is not None and raw_mode != '':
+        if not isinstance(raw_mode, str) or raw_mode not in MERCHANT_MODES:
+            fail('商家货币方式请选择与付款一致或区分商家货币')
+        if raw_mode == 'same':
+            return '', 0, 0
+        if kind != 'expense':
+            fail('仅支出账目支持区分商家货币与付款货币')
+        if not has_cur:
+            fail('请选择商家货币，或切换为与付款货币一致')
+    elif not has_cur and not has_amt:
+        return '', 0, 0
+    else:
+        if kind != 'expense':
+            fail('仅支出账目支持区分商家货币与付款货币')
+        if not has_cur:
+            fail('填写商家金额时请同时选择商家货币')
+
+    if not isinstance(raw_cur, str):
+        fail('商家货币格式不正确')
+    m_cur = currency(conf, raw_cur.strip().upper())
+    if m_cur['code'] == cur_code:
+        if raw_mode == 'different':
+            fail('商家货币不能与付款货币相同，请选择不同币种或切换为与付款一致')
+        if has_amt:
+            m_minor = minor_amount(raw_amt, pay_decimals, label='商家金额')
+            if m_minor != gross_minor:
+                fail('商家货币与付款货币一致时，商家金额需与付款金额相同或留空')
+        return '', 0, 0
+
+    m_minor = minor_amount(raw_amt, m_cur['decimals'], label='商家金额') if has_amt else 0
+    return m_cur['code'], m_cur['decimals'], m_minor
 
 
 def parse_fee_rate(value):
@@ -219,7 +307,7 @@ def signed_minor_amount(value, decimals):
         fail('金额格式不正确')
 
 
-def normalized_entry(conn, user, body):
+def normalized_entry(conn, user, body, *, existing_payer_id=None):
     conf = settings(conn)
     kind = body.get('kind', 'expense')
     if kind not in ('expense', 'income'):
@@ -232,11 +320,20 @@ def normalized_entry(conn, user, body):
         fail('收入请选择营业收入或公户转入')
     if kind == 'income' or expense_type == 'public':
         admin(user)
-    cur = currency(conf, body.get('currency', conf['default_currency']))
+    raw_cur = body.get('currency')
+    raw_pay_cur = body.get('payment_currency')
+    if raw_cur not in (None, '') and raw_pay_cur not in (None, ''):
+        if raw_cur != raw_pay_cur:
+            fail('付款货币与币种参数不一致')
+    chosen_cur = raw_cur if raw_cur not in (None, '') else (raw_pay_cur if raw_pay_cur not in (None, '') else conf['default_currency'])
+    cur = currency(conf, chosen_cur)
     gross_raw = body['gross_amount'] if body.get('gross_amount') not in (None, '') else body.get('amount', '')
     gross_minor = minor_amount(gross_raw, cur['decimals'])
     fee_mode, fee_rate, fee_minor, amount = compute_fee(kind, gross_minor, cur['decimals'], body)
     fx_rate, fx_currency = compute_fx(cur['code'], conf, body)
+    merchant_currency, merchant_decimals, merchant_amount_minor = compute_merchant(
+        kind, cur['code'], cur['decimals'], gross_minor, conf, body
+    )
     description = text_value(body.get('description', ''), '用途 / 收入说明', 120, False)
     try:
         entry_date = date.fromisoformat(body.get('date', ''))
@@ -249,7 +346,10 @@ def normalized_entry(conn, user, body):
         fail('成员格式不正确')
     if payer_id != user['id']:
         admin(user)
-    if not conn.execute('SELECT id FROM users WHERE id=? AND active=1', (payer_id,)).fetchone():
+    if existing_payer_id is not None and payer_id == existing_payer_id:
+        if not conn.execute('SELECT id FROM users WHERE id=?', (payer_id,)).fetchone():
+            fail('成员不存在或已停用')
+    elif not conn.execute('SELECT id FROM users WHERE id=? AND active=1', (payer_id,)).fetchone():
         fail('成员不存在或已停用')
     direct = kind == 'income' or expense_type == 'public'
     status = body.get('status', 'posted' if direct else 'pending')
@@ -265,6 +365,8 @@ def normalized_entry(conn, user, body):
             'fee_mode': fee_mode, 'fee_rate': fee_rate, 'fee_minor': fee_minor,
             'currency': cur['code'], 'decimals': cur['decimals'],
             'fx_rate': fx_rate, 'fx_currency': fx_currency,
+            'merchant_currency': merchant_currency, 'merchant_decimals': merchant_decimals,
+            'merchant_amount_minor': merchant_amount_minor,
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
 
@@ -299,6 +401,22 @@ def entry_view(conn, entry_id):
         result['fx_currency'] = ''
         result['fx_amount'] = ''
     result['amount'] = amount(row['amount_minor'])
+    result['payment_currency'] = row['currency']
+    m_cur = row['merchant_currency'] or ''
+    m_dec = row['merchant_decimals'] or 0
+    m_minor = row['merchant_amount_minor'] or 0
+    if row['kind'] == 'expense' and m_cur and m_cur != row['currency']:
+        result['merchant_mode'] = 'different'
+        result['merchant_currency'] = m_cur
+        result['merchant_decimals'] = m_dec
+        result['merchant_amount_minor'] = m_minor
+        result['merchant_amount'] = format(Decimal(m_minor) / (10 ** m_dec), f'.{m_dec}f') if m_minor > 0 else ''
+    else:
+        result['merchant_mode'] = 'same'
+        result['merchant_currency'] = ''
+        result['merchant_decimals'] = 0
+        result['merchant_amount_minor'] = 0
+        result['merchant_amount'] = ''
     result['reimbursed_amount'] = amount(row['reimbursed_minor'])
     result['remaining_minor'] = row['amount_minor'] - row['reimbursed_minor'] if row['kind'] == 'expense' and row['expense_type'] == 'advance' else 0
     result['remaining_amount'] = amount(result['remaining_minor'])
@@ -340,7 +458,7 @@ def add_entry(conn, user, body, source='web', source_key=None):
     return entry_view(conn, cursor.lastrowid)
 
 
-def make_payment_quote(conn, user, entry_id, code, fx=None):
+def make_payment_quote(conn, user, entry_id, code, fx=None, manual_fx_rate=None, fx_mode=None):
     admin(user)
     entry, conf = entry_view(conn, entry_id), settings(conn)
     if entry['kind'] != 'expense' or entry['expense_type'] != 'advance' or entry['status'] != 'pending':
@@ -349,24 +467,36 @@ def make_payment_quote(conn, user, entry_id, code, fx=None):
     if code not in (entry['currency'], conf['reference_currency']):
         fail('请选择记账货币或团队结算货币')
     cur = currency(conf, code)
-    rate, rate_date, rate_source = Decimal(1), None, 'same'
-    if code != entry['currency']:
-        if entry.get('fx_rate') and entry.get('fx_currency') == code:
-            rate, rate_date, rate_source = Decimal(entry['fx_rate']), None, 'manual'
+    has_manual_rate = manual_fx_rate is not None and str(manual_fx_rate).strip() != ''
+    if fx_mode not in (None, ''):
+        if not isinstance(fx_mode, str) or fx_mode not in FX_MODES:
+            fail('汇率方式请选择自动参考汇率或手动指定')
+    rate, rate_str, rate_date, rate_source = Decimal(1), '1', None, 'same'
+    if code == entry['currency']:
+        if has_manual_rate:
+            fail('报销付款币种与记账币种一致，无需手动指定汇率')
+    else:
+        if has_manual_rate and fx_mode != 'auto':
+            rate, rate_str = parse_fx_rate(manual_fx_rate)
+            rate_date, rate_source = None, 'manual'
+        elif fx_mode == 'manual':
+            fail('请填写报销汇率，或留空使用系统参考汇率')
+        elif fx_mode != 'auto' and entry.get('fx_rate') and entry.get('fx_currency') == code:
+            rate, rate_str, rate_date, rate_source = Decimal(entry['fx_rate']), entry['fx_rate'], None, 'manual'
         else:
             row = (fx or {}).get('rates', {}).get(entry['currency'])
             if not row or fx.get('base') != code or fx.get('stale') or fx.get('missing'):
-                fail('暂无有效汇率，不能按结算货币登记，请刷新汇率或选择记账货币')
-            rate, rate_date, rate_source = Decimal(row['rate']), row['date'], 'reference'
+                fail('暂无有效汇率，不能按结算货币登记，请刷新汇率、手动指定报销汇率或选择记账货币')
+            rate, rate_str, rate_date, rate_source = Decimal(row['rate']), str(Decimal(row['rate'])), row['date'], 'reference'
     maximum = int((Decimal(entry['remaining_minor']) / (10 ** entry['decimals']) * rate * (10 ** cur['decimals'])).quantize(Decimal(1), rounding=ROUND_HALF_UP))
     if maximum <= 0:
         fail('剩余金额小于该币种最小单位，请按记账货币报销')
     token, expires = secrets.token_urlsafe(24), int(time.time()) + 1800
     conn.execute('DELETE FROM payment_quotes WHERE expires<?', (int(time.time()) - 86400,))
     conn.execute('INSERT INTO payment_quotes VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                 (token, entry_id, user['id'], entry['version'], code, cur['decimals'], str(rate), rate_date, entry['remaining_minor'], maximum, expires))
+                 (token, entry_id, user['id'], entry['version'], code, cur['decimals'], rate_str, rate_date, entry['remaining_minor'], maximum, expires))
     return {'id': token, 'entry_id': entry_id, 'version': entry['version'], 'currency': code, 'decimals': cur['decimals'],
-            'rate': str(rate), 'rate_date': rate_date, 'rate_source': rate_source,
+            'rate': rate_str, 'rate_date': rate_date, 'rate_source': rate_source,
             'remaining_amount': entry['remaining_amount'], 'entry_currency': entry['currency'],
             'maximum_amount': format(Decimal(maximum) / (10 ** cur['decimals']), f'.{cur["decimals"]}f'), 'expires': expires}
 
@@ -459,19 +589,86 @@ def delete_entry(conn, user, entry_id):
     return row['receipt']
 
 
+def _edit_audit_detail(conn, old, data, reimbursed_flow):
+    changes = []
+
+    def fmt_minor(units, dec):
+        return format(Decimal(units) / (10 ** dec), f'.{dec}f')
+
+    new_amount = fmt_minor(data['amount_minor'], data['decimals'])
+    if data['amount_minor'] != old['amount_minor'] or data['currency'] != old['currency']:
+        changes.append(f'金额 {old["amount"]} {old["currency"]} → {new_amount} {data["currency"]}')
+    old_fee = (old['fee_mode'], old['fee_rate'], old['fee_minor'])
+    new_fee = (data['fee_mode'], data['fee_rate'], data['fee_minor'])
+    if new_fee != old_fee:
+        def fee_desc(mode, rate, minor, dec, code):
+            if mode == 'none' or not minor:
+                return '无'
+            amt = fmt_minor(minor, dec)
+            return f'{rate}%（{amt} {code}）' if mode == 'rate' and rate else f'{amt} {code}'
+        changes.append(
+            f'手续费 {fee_desc(old["fee_mode"], old["fee_rate"], old["fee_minor"], old["decimals"], old["currency"])}'
+            f' → {fee_desc(data["fee_mode"], data["fee_rate"], data["fee_minor"], data["decimals"], data["currency"])}'
+        )
+    if (data['fx_rate'], data['fx_currency']) != (old['fx_rate'], old['fx_currency']):
+        def fx_desc(rate, target, code):
+            return f'1 {code} = {rate} {target}' if (rate and target) else '自动参考'
+        changes.append(
+            f'汇率 {fx_desc(old["fx_rate"], old["fx_currency"], old["currency"])}'
+            f' → {fx_desc(data["fx_rate"], data["fx_currency"], data["currency"])}'
+        )
+    old_merchant = (old.get('merchant_currency') or '', old.get('merchant_amount_minor') or 0)
+    new_merchant = (data.get('merchant_currency') or '', data.get('merchant_amount_minor') or 0)
+    if new_merchant != old_merchant:
+        def merchant_desc(cur_code, amt_minor, dec):
+            if not cur_code:
+                return '同付款币种'
+            if amt_minor:
+                return f'{fmt_minor(amt_minor, dec)} {cur_code}'
+            return cur_code
+        changes.append(
+            f'商家货币 {merchant_desc(old.get("merchant_currency") or "", old.get("merchant_amount_minor") or 0, old.get("merchant_decimals") or 0)}'
+            f' → {merchant_desc(data.get("merchant_currency") or "", data.get("merchant_amount_minor") or 0, data.get("merchant_decimals") or 0)}'
+        )
+    if old['kind'] == 'expense' and data['expense_type'] != old['expense_type']:
+        labels = {'public': '公账支出', 'advance': '成员垫付'}
+        changes.append(
+            f'支出方式 {labels.get(old["expense_type"], old["expense_type"])}'
+            f' → {labels.get(data["expense_type"], data["expense_type"])}'
+        )
+    if old['kind'] == 'income' and data['income_type'] != (old.get('income_type') or 'operating'):
+        changes.append(f'收入性质 {income_type_label(old.get("income_type"))} → {income_type_label(data["income_type"])}')
+    if data['date'] != old['date']:
+        changes.append(f'日期 {old["date"]} → {data["date"]}')
+    if data['payer_id'] != old['payer_id']:
+        row = conn.execute('SELECT name FROM users WHERE id=?', (data['payer_id'],)).fetchone()
+        new_name = row['name'] if row else f'#{data["payer_id"]}'
+        changes.append(f'成员 {old["payer_name"]} → {new_name}')
+    if data['description'] != old['description']:
+        changes.append(f'用途 {old["description"] or "未填写说明"} → {data["description"] or "未填写说明"}')
+    if data['note'] != old['note']:
+        changes.append('备注已更新')
+    if data['status'] != old['status']:
+        def status_cn(st, reimb):
+            if st == 'pending' and reimb:
+                return '部分报销'
+            return {'draft': '草稿', 'pending': '待报销', 'reimbursed': '已报销', 'posted': '已入账', 'voided': '已作废'}.get(st, st)
+        changes.append(f'状态 {status_cn(old["status"], old["reimbursed_minor"])} → {status_cn(data["status"], old["reimbursed_minor"])}')
+    summary = '；'.join(changes)
+    if reimbursed_flow:
+        return ('所有者修改已报销历史账目：' + (summary or '核对保存'))[:500]
+    return summary[:500]
+
+
 def edit_entry(conn, user, entry_id, body):
     old = entry_view(conn, entry_id)
-    require_entry_access(user, old)
-    if old['kind'] == 'income':
-        if old['status'] != 'posted':
-            fail('仅已入账的收入可以修改', 409)
-    else:
-        allowed = ('draft', 'posted') if old['expense_type'] == 'public' else ('draft', 'pending')
-        if old['status'] not in allowed or old['reimbursed_minor']:
-            fail('仅没有报销记录的支出可以修改', 409)
+    require_entry_edit_access(user, old)
+    reimbursed_flow = has_reimbursements(old)
     merged = dict(body)
     if old['kind'] == 'expense':
         merged['expense_type'] = body.get('expense_type', old['expense_type'])
+        if reimbursed_flow and merged['expense_type'] != old['expense_type']:
+            fail('已有报销记录的支出不能更改支出方式', 409)
     else:
         merged['income_type'] = body.get('income_type', old.get('income_type') or 'operating')
     has_fee_input = any(k in body for k in ('fee_mode', 'fee_rate', 'fee_amount'))
@@ -481,8 +678,26 @@ def edit_entry(conn, user, entry_id, body):
             merged['fee_rate'] = old['fee_rate']
         elif old['fee_mode'] == 'fixed':
             merged['fee_amount'] = old['fee_amount']
+    if 'currency' in body and 'payment_currency' in body:
+        if body.get('payment_currency') == old['currency'] and body.get('currency') != old['currency']:
+            merged.pop('payment_currency', None)
+        elif body.get('currency') == old['currency'] and body.get('payment_currency') != old['currency']:
+            merged['currency'] = body['payment_currency']
+    elif 'payment_currency' in body and 'currency' not in body and body.get('payment_currency') not in (None, ''):
+        merged['currency'] = body['payment_currency']
+    if reimbursed_flow:
+        if 'currency' not in merged and 'payment_currency' not in merged:
+            merged['currency'] = old['currency']
+        raw_status = body.get('status')
+        if raw_status == 'draft':
+            fail('已有报销记录的账目不能转为草稿', 409)
+        if raw_status not in (None, '', 'pending', 'reimbursed', 'submitted'):
+            fail('已有报销记录的账目状态无效')
+        merged['status'] = 'pending'
     new_currency = merged.get('currency', old['currency'])
     currency_changed = new_currency != old['currency']
+    if reimbursed_flow and currency_changed:
+        fail('已有报销记录的账目不能修改记账币种', 409)
     has_fx_input = any(k in body for k in ('fx_mode', 'fx_rate', 'fx_currency'))
     if not has_fx_input:
         if not currency_changed and old['fx_rate'] and old['fx_currency']:
@@ -505,6 +720,41 @@ def edit_entry(conn, user, entry_id, body):
             merged['fx_mode'] = 'auto'
             merged['fx_rate'] = ''
             merged['fx_currency'] = ''
+    has_merchant_input = any(k in body for k in ('merchant_mode', 'merchant_currency', 'merchant_amount'))
+    if old['kind'] != 'expense':
+        if not has_merchant_input:
+            merged['merchant_mode'] = 'same'
+            merged.pop('merchant_currency', None)
+            merged.pop('merchant_amount', None)
+    elif not has_merchant_input:
+        if old.get('merchant_currency') and new_currency != old['merchant_currency']:
+            merged['merchant_mode'] = 'different'
+            merged['merchant_currency'] = old['merchant_currency']
+            merged['merchant_amount'] = old.get('merchant_amount') or ''
+        else:
+            merged['merchant_mode'] = 'same'
+            merged['merchant_currency'] = ''
+            merged['merchant_amount'] = ''
+    else:
+        raw_m_mode = body.get('merchant_mode')
+        raw_m_cur = body.get('merchant_currency')
+        raw_m_amt = body.get('merchant_amount')
+        if raw_m_mode == 'same' and old.get('merchant_mode') == 'same' and (raw_m_cur not in (None, '') or raw_m_amt not in (None, '')):
+            # Support callers doing PUT {**entry, 'merchant_currency': 'USD', 'merchant_amount': '20'} without flipping merchant_mode.
+            merged['merchant_mode'] = 'different'
+        elif (currency_changed and new_currency == old.get('merchant_currency')
+              and raw_m_mode == old.get('merchant_mode')
+              and raw_m_cur == old.get('merchant_currency')
+              and raw_m_amt == old.get('merchant_amount')):
+            # Support callers doing PUT {**entry, 'currency': old_merchant_currency} without clearing merchant fields.
+            merged['merchant_mode'] = 'same'
+            merged['merchant_currency'] = ''
+            merged['merchant_amount'] = ''
+        elif raw_m_mode == 'different' and 'merchant_currency' not in body and old.get('merchant_currency'):
+            merged['merchant_currency'] = old['merchant_currency']
+        elif 'merchant_amount' in body and 'merchant_currency' not in body and 'merchant_mode' not in body and old.get('merchant_currency'):
+            merged['merchant_mode'] = 'different'
+            merged['merchant_currency'] = old['merchant_currency']
     has_gross = body.get('gross_amount') not in (None, '')
     has_amount = body.get('amount') not in (None, '')
     if not has_gross and not has_amount:
@@ -530,12 +780,23 @@ def edit_entry(conn, user, entry_id, body):
                 keep_gross = False
             if not keep_gross:
                 merged['gross_amount'] = body['amount']
-    data = normalized_entry(conn, user, merged)
+    data = normalized_entry(conn, user, merged, existing_payer_id=old['payer_id'])
     if data['kind'] != old['kind']:
         fail('不支持更改账目类型')
-    conn.execute('UPDATE entries SET ' + ','.join(f'{k}=?' for k in data) + ',review_note=?,updated_at=? WHERE id=?',
-                 list(data.values()) + ['', now(), entry_id])
-    audit(conn, entry_id, user['id'], 'edited')
+    if reimbursed_flow:
+        if data['amount_minor'] < old['reimbursed_minor']:
+            fail(f'修改后的实付总额不能低于累计已报销金额（{old["reimbursed_amount"]} {old["currency"]}）', 409)
+        data['status'] = 'reimbursed' if data['amount_minor'] == old['reimbursed_minor'] else 'pending'
+        updates = dict(data)
+        if updates['status'] == 'reimbursed' and not old.get('paid_at'):
+            last_pay = conn.execute('SELECT created_at FROM payments WHERE entry_id=? ORDER BY id DESC LIMIT 1', (entry_id,)).fetchone()
+            updates['paid_at'] = last_pay['created_at'] if last_pay else now()
+        conn.execute('UPDATE entries SET ' + ','.join(f'{k}=?' for k in updates) + ',updated_at=? WHERE id=?',
+                     list(updates.values()) + [now(), entry_id])
+    else:
+        conn.execute('UPDATE entries SET ' + ','.join(f'{k}=?' for k in data) + ',review_note=?,updated_at=? WHERE id=?',
+                     list(data.values()) + ['', now(), entry_id])
+    audit(conn, entry_id, user['id'], 'edited', _edit_audit_detail(conn, old, data, reimbursed_flow))
     return entry_view(conn, entry_id)
 
 
@@ -555,13 +816,23 @@ def save_settings(conn, user, body):
         decimals = cur.get('decimals', 2)
         if type(decimals) is not int or decimals not in (0, 2, 3, 4) or code in codes:
             fail('币种不能重复，小数位支持 0、2、3、4')
-        used = conn.execute('SELECT decimals FROM entries WHERE currency=? UNION ALL SELECT decimals FROM payments WHERE currency=? LIMIT 1', (code, code)).fetchone()
+        used = conn.execute(
+            'SELECT decimals FROM entries WHERE currency=? '
+            'UNION ALL SELECT decimals FROM payments WHERE currency=? '
+            'UNION ALL SELECT merchant_decimals AS decimals FROM entries WHERE merchant_currency=? LIMIT 1',
+            (code, code, code),
+        ).fetchone()
         if used and used['decimals'] != decimals:
             fail(f'{code} 已有账目，不能修改其小数位')
         codes.add(code)
         clean.append({'code': code, 'decimals': decimals, 'name': text_value(cur.get('name', code), '币种名称', 20),
                       'symbol': text_value(cur.get('symbol', code), '货币符号', 8)})
-    for row in conn.execute("SELECT currency FROM entries UNION SELECT currency FROM payments UNION SELECT fx_currency FROM entries WHERE fx_currency<>''"):
+    for row in conn.execute(
+        "SELECT currency FROM entries "
+        "UNION SELECT currency FROM payments "
+        "UNION SELECT fx_currency AS currency FROM entries WHERE fx_currency<>'' "
+        "UNION SELECT merchant_currency AS currency FROM entries WHERE merchant_currency<>''"
+    ):
         if row['currency'] not in codes:
             fail(f'{row["currency"]} 已有账目，不能移除')
     default = body.get('default_currency', conf['default_currency'])

@@ -5,10 +5,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from tests import test_ledger as base
 from app.db import db, init_db, set_setting
 from app.domain import transition
+from app.main import app
 
 
 class PartialPaymentTest(unittest.TestCase):
@@ -40,7 +42,15 @@ class PartialPaymentTest(unittest.TestCase):
         self.assertEqual(report['members'][0]['entries'][0]['amount'],'60.00')
         self.assertEqual(report['balances'],{'CNY':'1000','USD':'-40'})
         self.assertEqual(self.action(entry,'void','已付款不可作废').status_code,409)
-        self.assertEqual(self.client.put('/api/entries/'+str(entry['id']),json={**entry,'amount':'200'},headers=self.headers).status_code,409)
+        self.assertEqual(self.client.put('/api/entries/'+str(entry['id']),json={**entry,'amount':'30'},headers=self.headers).status_code,409)
+        self.assertEqual(self.client.put('/api/entries/'+str(entry['id']),json={**entry,'currency':'CNY'},headers=self.headers).status_code,409)
+        self.new_member(sub='vanora-fin-partial', username='finpartial', name='财务', role='finance')
+        with TestClient(app) as fin_client:
+            fin_session = self.login_as(fin_client, 'vanora-fin-partial', preferred_username='finpartial', name='财务', roles=('finance',))
+            self.assertEqual(
+                fin_client.put('/api/entries/'+str(entry['id']),json={**entry,'amount':'200'},headers={'X-CSRF-Token':fin_session['csrf']}).status_code,
+                403,
+            )
         full = self.pay(self.quote(entry),'60').json()[0]
         self.assertEqual((full['status'],full['reimbursed_minor'],full['remaining_amount']),('reimbursed',10000,'0.00'))
         self.assertEqual([p['amount'] for p in full['payments']],['40.00','60.00'])
